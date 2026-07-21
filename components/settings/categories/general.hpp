@@ -36,6 +36,14 @@ namespace Settings
             makeEnumSanitizerString({ "performance", "balanced", "high", "off" }) };
         // Vita: keep DXT compressed on GPU; false restores decompress path.
         SettingValue<bool> mVitaKeepCompressedTextures{ mIndex, "General", "vita keep compressed textures", true };
+        // Vita: VBOs for static geometry; false restores client arrays.
+        SettingValue<bool> mVitaStaticGeometryVbo{ mIndex, "General", "vita static geometry vbo", true };
+        // Vita: heap MB held back from the watchdog budget. Raise to test eviction.
+        SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 40,
+            makeClampSanitizerInt(20, 150) };
+        // Vita: full cache clear at grid change only above this heap usage.
+        SettingValue<int> mVitaFlushThresholdMb{ mIndex, "General", "vita flush threshold mb", 225,
+            makeClampSanitizerInt(0, 272) };
         SettingValue<bool> mNotifyOnSavedScreenshot{ mIndex, "General", "notify on saved screenshot" };
         SettingValue<std::vector<std::string>> mPreferredLocales{ mIndex, "General", "preferred locales" };
         SettingValue<bool> mGmstOverridesL10n{ mIndex, "General", "gmst overrides l10n" };

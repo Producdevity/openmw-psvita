@@ -168,8 +168,9 @@ namespace MWWorld
         ///< Does this cell have state that needs to be stored in a saved game file?
 
 #ifdef __vita__
-        bool isSafeToEvict() const;
+        bool isSafeToEvict(std::string* whyNot = nullptr) const;
         ///< ESM reload loses nothing (mirrors the save-persistence criterion).
+        ///< whyNot (diagnostics): filled with the blocking reason.
 #endif
 
         bool hasId(const ESM::RefId& id) const;

@@ -631,20 +631,32 @@ namespace MWWorld
     }
 
 #ifdef __vita__
-    bool CellStore::isSafeToEvict() const
+    bool CellStore::isSafeToEvict(std::string* whyNot) const
     {
         if (mState != State_Loaded)
+        {
+            if (whyNot)
+                *whyNot = "notLoaded";
             return false;
+        }
         if (!mHasState)
             return true;
         // Evictable iff a save would write nothing for this cell.
         if (mHasUnrecoverableState || mFogState != nullptr)
+        {
+            if (whyNot)
+                *whyNot = mHasUnrecoverableState ? "cellState" : "fog";
             return false;
+        }
         if (!mMovedHere.empty() || !mMovedToAnotherCell.empty())
+        {
+            if (whyNot)
+                *whyNot = "movedRefs";
             return false;
+        }
 
         bool clean = true;
-        Misc::tupleForEach(mCellStoreImp->mRefLists, [&clean](const auto& refList) {
+        Misc::tupleForEach(mCellStoreImp->mRefLists, [&clean, whyNot](const auto& refList) {
             if (!clean)
                 return;
             for (const auto& liveCellRef : refList.mList)
@@ -652,6 +664,13 @@ namespace MWWorld
                 if (liveCellRef.mData.hasChanged() || liveCellRef.mRef.hasChanged()
                     || !liveCellRef.mRef.hasContentFile())
                 {
+                    if (whyNot)
+                    {
+                        const char* clause = liveCellRef.mData.hasChanged() ? "refData"
+                            : liveCellRef.mRef.hasChanged()                 ? "refRef"
+                                                                            : "noContentFile";
+                        *whyNot = std::string(clause) + ":" + liveCellRef.mRef.getRefId().toDebugString();
+                    }
                     clean = false;
                     return;
                 }
@@ -1028,12 +1047,16 @@ namespace MWWorld
     void CellStore::loadState(const ESM::CellState& state)
     {
         mHasState = true;
-#ifdef __vita__
-        mHasUnrecoverableState = true;
-#endif
 
         if (!mCellVariant.isExterior() && mCellVariant.hasWater())
+        {
+#ifdef __vita__
+            // Flag only real divergence; trivial save records stay evictable.
+            if (state.mWaterLevel != mWaterLevel)
+                mHasUnrecoverableState = true;
+#endif
             mWaterLevel = state.mWaterLevel;
+        }
 
         mLastRespawn = MWWorld::TimeStamp(state.mLastRespawn);
     }
@@ -1082,10 +1105,9 @@ namespace MWWorld
 
     void CellStore::readReferences(ESM::ESMReader& reader, GetCellStoreCallback* callback)
     {
+        // No blanket eviction flag: save-restored refs self-mark via the
+        // savegame RefData ctor (mChanged), moves via the trackers.
         mHasState = true;
-#ifdef __vita__
-        mHasUnrecoverableState = true;
-#endif
 
         while (reader.isNextSub("OBJE"))
         {

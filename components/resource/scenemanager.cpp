@@ -59,6 +59,10 @@
 #include <components/files/hash.hpp>
 #include <components/files/memorystream.hpp>
 
+#ifdef __vita__
+#include <components/settings/values.hpp>
+#endif
+
 #include "bgsmfilemanager.hpp"
 #include "errormarker.hpp"
 #include "imagemanager.hpp"
@@ -879,6 +883,30 @@ namespace Resource
             return loadNonNif(normalizedFilename, *vfs->get(normalizedFilename), imageManager);
     }
 
+#ifdef __vita__
+    // VBOs for static geometry: vitaGL re-copies client arrays into its ring
+    // buffer on every draw; a VBO uploads once and draws zero-copy.
+    class EnableVBOVisitor : public osg::NodeVisitor
+    {
+    public:
+        EnableVBOVisitor()
+            : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+        {
+        }
+
+        void apply(osg::Geometry& geom) override
+        {
+            if (geom.getDataVariance() == osg::Object::DYNAMIC || !geom.getVertexArray())
+                return;
+            // Per-frame CPU edits stay on the streaming path.
+            if (geom.getUpdateCallback() != nullptr || geom.getDrawCallback() != nullptr
+                || geom.getCullCallback() != nullptr)
+                return;
+            geom.setUseVertexBufferObjects(true);
+        }
+    };
+#endif
+
     class CanOptimizeCallback : public SceneUtil::Optimizer::IsOperationPermissibleForObjectCallback
     {
     public:
@@ -1083,6 +1111,15 @@ namespace Resource
             }
             else
                 shareState(loaded);
+
+#ifdef __vita__
+            // After the optimizer so unmerged leftovers are covered too.
+            if (Settings::general().mVitaStaticGeometryVbo)
+            {
+                EnableVBOVisitor enableVbo;
+                loaded->accept(enableVbo);
+            }
+#endif
 
             if (compile && mIncrementalCompileOperation)
                 mIncrementalCompileOperation->add(loaded);

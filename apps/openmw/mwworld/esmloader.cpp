@@ -1,6 +1,7 @@
 #include "esmloader.hpp"
 #include "esmstore.hpp"
 
+#include <cstdio>
 #include <fstream>
 
 #include <components/esm/format.hpp>
@@ -8,11 +9,16 @@
 #include <components/esm3/readerscache.hpp>
 #include <components/esm4/reader.hpp>
 #include <components/files/conversion.hpp>
+#include <components/files/memorystream.hpp>
 #include <components/files/openfile.hpp>
 #include <components/misc/strings/lower.hpp>
 #include <components/resource/resourcesystem.hpp>
 
 #include "../mwbase/environment.hpp"
+
+#ifdef __vita__
+#include "../vita/VitaInit.h"
+#endif
 
 namespace MWWorld
 {
@@ -42,7 +48,32 @@ namespace MWWorld
                 const ESM::ReadersCache::BusyItem reader = mReaders.get(static_cast<std::size_t>(index));
                 reader->setEncoder(mEncoder);
                 reader->setIndex(index);
+#ifdef __vita__
+                // Slurp the whole file: one bulk SD read, then parse from RAM
+                // with zero syscalls. Buffers released after setUp (worldimp
+                // clears the readers cache; contexts reopen from disk later).
+                {
+                    stream->seekg(0, std::ios::end);
+                    const std::streamoff size = stream->tellg();
+                    stream->seekg(0);
+                    std::string buf;
+                    buf.resize(static_cast<size_t>(size));
+                    stream->read(buf.data(), size);
+                    {
+                        char crumb[160];
+                        snprintf(crumb, sizeof(crumb), "[EsmLoad] slurped %s (%d MB)",
+                            Files::pathToUnicodeString(filepath.filename()).c_str(),
+                            static_cast<int>(size / (1024 * 1024)));
+                        Vita::breadcrumb(crumb);
+                    }
+                    if (stream->gcount() == size)
+                        reader->open(std::make_unique<Files::OwningIMemStream>(std::move(buf)), filepath);
+                    else
+                        reader->open(filepath); // slurp failed; parse from disk
+                }
+#else
                 reader->open(filepath);
+#endif
                 reader->resolveParentFileIndices(mReaders);
 
                 const std::vector<int>& parentIndices = reader->getParentFileIndices();

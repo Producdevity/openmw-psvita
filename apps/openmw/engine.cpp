@@ -17,6 +17,7 @@
 
 #ifdef __vita__
 #include "vita/VitaInit.h"
+#include "vita/VitaMemAudit.h"
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
@@ -379,7 +380,18 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     // update focus object for GUI
     {
         ScopedProfile<UserStatsType::Focus> profile(frameStart, frameNumber, *timer, *stats);
+#ifdef __vita__
+        // Full scene raycast; 10 Hz is enough for tooltips.
+        static float s_focusAccum = 0.f;
+        s_focusAccum += frametime;
+        if (s_focusAccum >= 0.1f)
+        {
+            s_focusAccum = 0.f;
+            mWorld->updateFocusObject();
+        }
+#else
         mWorld->updateFocusObject();
+#endif
     }
 
     // if there is a separate Lua thread, it starts the update now
@@ -1007,6 +1019,8 @@ void OMW::Engine::prepareEngine()
     mWindowManager->initUI();
 #ifdef __vita__
     Vita::logMemoryStatus("Post-initUI");
+    // UI textures land in the image cache; break down the initUI pool.
+    Vita::auditResourceCaches(mResourceSystem.get());
 #endif
 
     // Load translation data

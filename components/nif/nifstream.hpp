@@ -17,6 +17,10 @@
 
 #include <components/files/istreamptr.hpp>
 #include <components/files/utils.hpp>
+#ifdef __vita__
+#include <components/files/memorystream.hpp>
+#include <cstring>
+#endif
 #include <components/misc/endianness.hpp>
 #include <components/misc/float16.hpp>
 
@@ -85,6 +89,19 @@ namespace Nif
         const ToUTF8::StatelessUtf8Encoder* mEncoder;
         std::string mBuffer;
         std::size_t mStreamSize;
+#ifdef __vita__
+        const char* mPtr = nullptr;
+        const char* mEnd = nullptr;
+        std::string mOwnData;
+
+        void fastRead(void* dest, std::size_t bytes)
+        {
+            if (bytes > static_cast<std::size_t>(mEnd - mPtr))
+                throw std::runtime_error("NIF read past end of buffer");
+            std::memcpy(dest, mPtr, bytes);
+            mPtr += bytes;
+        }
+#endif
 
     public:
         explicit NIFStream(
@@ -94,6 +111,25 @@ namespace Nif
             , mEncoder(encoder)
             , mStreamSize(static_cast<std::size_t>(Files::getStreamSizeLeft(*mStream)))
         {
+#ifdef __vita__
+            // Direct-buffer reads: per-scalar istream calls dominate NIF/KF
+            // parse time on the A9. Borrow the slurped buffer when possible.
+            if (auto* mem = dynamic_cast<Files::OwningIMemStream*>(mStream.get()))
+            {
+                const std::size_t pos = static_cast<std::size_t>(mStream->tellg());
+                mPtr = mem->bufferData() + pos;
+                mEnd = mem->bufferData() + mem->bufferSize();
+            }
+            else
+            {
+                mOwnData.resize(mStreamSize);
+                mStream->read(mOwnData.data(), mStreamSize);
+                if (!*mStream)
+                    throw std::runtime_error("Failed to buffer NIF stream");
+                mPtr = mOwnData.data();
+                mEnd = mPtr + mOwnData.size();
+            }
+#endif
         }
 
         const Reader& getFile() const { return mReader; }
@@ -108,27 +144,51 @@ namespace Nif
             return (major << 24) + (minor << 16) + (patch << 8) + rev;
         }
 
-        void skip(size_t size) { mStream->ignore(size); }
+        void skip(size_t size)
+        {
+#ifdef __vita__
+            if (size > static_cast<size_t>(mEnd - mPtr))
+                throw std::runtime_error("NIF skip past end of buffer");
+            mPtr += size;
+#else
+            mStream->ignore(size);
+#endif
+        }
 
         /// Read into a single instance of type
         template <class T>
         void read(T& data)
         {
+#ifdef __vita__
+            static_assert(std::is_arithmetic_v<T> || std::is_same_v<T, Misc::float16_t>);
+            fastRead(&data, sizeof(T));
+#else
             readBufferOfType<1>(mStream, &data);
+#endif
         }
 
         /// Read multiple instances of type into an array
         template <class T, size_t size>
         void readArray(std::array<T, size>& arr)
         {
+#ifdef __vita__
+            static_assert(std::is_arithmetic_v<T> || std::is_same_v<T, Misc::float16_t>);
+            fastRead(arr.data(), size * sizeof(T));
+#else
             readBufferOfType<size>(mStream, arr.data());
+#endif
         }
 
         /// Read instances of type into a dynamic buffer
         template <class T>
         void read(T* dest, size_t size)
         {
+#ifdef __vita__
+            static_assert(std::is_arithmetic_v<T> || std::is_same_v<T, Misc::float16_t>);
+            fastRead(dest, size * sizeof(T));
+#else
             readDynamicBufferOfType<T>(mStream, dest, size);
+#endif
         }
 
         /// Read multiple instances of type into a vector

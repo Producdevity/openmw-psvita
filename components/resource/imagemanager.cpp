@@ -296,6 +296,7 @@ namespace
     }
 
     // Cap compressed images by discarding top mips (stays DXT).
+    // Mipless images pass through unchanged (nothing to drop).
     osg::ref_ptr<osg::Image> dropCompressedTopMips(osg::ref_ptr<osg::Image> image, int maxEdge)
     {
         const unsigned int levels = image->getNumMipmapLevels();
@@ -449,9 +450,11 @@ namespace Resource
                            || fmt == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
                            || fmt == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT);
 
+                // Mipless DXT stays compressed too (single-level upload);
+                // GXM samples base level when no chain is present.
                 const bool keepCompressed = Settings::general().mVitaKeepCompressedTextures && isDXT
-                    && image->r() == 1 && image->getNumMipmapLevels() > 1 && isPowerOfTwo(image->s())
-                    && isPowerOfTwo(image->t()) && image->isDataContiguous();
+                    && image->r() == 1 && isPowerOfTwo(image->s()) && isPowerOfTwo(image->t())
+                    && image->isDataContiguous();
 
                 if (!keepCompressed)
                 {

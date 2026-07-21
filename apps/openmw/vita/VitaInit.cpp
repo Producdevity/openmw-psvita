@@ -113,16 +113,8 @@ static void vita_early_heap_check()
 
 void vitaBreadcrumb(const char* msg)
 {
-    SceUID fd = sceIoOpen("ux0:data/openmw/boot.log",
-        SCE_O_WRONLY | SCE_O_APPEND | SCE_O_CREAT, 0777);
-    if (fd >= 0)
-    {
-        int len = 0;
-        while (msg[len]) ++len;
-        sceIoWrite(fd, msg, len);
-        sceIoWrite(fd, "\n", 1);
-        sceIoClose(fd);
-    }
+    // All breadcrumbs carry a [ms-since-boot] prefix for phase timing.
+    vitaTimedBreadcrumb(msg);
 }
 
 void vitaTimedBreadcrumb(const char* msg)
