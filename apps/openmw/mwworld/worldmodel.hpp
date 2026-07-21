@@ -3,6 +3,9 @@
 
 #include <list>
 #include <map>
+#ifdef __vita__
+#include <set>
+#endif
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -89,6 +92,20 @@ namespace MWWorld
             for (auto& [_, store] : mCells)
                 fn(store);
         }
+
+#ifdef __vita__
+        /// Destroy CellStores materialized by all-cell ID sweeps (getPtrByRefId /
+        /// getExteriorPtrs): preloaded or unloaded, no game state, not in the Ptr
+        /// cache. They are recreated on demand; keeping them pins an mIds vector
+        /// for every cell in the game. Returns the number evicted.
+        std::size_t evictSweptCellStores();
+
+        /// Destroy fully-loaded CellStores that were materialized by ID lookups
+        /// but never activated: not in \a activeCells, no game state, not in the
+        /// Ptr cache. Their LiveCellRefs are recreated on demand. Measured: the
+        /// new-game targeted-script burst pins ~60 loaded cells / ~11k refs.
+        std::size_t evictInactiveLoadedCellStores(const std::set<CellStore*, std::less<>>& activeCells);
+#endif
 
         /// Get all Ptrs referencing \a name in exterior cells
         /// @note Due to the current implementation of getPtr this only supports one Ptr per cell.

@@ -5,6 +5,7 @@
 
 #ifdef __vita__
 #include "../vita/VitaInit.h"
+#include "../vita/VitaMemAudit.h"
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
 #define VITA_CRUMB(msg)
@@ -286,14 +287,24 @@ namespace MWWorld
         mContentFiles = contentFiles;
         mESMVersions.resize(mContentFiles.size(), -1);
 
+#ifdef __vita__
+        vitaMemBreadcrumb("[VitaAudit] before ESM content load");
+#endif
         loadContentFiles(fileCollections, contentFiles, encoder, listener);
         loadGroundcoverFiles(fileCollections, groundcoverFiles, encoder, listener);
+#ifdef __vita__
+        vitaMemBreadcrumb("[VitaAudit] after ESM content load");
+#endif
 
         fillGlobalVariables();
 
         mStore.setUp();
         mStore.validateRecords(mReaders);
         mStore.movePlayerRecord();
+#ifdef __vita__
+        vitaMemBreadcrumb("[VitaAudit] after ESMStore setUp");
+        Vita::auditDialogueStore(mStore);
+#endif
 
         mSwimHeightScale = mStore.get<ESM::GameSetting>().find("fSwimHeightScale")->mValue.getFloat();
     }

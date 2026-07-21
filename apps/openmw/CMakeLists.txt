@@ -7,6 +7,7 @@ if(VITA)
     list(APPEND OPENMW_SOURCES
         vita/VitaInit.cpp
         vita/VitaIme.cpp
+        vita/VitaMemAudit.cpp
     )
 endif()
 

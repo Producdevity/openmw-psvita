@@ -86,7 +86,13 @@ namespace ESM
 
         void extractOrderedInfo(std::list<T>& info)
         {
+#ifdef __vita__
+            // Move halves dialogue RAM; Dialogue::setUp guards re-runs.
+            info = std::move(mOrderedInfo);
+            mOrderedInfo.clear();
+#else
             info = mOrderedInfo;
+#endif
             mInfoPositions.clear();
         }
 

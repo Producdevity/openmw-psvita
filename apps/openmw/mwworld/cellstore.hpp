@@ -167,6 +167,11 @@ namespace MWWorld
         bool hasState() const;
         ///< Does this cell have state that needs to be stored in a saved game file?
 
+#ifdef __vita__
+        bool isSafeToEvict() const;
+        ///< ESM reload loses nothing (mirrors the save-persistence criterion).
+#endif
+
         bool hasId(const ESM::RefId& id) const;
         ///< May return true for deleted IDs when in preload state. Will return false, if cell is
         /// unloaded.
@@ -351,6 +356,10 @@ namespace MWWorld
         MWWorld::Cell mCellVariant;
         State mState;
         bool mHasState;
+#ifdef __vita__
+        // Real state changes only (saves/water); never set by iteration.
+        bool mHasUnrecoverableState = false;
+#endif
         std::vector<ESM::RefId> mIds;
         float mWaterLevel;
 

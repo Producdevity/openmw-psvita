@@ -630,6 +630,37 @@ namespace MWWorld
         return mHasState;
     }
 
+#ifdef __vita__
+    bool CellStore::isSafeToEvict() const
+    {
+        if (mState != State_Loaded)
+            return false;
+        if (!mHasState)
+            return true;
+        // Evictable iff a save would write nothing for this cell.
+        if (mHasUnrecoverableState || mFogState != nullptr)
+            return false;
+        if (!mMovedHere.empty() || !mMovedToAnotherCell.empty())
+            return false;
+
+        bool clean = true;
+        Misc::tupleForEach(mCellStoreImp->mRefLists, [&clean](const auto& refList) {
+            if (!clean)
+                return;
+            for (const auto& liveCellRef : refList.mList)
+            {
+                if (liveCellRef.mData.hasChanged() || liveCellRef.mRef.hasChanged()
+                    || !liveCellRef.mRef.hasContentFile())
+                {
+                    clean = false;
+                    return;
+                }
+            }
+        });
+        return clean;
+    }
+#endif
+
     bool CellStore::hasId(const ESM::RefId& id) const
     {
         if (mState == State_Unloaded)
@@ -709,6 +740,9 @@ namespace MWWorld
     {
         mWaterLevel = level;
         mHasState = true;
+#ifdef __vita__
+        mHasUnrecoverableState = true;
+#endif
     }
 
     std::size_t CellStore::count() const
@@ -994,6 +1028,9 @@ namespace MWWorld
     void CellStore::loadState(const ESM::CellState& state)
     {
         mHasState = true;
+#ifdef __vita__
+        mHasUnrecoverableState = true;
+#endif
 
         if (!mCellVariant.isExterior() && mCellVariant.hasWater())
             mWaterLevel = state.mWaterLevel;
@@ -1046,6 +1083,9 @@ namespace MWWorld
     void CellStore::readReferences(ESM::ESMReader& reader, GetCellStoreCallback* callback)
     {
         mHasState = true;
+#ifdef __vita__
+        mHasUnrecoverableState = true;
+#endif
 
         while (reader.isNextSub("OBJE"))
         {

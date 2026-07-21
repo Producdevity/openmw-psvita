@@ -12,6 +12,7 @@
 #include <osg/Geometry>
 #include <osg/MatrixTransform>
 #include "../vita/VitaInit.h"
+#include "../vita/VitaMemAudit.h"
 #include "../mwrender/vismask.hpp"
 #include "../mwrender/animation.hpp"
 #include "../mwmechanics/aipackage.hpp"
@@ -614,6 +615,21 @@ namespace MWWorld
 
             if (usedMB > budget - 20 && !s_cachesFlushed)
             {
+                // Snapshot what is resident before the flush wipes it.
+                Vita::auditWorldModel(mWorld.getWorldModel());
+                Vita::auditResourceCaches(mRendering.getResourceSystem());
+                {
+                    const std::size_t swept = mWorld.getWorldModel().evictSweptCellStores();
+                    const std::size_t loaded = mWorld.getWorldModel().evictInactiveLoadedCellStores(mActiveCells);
+                    if (swept + loaded > 0)
+                    {
+                        char evictBuf[112];
+                        snprintf(evictBuf, sizeof(evictBuf),
+                            "[VitaAudit] watchdog evicted %u swept + %u loaded cellstores", (unsigned)swept,
+                            (unsigned)loaded);
+                        Vita::breadcrumb(evictBuf);
+                    }
+                }
                 mRendering.flushUnrefQueueImmediate();
                 mRendering.getResourceSystem()->clearCache();
                 // Static caches that bypass OSG expiry; cleared explicitly.
@@ -2233,6 +2249,10 @@ namespace MWWorld
             flushPendingDemotion(mPendingDemotions.front().cell);
             loadingListener->increaseProgress(1);
         }
+
+        // Eviction is pressure-only; evicting here re-scans ESM from disk.
+        Vita::auditWorldModel(mWorld.getWorldModel());
+        Vita::auditResourceCaches(mRendering.getResourceSystem());
 #endif
 
         if (changeEvent)
@@ -2641,6 +2661,10 @@ namespace MWWorld
             flushPendingDemotion(mPendingDemotions.front().cell);
             loadingListener->increaseProgress(1);
         }
+
+        // Pressure-only eviction — see changeCellGrid.
+        Vita::auditWorldModel(mWorld.getWorldModel());
+        Vita::auditResourceCaches(mRendering.getResourceSystem());
 #endif
 
         if (useFading)

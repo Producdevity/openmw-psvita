@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <osgDB/Registry>
 
 #include <components/debug/debuglog.hpp>
@@ -288,6 +289,48 @@ namespace
             }
         }
     }
+
+    inline bool isPowerOfTwo(int x)
+    {
+        return x > 0 && (x & (x - 1)) == 0;
+    }
+
+    // Cap compressed images by discarding top mips (stays DXT).
+    osg::ref_ptr<osg::Image> dropCompressedTopMips(osg::ref_ptr<osg::Image> image, int maxEdge)
+    {
+        const unsigned int levels = image->getNumMipmapLevels();
+        int s = image->s(), t = image->t();
+        unsigned int drop = 0;
+        // Keep base >= 4px for DXT block alignment.
+        while ((s > maxEdge || t > maxEdge) && drop + 1 < levels && s > 4 && t > 4)
+        {
+            s >>= 1;
+            t >>= 1;
+            ++drop;
+        }
+        if (drop == 0)
+            return image;
+
+        // offsets[i] = byte offset of level i+1.
+        const osg::Image::MipmapDataType& offsets = image->getMipmapLevels();
+        const unsigned int newBase = offsets[drop - 1];
+        const unsigned int newSize = image->getTotalSizeInBytesIncludingMipmaps() - newBase;
+
+        unsigned char* buf = new unsigned char[newSize];
+        std::memcpy(buf, image->data() + newBase, newSize);
+
+        osg::Image::MipmapDataType newOffsets;
+        newOffsets.reserve(levels - drop - 1);
+        for (unsigned int i = drop; i + 1 < levels; ++i)
+            newOffsets.push_back(offsets[i] - newBase);
+
+        osg::ref_ptr<osg::Image> out = new osg::Image;
+        out->setFileName(image->getFileName());
+        out->setImage(s, t, 1, image->getInternalTextureFormat(), image->getPixelFormat(), image->getDataType(),
+            buf, osg::Image::USE_NEW_DELETE, image->getPacking());
+        out->setMipmapLevels(newOffsets);
+        return out;
+    }
 #endif
 
 }
@@ -397,10 +440,7 @@ namespace Resource
             osg::ref_ptr<osg::Image> image = result.getImage();
 
 #ifdef __vita__
-            // Decompress DXT textures to RGBA on Vita.
-            // vitaGL's glCompressedTexImage2D has partial DXT support and our
-            // glCompressedTexSubImage2D is a no-op stub — some textures render
-            // as solid green (uninitialized VRAM). CPU decompression is safe.
+            // Keep DXT compressed (GXM-native); subload path sealed in vita-compat.patch.
             if (image->isCompressed())
             {
                 GLenum fmt = image->getPixelFormat();
@@ -409,22 +449,29 @@ namespace Resource
                            || fmt == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
                            || fmt == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT);
 
-                osg::ref_ptr<osg::Image> newImage = new osg::Image;
-                newImage->setFileName(image->getFileName());
-                GLenum outFmt = image->isImageTranslucent() ? GL_RGBA : GL_RGB;
-                newImage->allocateImage(image->s(), image->t(), image->r(), outFmt, GL_UNSIGNED_BYTE);
+                const bool keepCompressed = Settings::general().mVitaKeepCompressedTextures && isDXT
+                    && image->r() == 1 && image->getNumMipmapLevels() > 1 && isPowerOfTwo(image->s())
+                    && isPowerOfTwo(image->t()) && image->isDataContiguous();
 
-                if (isDXT && image->r() == 1)
-                    decompressDXT(image.get(), newImage.get());
-                else
+                if (!keepCompressed)
                 {
-                    // Fallback for non-DXT compressed or 3D textures
-                    for (int s = 0; s < image->s(); ++s)
-                        for (int t = 0; t < image->t(); ++t)
-                            for (int r = 0; r < image->r(); ++r)
-                                newImage->setColor(image->getColor(s, t, r), s, t, r);
+                    osg::ref_ptr<osg::Image> newImage = new osg::Image;
+                    newImage->setFileName(image->getFileName());
+                    GLenum outFmt = image->isImageTranslucent() ? GL_RGBA : GL_RGB;
+                    newImage->allocateImage(image->s(), image->t(), image->r(), outFmt, GL_UNSIGNED_BYTE);
+
+                    if (isDXT && image->r() == 1)
+                        decompressDXT(image.get(), newImage.get());
+                    else
+                    {
+                        // Fallback for non-DXT compressed or 3D textures
+                        for (int s = 0; s < image->s(); ++s)
+                            for (int t = 0; t < image->t(); ++t)
+                                for (int r = 0; r < image->r(); ++r)
+                                    newImage->setColor(image->getColor(s, t, r), s, t, r);
+                    }
+                    image = newImage;
                 }
-                image = newImage;
             }
 
             // Cap world textures; skip UI/normal/spec; atlases get a higher
@@ -489,17 +536,24 @@ namespace Resource
                 }
 
                 const int maxEdge = isAtlas ? atlasCap : worldCap;
-                if (downsampleEnabled && !isUI && !isNormalSpec && !image->isCompressed()
-                    && image->s() > 1 && image->t() > 1)
+                if (downsampleEnabled && !isUI && !isNormalSpec && image->s() > 1 && image->t() > 1)
                 {
-                    int s = image->s(), t = image->t();
-                    while ((s > maxEdge || t > maxEdge) && s > 1 && t > 1)
+                    if (image->isCompressed())
                     {
-                        s = std::max(s / 2, 1);
-                        t = std::max(t / 2, 1);
+                        // Cap via mip drop, no rescale.
+                        image = dropCompressedTopMips(image, maxEdge);
                     }
-                    if (s != image->s() || t != image->t())
-                        image->scaleImage(s, t, image->r());
+                    else
+                    {
+                        int s = image->s(), t = image->t();
+                        while ((s > maxEdge || t > maxEdge) && s > 1 && t > 1)
+                        {
+                            s = std::max(s / 2, 1);
+                            t = std::max(t / 2, 1);
+                        }
+                        if (s != image->s() || t != image->t())
+                            image->scaleImage(s, t, image->r());
+                    }
                 }
             }
 #endif
