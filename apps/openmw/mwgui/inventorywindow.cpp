@@ -97,8 +97,13 @@ namespace MWGui
         , mUpdateNextFrame(false)
         , mPendingControllerAction(ControllerAction::None)
     {
+#ifndef __vita__
         // rebuild() before wrapping so the RTT attachments exist when MyGUI references the texture.
         mPreview->rebuild();
+#endif
+        // Vita: defer the avatar build (~12s NpcAnimation warmup) to
+        // updatePlayer(), which rebuilds during the load screen anyway.
+        // getTexture() creates the RTT attachments on demand.
         mPreviewTexture
             = std::make_unique<MyGUIPlatform::OSGTexture>(mPreview->getTexture(), mPreview->getTextureStateSet());
 

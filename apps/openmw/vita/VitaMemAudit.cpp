@@ -5,6 +5,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <string>
 
 #include <psp2/kernel/clib.h>
 
@@ -180,6 +182,28 @@ namespace Vita
             "[VitaAudit] worldmodel: %u cellstores (%u loaded, %u preloaded), %u live refs resident",
             (unsigned)total, (unsigned)loaded, (unsigned)preloaded, (unsigned)refs);
         auditLog(buf);
+
+        // Evictability breakdown: tally why stores are retained.
+        size_t evictable = 0;
+        std::map<std::string, size_t> blocked;
+        std::string firstDetail;
+        worldModel.forEachLoadedCellStore([&](MWWorld::CellStore& cell) {
+            std::string why;
+            if (cell.isSafeToEvict(&why))
+            {
+                ++evictable;
+                return;
+            }
+            const std::string key = why.substr(0, why.find(':'));
+            if (++blocked[key] == 1 && why.size() > key.size() && firstDetail.empty())
+                firstDetail = why;
+        });
+        std::string summary = "[VitaAudit] evictable=" + std::to_string(evictable);
+        for (const auto& [reason, count] : blocked)
+            summary += " " + reason + "=" + std::to_string(count);
+        if (!firstDetail.empty())
+            summary += " e.g. " + firstDetail;
+        auditLog(summary.c_str());
     }
 
     void auditResourceCaches(Resource::ResourceSystem* resourceSystem)

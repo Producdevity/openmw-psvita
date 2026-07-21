@@ -2,6 +2,10 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/files/hash.hpp>
+#ifdef __vita__
+#include <components/files/memorystream.hpp>
+#include <components/files/utils.hpp>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -541,6 +545,24 @@ namespace Nif
         const bool writeDebug = sWriteNifDebugLog;
         if (writeDebug)
             Log(Debug::Verbose) << "NIF Debug: Reading file: '" << mFilename << "'";
+
+#ifdef __vita__
+        // Slurp to RAM: NIF/KF parsing is millions of tiny istream reads;
+        // through the BSA stream each pays syscall-adjacent cost on SD.
+        {
+            const std::streamsize size = Files::getStreamSizeLeft(*stream);
+            std::string buf;
+            buf.resize(static_cast<std::size_t>(size));
+            stream->read(buf.data(), size);
+            if (stream->gcount() == size)
+                stream = std::make_unique<Files::OwningIMemStream>(std::move(buf));
+            else
+            {
+                stream->clear();
+                stream->seekg(0); // slurp failed; parse from the original stream
+            }
+        }
+#endif
 
         const std::array<std::uint64_t, 2> fileHash = Files::getHash(mFilename, *stream);
         mHash.append(reinterpret_cast<const char*>(fileHash.data()), fileHash.size() * sizeof(std::uint64_t));

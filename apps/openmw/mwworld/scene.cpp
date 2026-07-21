@@ -105,10 +105,10 @@ namespace
 #ifdef __vita__
     int getVitaCellBudgetMB()
     {
-        // Use the configured heap size (not mallinfo.arena which is consumed, not total).
-        // _newlib_heap_size_user is the actual sceKernelAllocMemBlock size.
+        // Heap size minus reserve. Reserve is configurable so the watchdog
+        // trigger can be lowered for on-device eviction testing.
         int heapMB = static_cast<int>(_newlib_heap_size_user / (1024 * 1024));
-        int reserve = 40;
+        int reserve = Settings::general().mVitaMemoryReserveMb;
         return heapMB - reserve;
     }
 #endif
@@ -1974,7 +1974,10 @@ namespace MWWorld
         // while destructors run and corrupted heap metadata. Trailing flushes
         // let layered refs (statesets → textures) cascade without re-walking.
         mRendering.flushUnrefQueueImmediate();
-        mRendering.getResourceSystem()->clearCache();
+        // Full clear only under pressure — keeps caches warm across cell
+        // boundaries (less SD re-reading). Watchdog remains the backstop.
+        if (Vita::getHeapUsedMB() > Settings::general().mVitaFlushThresholdMb)
+            mRendering.getResourceSystem()->clearCache();
         mRendering.flushUnrefQueueImmediate();
         mRendering.flushUnrefQueueImmediate();
         mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());

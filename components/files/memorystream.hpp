@@ -2,6 +2,7 @@
 #define OPENMW_COMPONENTS_FILES_MEMORYSTREAM_H
 
 #include <istream>
+#include <string>
 
 namespace Files
 {
@@ -44,6 +45,28 @@ namespace Files
             , std::istream(static_cast<std::streambuf*>(this))
         {
         }
+    };
+
+    /// @brief IMemStream that owns its buffer.
+    struct OwningIMemStream : IMemStream
+    {
+        explicit OwningIMemStream(std::string&& buffer)
+            // The virtual base MemBuf is initialized before members, so the
+            // real get area is bound in the body once mBuffer exists.
+            : MemBuf(nullptr, 0)
+            , IMemStream(nullptr, 0)
+            , mBuffer(std::move(buffer))
+        {
+            bufferStart = mBuffer.data();
+            bufferEnd = bufferStart + mBuffer.size();
+            setg(bufferStart, bufferStart, bufferEnd);
+        }
+
+        const char* bufferData() const { return mBuffer.data(); }
+        std::size_t bufferSize() const { return mBuffer.size(); }
+
+    private:
+        std::string mBuffer;
     };
 
 }

@@ -59,10 +59,14 @@ namespace Nif
     {
         checkStreamSize(length);
         std::string str(length, '\0');
+#ifdef __vita__
+        read(str.data(), length);
+#else
         mStream->read(str.data(), length);
         if (mStream->fail())
             throw std::runtime_error(std::format(
                 "Failed to read sized string of {} chars: {}", length, std::generic_category().message(errno)));
+#endif
         size_t end = str.find('\0');
         if (end != std::string::npos)
             str.erase(end);
@@ -82,10 +86,22 @@ namespace Nif
     std::string NIFStream::getVersionString()
     {
         std::string result;
+#ifdef __vita__
+        // getline equivalent on the direct buffer.
+        while (true)
+        {
+            char c;
+            read(c);
+            if (c == '\n')
+                break;
+            result += c;
+        }
+#else
         std::getline(*mStream, result);
         if (mStream->fail())
             throw std::runtime_error(
                 std::format("Failed to read version string: {}", std::generic_category().message(errno)));
+#endif
         return result;
     }
 
@@ -94,35 +110,39 @@ namespace Nif
         size_t size = get<uint32_t>();
         checkStreamSize(size);
         std::string str(size, '\0');
+#ifdef __vita__
+        read(str.data(), size);
+#else
         mStream->read(str.data(), size);
         if (mStream->fail())
             throw std::runtime_error(std::format(
                 "Failed to read string palette of {} chars: {}", size, std::generic_category().message(errno)));
+#endif
         return str;
     }
 
     template <>
     void NIFStream::read<osg::Vec2f>(osg::Vec2f& vec)
     {
-        readBufferOfType(mStream, vec._v);
+        read(vec._v, 2);
     }
 
     template <>
     void NIFStream::read<osg::Vec3f>(osg::Vec3f& vec)
     {
-        readBufferOfType(mStream, vec._v);
+        read(vec._v, 3);
     }
 
     template <>
     void NIFStream::read<osg::Vec4f>(osg::Vec4f& vec)
     {
-        readBufferOfType(mStream, vec._v);
+        read(vec._v, 4);
     }
 
     template <>
     void NIFStream::read<Matrix3>(Matrix3& mat)
     {
-        readBufferOfType<9>(mStream, reinterpret_cast<float*>(&mat.mValues));
+        read(reinterpret_cast<float*>(&mat.mValues), 9);
     }
 
     template <>
@@ -188,25 +208,25 @@ namespace Nif
     template <>
     void NIFStream::read<osg::Vec2f>(osg::Vec2f* dest, size_t size)
     {
-        readAlignedRange<float, 2>(mStream, dest, size);
+        read(reinterpret_cast<float*>(dest), size * 2);
     }
 
     template <>
     void NIFStream::read<osg::Vec3f>(osg::Vec3f* dest, size_t size)
     {
-        readAlignedRange<float, 3>(mStream, dest, size);
+        read(reinterpret_cast<float*>(dest), size * 3);
     }
 
     template <>
     void NIFStream::read<osg::Vec4f>(osg::Vec4f* dest, size_t size)
     {
-        readAlignedRange<float, 4>(mStream, dest, size);
+        read(reinterpret_cast<float*>(dest), size * 4);
     }
 
     template <>
     void NIFStream::read<Matrix3>(Matrix3* dest, size_t size)
     {
-        readAlignedRange<float, 9>(mStream, dest, size);
+        read(reinterpret_cast<float*>(dest), size * 9);
     }
 
     template <>

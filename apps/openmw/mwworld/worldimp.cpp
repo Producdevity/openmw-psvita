@@ -4,6 +4,7 @@
 #include <vector>
 
 #ifdef __vita__
+#include <malloc.h>
 #include "../vita/VitaInit.h"
 #include "../vita/VitaMemAudit.h"
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
@@ -302,6 +303,12 @@ namespace MWWorld
         mStore.validateRecords(mReaders);
         mStore.movePlayerRecord();
 #ifdef __vita__
+        // Release the boot-time in-RAM ESM buffers (esmloader slurp).
+        // Later context restores reopen the files from disk on demand.
+        mReaders.clear();
+        // Coalesce the freed slurp buffers; a fragmented free list makes the
+        // next allocation storm (first NpcAnimation) pathologically slow.
+        malloc_trim(0);
         vitaMemBreadcrumb("[VitaAudit] after ESMStore setUp");
         Vita::auditDialogueStore(mStore);
 #endif
