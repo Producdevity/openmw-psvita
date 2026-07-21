@@ -56,6 +56,9 @@ namespace Resource
         /// Clear all cache entries.
         void clearCache() override { mCache->clear(); }
 
+        /// Direct cache access for diagnostics/statistics (e.g. Vita memory audit).
+        CacheType* getObjectCache() { return mCache.get(); }
+
         /// How long to keep objects in cache after no longer being referenced.
         void setExpiryDelay(double expiryDelay) final { mExpiryDelay = expiryDelay; }
         double getExpiryDelay() const { return mExpiryDelay; }

@@ -34,6 +34,8 @@ namespace Settings
         // the values the Vita port shipped with before the setting existed.
         SettingValue<std::string> mVitaTextureDetail{ mIndex, "General", "vita texture detail",
             makeEnumSanitizerString({ "performance", "balanced", "high", "off" }) };
+        // Vita: keep DXT compressed on GPU; false restores decompress path.
+        SettingValue<bool> mVitaKeepCompressedTextures{ mIndex, "General", "vita keep compressed textures", true };
         SettingValue<bool> mNotifyOnSavedScreenshot{ mIndex, "General", "notify on saved screenshot" };
         SettingValue<std::vector<std::string>> mPreferredLocales{ mIndex, "General", "preferred locales" };
         SettingValue<bool> mGmstOverridesL10n{ mIndex, "General", "gmst overrides l10n" };

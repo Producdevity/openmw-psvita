@@ -6,6 +6,9 @@ Vita compatibility patch for OpenSceneGraph (OSG):
   - drop glGetRenderbufferParameteriv from isFrameBufferObjectSupported
     check (vitaGL never exposes it, which otherwise disables all FBO RTT)
   - cast RefMatrixf to Matrixd for ambiguous operator!= under OSG_USE_FLOAT_MATRIX
+  - refuse texture subloading for compressed images (vitaGL lacks
+    glCompressedTexSubImage2D; forces the glCompressedTexImage2D full-upload
+    path so DXT textures can stay compressed on the GPU)
 
 --- a/src/osgDB/FileUtils.cpp
 +++ b/src/osgDB/FileUtils.cpp
@@ -84,3 +87,22 @@ Vita compatibility patch for OpenSceneGraph (OSG):
 
          osg::Polytope polytope;
  #if 1
+--- a/src/osg/Image.cpp
++++ b/src/osg/Image.cpp
+@@ -1959,6 +1959,16 @@
+ 
+ bool Image::supportsTextureSubloading() const
+ {
++#if defined(__vita__)
++    // vitaGL has no glCompressedTexSubImage2D (the app links a no-op stub),
++    // so a recycled texture object subloading a compressed image leaves
++    // uninitialized VRAM (solid green). Refuse subloading for compressed
++    // images entirely: Texture2D::apply then re-specifies via the full
++    // glCompressedTexImage2D path, which vitaGL implements natively for
++    // DXT1/3/5.
++    if (isCompressed())
++        return false;
++#endif
+     switch(_internalTextureFormat)
+     {
+         case GL_ETC1_RGB8_OES:

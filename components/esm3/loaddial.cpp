@@ -117,6 +117,11 @@ namespace ESM
 
     void Dialogue::setUp()
     {
+#ifdef __vita__
+        // Vita extract is destructive; skip repeat setUp (save load).
+        if (mInfoOrder.getOrderedInfo().empty() && !mInfo.empty())
+            return;
+#endif
         mInfoOrder.removeDeleted();
         mInfoOrder.extractOrderedInfo(mInfo);
     }

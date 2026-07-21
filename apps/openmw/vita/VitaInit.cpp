@@ -1218,7 +1218,7 @@ namespace Vita
             0,
             0,
             SCE_GXM_MULTISAMPLE_NONE);
-        vglUseVram(GL_TRUE);
+        // vglUseVram removed upstream; VRAM-first is now the default.
         // fp16 in fragment shaders — SGX543 fp16 is full-rate, fp32 half-rate.
         vglUseLowPrecision(GL_TRUE);
         // SHARK_OPT_UNSAFE: most aggressive ALU rewrites; HAVE_SHADER_CACHE=1 amortises compile.

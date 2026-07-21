@@ -4,6 +4,9 @@
 #include <cassert>
 #include <optional>
 #include <stdexcept>
+#ifdef __vita__
+#include <unordered_set>
+#endif
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/defs.hpp>
@@ -22,6 +25,10 @@
 
 #include "../mwbase/environment.hpp"
 #include "../mwbase/luamanager.hpp"
+
+#ifdef __vita__
+#include "../vita/VitaInit.h"
+#endif
 
 namespace MWWorld
 {
@@ -391,31 +398,93 @@ MWWorld::Ptr MWWorld::WorldModel::getPtrByRefId(const ESM::RefId& name)
     // Now try the other cells
     const MWWorld::Store<ESM::Cell>& cells = mStore.get<ESM::Cell>();
 
-    for (auto iter = cells.extBegin(); iter != cells.extEnd(); ++iter)
+    const Ptr found = [&] {
+        for (auto iter = cells.extBegin(); iter != cells.extEnd(); ++iter)
+        {
+            if (mCells.contains(iter->mId))
+                continue;
+
+            Ptr ptr = getPtrAndCache(name, insertCellStore(*iter));
+
+            if (!ptr.isEmpty())
+                return ptr;
+        }
+
+        for (auto iter = cells.intBegin(); iter != cells.intEnd(); ++iter)
+        {
+            if (mCells.contains(iter->mId))
+                continue;
+
+            Ptr ptr = getPtrAndCache(name, insertCellStore(*iter));
+
+            if (!ptr.isEmpty())
+                return ptr;
+        }
+
+        // giving up
+        return Ptr();
+    }();
+
+#ifdef __vita__
+    // Sweep pins stores; the memory watchdog evicts them under pressure.
     {
-        if (mCells.contains(iter->mId))
-            continue;
-
-        Ptr ptr = getPtrAndCache(name, insertCellStore(*iter));
-
-        if (!ptr.isEmpty())
-            return ptr;
+        char buf[160];
+        snprintf(buf, sizeof(buf), "[VitaAudit] getPtrByRefId('%s') found=%d, cellstores now %u",
+            name.toDebugString().c_str(), found.isEmpty() ? 0 : 1, (unsigned)mCells.size());
+        vitaMemBreadcrumb(buf);
     }
+#endif
 
-    for (auto iter = cells.intBegin(); iter != cells.intEnd(); ++iter)
-    {
-        if (mCells.contains(iter->mId))
-            continue;
-
-        Ptr ptr = getPtrAndCache(name, insertCellStore(*iter));
-
-        if (!ptr.isEmpty())
-            return ptr;
-    }
-
-    // giving up
-    return Ptr();
+    return found;
 }
+
+#ifdef __vita__
+std::size_t MWWorld::WorldModel::evictSweptCellStores()
+{
+    std::unordered_set<const CellStore*> toEvict;
+    for (auto& [id, store] : mCells)
+    {
+        if (store.getState() == CellStore::State_Loaded || store.hasState())
+            continue;
+        toEvict.insert(&store);
+    }
+    // Anything the Ptr cache references stays.
+    for (const auto& [cachedId, cachedCell] : mIdCache)
+        toEvict.erase(cachedCell);
+
+    if (toEvict.empty())
+        return 0;
+
+    // Erase by pointer identity to keep the indices consistent.
+    std::erase_if(mInteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
+    std::erase_if(mExteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
+    return std::erase_if(mCells, [&](auto& entry) { return toEvict.count(&entry.second) > 0; });
+}
+
+std::size_t MWWorld::WorldModel::evictInactiveLoadedCellStores(const std::set<CellStore*, std::less<>>& activeCells)
+{
+    std::unordered_set<const CellStore*> toEvict;
+    for (auto& [id, store] : mCells)
+    {
+        if (activeCells.count(&store) > 0)
+            continue;
+        // PtrRegistry self-cleans via ~LiveCellRefBase.
+        if (!store.isSafeToEvict())
+            continue;
+        toEvict.insert(&store);
+    }
+    // Ptr-cached cells stay resident.
+    for (const auto& [cachedId, cachedCell] : mIdCache)
+        toEvict.erase(cachedCell);
+
+    if (toEvict.empty())
+        return 0;
+
+    std::erase_if(mInteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
+    std::erase_if(mExteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
+    return std::erase_if(mCells, [&](auto& entry) { return toEvict.count(&entry.second) > 0; });
+}
+#endif
 
 void MWWorld::WorldModel::getExteriorPtrs(const ESM::RefId& name, std::vector<MWWorld::Ptr>& out)
 {
@@ -429,6 +498,16 @@ void MWWorld::WorldModel::getExteriorPtrs(const ESM::RefId& name, std::vector<MW
         if (!ptr.isEmpty())
             out.push_back(ptr);
     }
+
+#ifdef __vita__
+    // Full-world sweep; eviction deferred to the watchdog.
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "[VitaAudit] getExteriorPtrs('%s') matches=%u, cellstores now %u",
+            name.toDebugString().c_str(), (unsigned)out.size(), (unsigned)mCells.size());
+        vitaMemBreadcrumb(buf);
+    }
+#endif
 }
 
 std::vector<MWWorld::Ptr> MWWorld::WorldModel::getAll(const ESM::RefId& id)
