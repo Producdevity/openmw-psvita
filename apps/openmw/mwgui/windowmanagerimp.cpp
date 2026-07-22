@@ -806,6 +806,9 @@ namespace MWGui
 
         if (block)
         {
+#ifdef __vita__
+            Vita::drainPendingDraw(); // nested renders next; consume queued cull
+#endif
             Misc::FrameRateLimiter frameRateLimiter
                 = Misc::makeFrameRateLimiter(MWBase::Environment::get().getFrameRateLimit());
             while (mMessageBoxManager->readPressedButton(false) == -1
@@ -2160,6 +2163,9 @@ namespace MWGui
             MWBase::Environment::get().getSoundManager()->pauseSounds(
                 MWSound::VideoPlayback, ~MWSound::Type::Movie & MWSound::Type::Mask);
 
+#ifdef __vita__
+        Vita::drainPendingDraw(); // nested renders next; consume queued cull
+#endif
         Misc::FrameRateLimiter frameRateLimiter
             = Misc::makeFrameRateLimiter(MWBase::Environment::get().getFrameRateLimit());
         while (mVideoWidget->update() && !MWBase::Environment::get().getStateManager()->hasQuitRequest())

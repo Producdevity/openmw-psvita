@@ -1,0 +1,413 @@
+--- a/src/osgUtil/RenderLeaf.cpp
++++ b/src/osgUtil/RenderLeaf.cpp
+@@ -17,6 +17,27 @@
+ using namespace osg;
+ using namespace osgUtil;
+ 
++#ifdef __vita__
++#include <psp2/kernel/processmgr.h>
++extern "C" {
++uint32_t osgprof_mat_us = 0;
++uint32_t osgprof_state_us = 0;
++uint32_t osgprof_unif_us = 0;
++uint32_t osgprof_draw_us = 0;
++uint32_t osgprof_leaves = 0;
++}
++#define OSGPROF_T() sceKernelGetProcessTimeLow()
++#define OSGPROF_ACC(a, b, c, d, e) \
++    osgprof_mat_us += (b) - (a); \
++    osgprof_state_us += (c) - (b); \
++    osgprof_unif_us += (d) - (c); \
++    osgprof_draw_us += (e) - (d); \
++    osgprof_leaves++;
++#else
++#define OSGPROF_T() 0
++#define OSGPROF_ACC(a, b, c, d, e)
++#endif
++
+ void RenderLeaf::render(osg::RenderInfo& renderInfo,RenderLeaf* previous)
+ {
+     osg::State& state = *renderInfo.getState();
+@@ -30,11 +51,14 @@
+ 
+     if (previous)
+     {
++        uint32_t pt0 = OSGPROF_T();
+ 
+         // apply matrices if required.
+         state.applyProjectionMatrix(_projection.get());
+         state.applyModelViewMatrix(_modelview.get());
+ 
++        uint32_t pt1 = OSGPROF_T();
++
+         // apply state if required.
+         StateGraph* prev_rg = previous->_parent;
+         StateGraph* prev_rg_parent = prev_rg->_parent;
+@@ -55,30 +79,48 @@
+ 
+         }
+ 
++        uint32_t pt2 = OSGPROF_T();
++
+         // if we are using osg::Program which requires OSG's generated uniforms to track
+         // modelview and projection matrices then apply them now.
+         if (state.getUseModelViewAndProjectionUniforms()) state.applyModelViewAndProjectionUniformsIfRequired();
+ 
++        uint32_t pt3 = OSGPROF_T();
++
+         // draw the drawable
+         _drawable->draw(renderInfo);
++
++        uint32_t pt4 = OSGPROF_T();
++        OSGPROF_ACC(pt0, pt1, pt2, pt3, pt4)
+     }
+     else
+     {
++        uint32_t pt0 = OSGPROF_T();
++
+         // apply matrices if required.
+         state.applyProjectionMatrix(_projection.get());
+         state.applyModelViewMatrix(_modelview.get());
+ 
++        uint32_t pt1 = OSGPROF_T();
++
+         // apply state if required.
+         StateGraph::moveStateGraph(state,NULL,_parent->_parent);
+ 
+         state.apply(_parent->getStateSet());
+ 
++        uint32_t pt2 = OSGPROF_T();
++
+         // if we are using osg::Program which requires OSG's generated uniforms to track
+         // modelview and projection matrices then apply them now.
+         if (state.getUseModelViewAndProjectionUniforms()) state.applyModelViewAndProjectionUniformsIfRequired();
+ 
++        uint32_t pt3 = OSGPROF_T();
++
+         // draw the drawable
+         _drawable->draw(renderInfo);
++
++        uint32_t pt4 = OSGPROF_T();
++        OSGPROF_ACC(pt0, pt1, pt2, pt3, pt4)
+     }
+ 
+     if (_dynamic)
+--- a/src/osg/State.cpp
++++ b/src/osg/State.cpp
+@@ -37,6 +37,26 @@
+ #endif
+ 
+ using namespace std;
++
++#ifdef __vita__
++#include <psp2/kernel/processmgr.h>
++extern "C" {
++uint32_t osgapply_calls = 0;
++uint32_t osgapply_tex_us = 0;
++uint32_t osgapply_mode_us = 0;
++uint32_t osgapply_attr_us = 0;
++uint32_t osgapply_unif_us = 0;
++uint32_t osgapply_push = 0;
++uint32_t osgapply_pop = 0;
++}
++#define OSGAP_T() sceKernelGetProcessTimeLow()
++#define OSGAP_ADD(var, a, b) var += (b) - (a);
++#define OSGAP_CNT(var) var++;
++#else
++#define OSGAP_T() 0
++#define OSGAP_ADD(var, a, b)
++#define OSGAP_CNT(var)
++#endif
+ using namespace osg;
+ 
+ static ApplicationUsageProxy State_e0(ApplicationUsage::ENVIRONMENTAL_VARIABLE,"OSG_GL_ERROR_CHECKING <type>","ONCE_PER_ATTRIBUTE | ON | on enables fine grained checking,  ONCE_PER_FRAME enables coarse grained checking");
+@@ -501,6 +521,7 @@
+ 
+ void State::pushStateSet(const StateSet* dstate)
+ {
++    OSGAP_CNT(osgapply_push)
+ 
+     _stateStateStack.push_back(dstate);
+     if (dstate)
+@@ -547,6 +568,7 @@
+ 
+ void State::popStateSet()
+ {
++    OSGAP_CNT(osgapply_pop)
+     // OSG_NOTICE<<"State::popStateSet()"<<_stateStateStack.size()<<std::endl;
+ 
+     if (_stateStateStack.empty()) return;
+@@ -680,6 +702,9 @@
+ 
+     if (dstate)
+     {
++        OSGAP_CNT(osgapply_calls)
++        uint32_t ap0 = OSGAP_T();
++
+         // push the stateset on the stack so it can be querried from within StateAttribute
+         _stateStateStack.push_back(dstate);
+ 
+@@ -702,6 +727,9 @@
+             else if (unit<_textureAttributeMapList.size()) applyAttributeMapOnTexUnit(unit,_textureAttributeMapList[unit]);
+         }
+ 
++        uint32_t ap1 = OSGAP_T();
++        OSGAP_ADD(osgapply_tex_us, ap0, ap1)
++
+         const Program::PerContextProgram* previousLastAppliedProgramObject = _lastAppliedProgramObject;
+ 
+         applyModeList(_modeMap,dstate->getModeList());
+@@ -711,6 +739,9 @@
+         applyDefineList(_defineMap, dstate->getDefineList());
+ #endif
+ 
++        uint32_t ap2 = OSGAP_T();
++        OSGAP_ADD(osgapply_mode_us, ap1, ap2)
++
+         applyAttributeList(_attributeMap,dstate->getAttributeList());
+ 
+         // Checking if there is no program on the stack or the program is not applied from the AttributeStack (StateSet core mechanism)
+@@ -728,6 +759,9 @@
+             _lastAppliedProgramObject->getProgram()->apply(*this);
+         }
+ 
++        uint32_t ap3 = OSGAP_T();
++        OSGAP_ADD(osgapply_attr_us, ap2, ap3)
++
+         if (dstate->getUniformList().empty())
+         {
+             if (_currentShaderCompositionUniformList.empty()) applyUniformMap(_uniformMap);
+@@ -744,6 +778,9 @@
+             }
+         }
+ 
++        uint32_t ap4 = OSGAP_T();
++        OSGAP_ADD(osgapply_unif_us, ap3, ap4)
++
+ #if 1
+         popDefineList(_defineMap, dstate->getDefineList());
+ #endif
+--- a/src/osg/Program.cpp
++++ b/src/osg/Program.cpp
+@@ -929,6 +929,16 @@
+         delete [] name;
+     }
+ 
++#ifdef __vita__
++    // Dense indices enable O(1) last-applied tracking in apply().
++    {
++        unsigned int denseIdx = 0;
++        for (ActiveUniformMap::iterator uitr = _uniformInfoMap.begin(); uitr != _uniformInfoMap.end(); ++uitr)
++            uitr->second._denseIndex = denseIdx++;
++        _lastAppliedUniformVec.assign(denseIdx, UniformModifiedCountPair());
++    }
++#endif
++
+     // print atomic counter
+ 
+     if (_extensions->isShaderAtomicCountersSupported && !atomicCounterMap.empty())
+--- a/include/osg/Program
++++ b/include/osg/Program
+@@ -234,6 +234,7 @@
+             GLint _location;
+             GLenum _type;
+             GLint _size;
++            unsigned int _denseIndex{ 0 };
+         };
+         typedef std::map< unsigned int, ActiveVarInfo > ActiveUniformMap;
+         typedef std::map< std::string, ActiveVarInfo > ActiveVarInfoMap;
+@@ -296,11 +297,56 @@
+                 void resetAppliedUniforms() const
+                 {
+                     _lastAppliedUniformList.clear();
++#ifdef __vita__
++                    for (LastAppliedUniformVec::iterator itr = _lastAppliedUniformVec.begin();
++                         itr != _lastAppliedUniformVec.end(); ++itr)
++                    {
++                        itr->first = 0;
++                        itr->second = 0;
++                    }
++#endif
+                 }
+ 
+ 
+                 inline void apply(const Uniform& uniform) const
+                 {
++#ifdef __vita__
++                    // O(1) path: location + dense slot cached on the Uniform.
++                    GLint location;
++                    unsigned int idx;
++                    if (uniform._vitaLocPCP == this)
++                    {
++                        location = uniform._vitaLoc;
++                        idx = uniform._vitaIdx;
++                    }
++                    else
++                    {
++                        ActiveUniformMap::const_iterator itr = _uniformInfoMap.find(uniform.getNameID());
++                        if (itr != _uniformInfoMap.end())
++                        {
++                            location = itr->second._location;
++                            idx = itr->second._denseIndex;
++                        }
++                        else
++                        {
++                            location = -1;
++                            idx = 0;
++                        }
++                        uniform._vitaLocPCP = this;
++                        uniform._vitaLoc = location;
++                        uniform._vitaIdx = idx;
++                    }
++                    if (location >= 0 && idx < _lastAppliedUniformVec.size())
++                    {
++                        UniformModifiedCountPair& slot = _lastAppliedUniformVec[idx];
++                        if (slot.first.get() != &uniform || slot.second != uniform.getModifiedCount())
++                        {
++                            uniform.apply(_extensions.get(), location);
++                            slot.first = &uniform;
++                            slot.second = uniform.getModifiedCount();
++                        }
++                    }
++#else
+                     GLint location = getUniformLocation(uniform.getNameID());
+                     if (location>=0)
+                     {
+@@ -320,6 +366,7 @@
+                             _lastAppliedUniformList[location].second = uniform.getModifiedCount();
+                         }
+                     }
++#endif
+                 }
+ 
+                 const ActiveUniformMap& getActiveUniforms() const {return _uniformInfoMap;}
+@@ -382,6 +429,10 @@
+ 
+                 typedef std::pair<osg::ref_ptr<const osg::Uniform>, unsigned int> UniformModifiedCountPair;
+                 typedef std::map<unsigned int, UniformModifiedCountPair> LastAppliedUniformList;
++#ifdef __vita__
++                typedef std::vector<UniformModifiedCountPair> LastAppliedUniformVec;
++                mutable LastAppliedUniformVec _lastAppliedUniformVec;
++#endif
+                 mutable LastAppliedUniformList _lastAppliedUniformList;
+ 
+                 typedef std::vector< ref_ptr<Shader> > ShaderList;
+--- a/include/osg/Uniform
++++ b/include/osg/Uniform
+@@ -874,6 +874,13 @@
+           * you must call if modifying the internal data array directly. */
+         inline void dirty() { ++_modifiedCount; }
+ 
++#ifdef __vita__
++        // Per-program location cache; kills map lookups in the apply path.
++        mutable const void* _vitaLocPCP{ nullptr };
++        mutable GLint _vitaLoc{ -1 };
++        mutable unsigned int _vitaIdx{ 0 };
++#endif
++
+         /** Set the internal data array for a osg::Uniform */
+         bool setArray( FloatArray* array );
+         bool setArray( DoubleArray* array );
+--- a/src/osgUtil/CullVisitor.cpp
++++ b/src/osgUtil/CullVisitor.cpp
+@@ -38,6 +38,16 @@
+ using namespace osg;
+ using namespace osgUtil;
+ 
++#ifdef __vita__
++extern "C" {
++    unsigned int cullprof_node = 0, cullprof_group = 0, cullprof_transform = 0, cullprof_geode = 0,
++        cullprof_drawable = 0, cullprof_dcull = 0, cullprof_leaves = 0, cullprof_sg = 0;
++}
++#define CULLPROF_INC(x) (++x)
++#else
++#define CULLPROF_INC(x) ((void)0)
++#endif
++
+ inline float MAX_F(float a, float b)
+     { return a>b?a:b; }
+ inline int EQUAL_F(float a, float b)
+@@ -861,6 +871,7 @@
+ 
+ void CullVisitor::apply(Node& node)
+ {
++    CULLPROF_INC(cullprof_node);
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
+@@ -882,6 +893,7 @@
+ 
+ void CullVisitor::apply(Geode& node)
+ {
++    CULLPROF_INC(cullprof_geode);
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
+@@ -902,6 +914,7 @@
+ 
+ void CullVisitor::apply(osg::Drawable& drawable)
+ {
++    CULLPROF_INC(cullprof_drawable);
+     RefMatrix& matrix = *getModelViewMatrix();
+ 
+     const BoundingBox &bb =drawable.getBoundingBox();
+@@ -919,7 +932,11 @@
+         }
+     }
+ 
+-    if (drawable.isCullingActive() && isCulled(bb)) return;
++    if (drawable.isCullingActive() && isCulled(bb))
++    {
++        CULLPROF_INC(cullprof_dcull);
++        return;
++    }
+ 
+ 
+     if (_computeNearFar && bb.valid())
+@@ -969,6 +986,7 @@
+     }
+     else
+     {
++        CULLPROF_INC(cullprof_leaves);
+         addDrawableAndDepth(&drawable,&matrix,depth);
+     }
+ 
+@@ -1136,6 +1154,7 @@
+ 
+ void CullVisitor::apply(Group& node)
+ {
++    CULLPROF_INC(cullprof_group);
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
+@@ -1156,6 +1175,7 @@
+ 
+ void CullVisitor::apply(Transform& node)
+ {
++    CULLPROF_INC(cullprof_transform);
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
+--- a/include/osgUtil/StateGraph
++++ b/include/osgUtil/StateGraph
+@@ -26,6 +26,10 @@
+ #include <vector>
+ #include <algorithm>
+ 
++#ifdef __vita__
++extern "C" unsigned int cullprof_sg;
++#endif
++
+ namespace osgUtil {
+ 
+ struct LessDepthSortFunctor
+@@ -214,6 +218,9 @@
+ 
+         inline StateGraph* find_or_insert(const osg::StateSet* stateset)
+         {
++#ifdef __vita__
++            ++cullprof_sg;
++#endif
+             // search for the appropriate state group, return it if found.
+             ChildList::iterator itr = _children.find(stateset);
+             if (itr!=_children.end()) return itr->second.get();

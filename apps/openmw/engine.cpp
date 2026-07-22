@@ -436,7 +436,32 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
 #ifdef __vita__
     const uint64_t renderStartUs = sceKernelGetProcessTimeWide();
-    if (mSimWorker && mSimOverlap)
+    if (mSimWorker && mSimOverlap && mCullOverlap)
+    {
+        // Stage C: worker culls N then sims N+1; main draws N-1 meanwhile.
+        // Draw lags cull by one frame (adds one frame of latency).
+        auto* renderer = static_cast<osgViewer::Renderer*>(mViewer->getCamera()->getRenderer());
+        if (renderer->getGraphicsThreadDoesCull())
+            renderer->setGraphicsThreadDoesCull(false);
+        const bool nextPaused = mWorld->getTimeManager()->isPaused();
+        const float nextDt = frametime; // estimate; corrected next frame
+        const unsigned nextFrame = frameNumber + 1;
+        const bool havePrev = mCullPrimed;
+        Vita::setDrawInFlight(true);
+        mSimWorker->run([this, renderer, frameStart, nextFrame, nextDt, nextPaused] {
+            renderer->cull();
+            runSimPhases(frameStart, nextFrame, nextDt, nextPaused);
+        });
+        mSimPrimed = true;
+        mCullPrimed = true;
+        if (havePrev)
+        {
+            renderer->draw();
+            mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+        }
+        Vita::setDrawInFlight(false);
+    }
+    else if (mSimWorker && mSimOverlap)
     {
         // Kick next frame's sim after cull; it overlaps draw+swap.
         // Draw reads cull-cached matrices, so sim writes are safe.
@@ -1194,6 +1219,20 @@ void OMW::Engine::go()
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();
         mSimOverlap = Settings::general().mVitaSimOverlap;
+        mCullOverlap = Settings::general().mVitaCullOverlap;
+        // Nested render loops (loading, video) must consume a pending
+        // culled frame first or the queue serves them a stale scene.
+        Vita::setDrainDrawHook([this] {
+            if (!mCullPrimed)
+                return;
+            // From sim thread: cull already ran (it precedes sim in the batch);
+            // finish() here would deadlock on our own job.
+            if (!Vita::isSimThread())
+                mSimWorker->finish();
+            auto* renderer = static_cast<osgViewer::Renderer*>(mViewer->getCamera()->getRenderer());
+            renderer->draw();
+            mCullPrimed = false;
+        });
     }
 #endif
 
@@ -1299,6 +1338,11 @@ void OMW::Engine::go()
                               .count()
             * timeManager.getSimulationTimeScale();
 
+#ifdef __vita__
+        // Cull overlap: worker reads the frame stamp; idle it before advance.
+        if (mSimWorker && mCullOverlap && mSimPrimed)
+            mSimWorker->finish();
+#endif
         mViewer->advance(timeManager.getRenderingSimulationTime());
 
         const unsigned frameNumber = mViewer->getFrameStamp()->getFrameNumber();

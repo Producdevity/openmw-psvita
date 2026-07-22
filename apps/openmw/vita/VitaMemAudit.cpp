@@ -13,6 +13,15 @@
 
 #include <vitaGL.h>
 
+extern "C"
+{
+    extern uint32_t osgprof_mat_us, osgprof_state_us, osgprof_unif_us, osgprof_draw_us, osgprof_leaves;
+    extern unsigned int cullprof_node, cullprof_group, cullprof_transform, cullprof_geode, cullprof_drawable,
+        cullprof_dcull, cullprof_leaves, cullprof_sg;
+    extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
+    extern uint32_t osgapply_push, osgapply_pop;
+}
+
 #include <cstdint>
 
 #include <osg/Camera>
@@ -343,6 +352,43 @@ namespace Vita
         SceneUtil::gLightCbCalls = 0;
         SceneUtil::gLightCbUs = 0;
         auditLog(buf);
+
+        // Per-leaf OSG draw-dispatch cost (probes in RenderLeaf.cpp).
+        if (osgprof_leaves > 0)
+        {
+            snprintf(buf, sizeof(buf), "[OsgProf] leaves=%u mat=%.1f state=%.1f unif=%.1f draw=%.1f us/leaf",
+                osgprof_leaves, (double)osgprof_mat_us / osgprof_leaves, (double)osgprof_state_us / osgprof_leaves,
+                (double)osgprof_unif_us / osgprof_leaves, (double)osgprof_draw_us / osgprof_leaves);
+            auditLog(buf);
+        }
+        osgprof_mat_us = osgprof_state_us = osgprof_unif_us = osgprof_draw_us = osgprof_leaves = 0;
+
+        // Cull traversal shape: visits per frame by node kind.
+        if (cullprof_drawable > 0)
+        {
+            snprintf(buf, sizeof(buf),
+                "[CullProf] node=%u grp=%u xf=%u geode=%u drw=%u dcull=%u leaves=%u sg=%u /frame",
+                cullprof_node / kReportEveryFrames, cullprof_group / kReportEveryFrames,
+                cullprof_transform / kReportEveryFrames, cullprof_geode / kReportEveryFrames,
+                cullprof_drawable / kReportEveryFrames, cullprof_dcull / kReportEveryFrames,
+                cullprof_leaves / kReportEveryFrames, cullprof_sg / kReportEveryFrames);
+            auditLog(buf);
+        }
+        cullprof_node = cullprof_group = cullprof_transform = cullprof_geode = 0;
+        cullprof_drawable = cullprof_dcull = cullprof_leaves = cullprof_sg = 0;
+
+        // Inside State::apply: which section eats the state bucket.
+        if (osgapply_calls > 0)
+        {
+            snprintf(buf, sizeof(buf),
+                "[OsgApply] calls=%u tex=%.1f mode=%.1f attr=%.1f unif=%.1f us/call push=%u pop=%u",
+                osgapply_calls, (double)osgapply_tex_us / osgapply_calls, (double)osgapply_mode_us / osgapply_calls,
+                (double)osgapply_attr_us / osgapply_calls, (double)osgapply_unif_us / osgapply_calls, osgapply_push,
+                osgapply_pop);
+            auditLog(buf);
+        }
+        osgapply_calls = osgapply_tex_us = osgapply_mode_us = osgapply_attr_us = osgapply_unif_us = 0;
+        osgapply_push = osgapply_pop = 0;
     }
 
     void noteRenderTime(unsigned long long us)
