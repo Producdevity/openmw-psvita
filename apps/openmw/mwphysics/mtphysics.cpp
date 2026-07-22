@@ -369,12 +369,8 @@ namespace MWPhysics
         void wakeUpWorkers()
         {
 #ifdef __vita__
-            // Increment under mutex; else lost wakeup freezes workers.
-            {
-                const std::lock_guard lock(mHasJobMutex);
-                mFrameCounter.fetch_add(1, std::memory_order_release);
-            }
-            mHasJob.notify_all();
+            // Workers poll; no CV, no lost-wakeup window.
+            mFrameCounter.fetch_add(1, std::memory_order_release);
 #else
             const std::lock_guard lock(mHasJobMutex);
             ++mFrameCounter;
@@ -384,9 +380,13 @@ namespace MWPhysics
 
         void stopWorkers()
         {
+#ifdef __vita__
+            mShouldStop.store(true, std::memory_order_release);
+#else
             const std::lock_guard lock(mHasJobMutex);
             mShouldStop = true;
             mHasJob.notify_all();
+#endif
         }
 
         void workIsDone()
@@ -403,33 +403,37 @@ namespace MWPhysics
         template <class F>
         void runWorker(F&& f) noexcept
         {
+#ifdef __vita__
+            // Atomic poll; condition_variable is unreliable on Vita.
             std::size_t lastFrame = 0;
-            std::unique_lock lock(mHasJobMutex);
-            while (!mShouldStop)
+            while (!mShouldStop.load(std::memory_order_acquire))
             {
-#ifdef __vita__
-                mHasJob.wait(lock, [&] {
-                    return mShouldStop
-                        || mFrameCounter.load(std::memory_order_acquire) != lastFrame;
-                });
-                lastFrame = mFrameCounter.load(std::memory_order_acquire);
-#else
-                mHasJob.wait(lock, [&] { return mShouldStop || mFrameCounter != lastFrame; });
-                lastFrame = mFrameCounter;
-#endif
-                lock.unlock();
-#ifdef __vita__
+                const std::size_t frame = mFrameCounter.load(std::memory_order_acquire);
+                if (frame == lastFrame)
+                {
+                    sceKernelDelayThread(50);
+                    continue;
+                }
+                lastFrame = frame;
                 try { f(); }
                 catch (const std::exception& e)
                 {
                     Log(Debug::Error) << "Physics worker exception: " << e.what();
                 }
                 catch (...) { Log(Debug::Error) << "Physics worker: unknown exception"; }
+            }
 #else
+            std::size_t lastFrame = 0;
+            std::unique_lock lock(mHasJobMutex);
+            while (!mShouldStop)
+            {
+                mHasJob.wait(lock, [&] { return mShouldStop || mFrameCounter != lastFrame; });
+                lastFrame = mFrameCounter;
+                lock.unlock();
                 f();
-#endif
                 lock.lock();
             }
+#endif
         }
 
     private:
@@ -441,7 +445,11 @@ namespace MWPhysics
         std::condition_variable mWorkersDone;
         std::mutex mWorkersDoneMutex;
         std::condition_variable mHasJob;
+#ifdef __vita__
+        std::atomic<bool> mShouldStop{ false };
+#else
         bool mShouldStop = false;
+#endif
 #ifdef __vita__
         std::atomic<std::size_t> mFrameCounter{0};
 #else

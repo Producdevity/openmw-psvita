@@ -276,6 +276,8 @@ if (ANDROID)
 endif (ANDROID)
 
 if (VITA)
+    # Attr-less pthreads get 256KB stacks (default 32KB; Bullet EPA needs ~30KB).
+    target_link_options(openmw PRIVATE "-Wl,--wrap=pthread_create")
     # OSG libs excluded from USED_OSG_COMPONENTS but still needed for linking.
     foreach(_osgextra osgParticle osgShadow)
         if(NOT TARGET ${_osgextra})

@@ -50,6 +50,8 @@ namespace Settings
         SettingValue<bool> mVitaSimThread{ mIndex, "General", "vita sim thread", true };
         // Vita: overlap next frame's sim with draw (requires sim thread).
         SettingValue<bool> mVitaSimOverlap{ mIndex, "General", "vita sim overlap", true };
+        // Vita: dialogue text stays on disk until first use.
+        SettingValue<bool> mVitaLazyDialogue{ mIndex, "General", "vita lazy dialogue", true };
         SettingValue<bool> mNotifyOnSavedScreenshot{ mIndex, "General", "notify on saved screenshot" };
         SettingValue<std::vector<std::string>> mPreferredLocales{ mIndex, "General", "preferred locales" };
         SettingValue<bool> mGmstOverridesL10n{ mIndex, "General", "gmst overrides l10n" };

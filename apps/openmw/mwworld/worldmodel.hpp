@@ -4,6 +4,7 @@
 #include <list>
 #include <map>
 #ifdef __vita__
+#include <functional>
 #include <set>
 #endif
 #include <string>
@@ -104,7 +105,10 @@ namespace MWWorld
         /// but never activated: not in \a activeCells, no game state, not in the
         /// Ptr cache. Their LiveCellRefs are recreated on demand. Measured: the
         /// new-game targeted-script burst pins ~60 loaded cells / ~11k refs.
-        std::size_t evictInactiveLoadedCellStores(const std::set<CellStore*, std::less<>>& activeCells);
+        /// \a onEvict runs per store before destruction so engine registries
+        /// (door states, projectile casters) can drop Ptrs into it.
+        std::size_t evictInactiveLoadedCellStores(
+            const std::set<CellStore*, std::less<>>& activeCells, const std::function<void(CellStore&)>& onEvict);
 #endif
 
         /// Get all Ptrs referencing \a name in exterior cells

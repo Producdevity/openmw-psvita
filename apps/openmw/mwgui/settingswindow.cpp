@@ -276,7 +276,9 @@ namespace MWGui
                 size_t idx = 2; // default to "20"
                 if (current < 16.5f)      idx = 0;  // 15
                 else if (current < 19.f)  idx = 1;  // 18
-                else                      idx = 2;  // 20
+                else if (current < 22.5f) idx = 2;  // 20
+                else if (current < 27.5f) idx = 3;  // 25
+                else                      idx = 4;  // 30
                 mVitaDynFogTargetFpsList->setIndexSelected(idx);
                 mVitaDynFogTargetFpsList->eventComboChangePosition
                     += MyGUI::newDelegate(this, &SettingsWindow::onVitaDynFogTargetFpsChanged);
@@ -788,7 +790,7 @@ namespace MWGui
     void SettingsWindow::onVitaDynFogTargetFpsChanged(MyGUI::ComboBox* /*sender*/, size_t pos)
     {
         // Indices aligned with layout AddItem order.
-        static constexpr float kValues[] = { 15.f, 18.f, 20.f };
+        static constexpr float kValues[] = { 15.f, 18.f, 20.f, 25.f, 30.f };
         if (pos >= std::size(kValues))
             return;
         Settings::camera().mVitaDynFogTargetFps.set(kValues[pos]);

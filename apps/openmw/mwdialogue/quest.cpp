@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include <components/esm3/loadinfo.hpp>
 #include <components/esm3/queststate.hpp>
 
 #include "../mwbase/luamanager.hpp"
@@ -39,7 +40,7 @@ namespace MWDialogue
         for (ESM::Dialogue::InfoContainer::const_iterator iter(dialogue->mInfo.begin()); iter != dialogue->mInfo.end();
              ++iter)
             if (iter->mQuestStatus == ESM::DialInfo::QS_Name)
-                return iter->mResponse;
+                return ESM::getDialInfoText(*iter);
 
         return {};
     }

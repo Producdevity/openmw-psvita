@@ -18,6 +18,8 @@
 
 #ifdef __vita__
 #include "../vita/VitaInit.h"
+#include <components/vita/VitaDialogueText.h>
+#include <components/vita/VitaEsmPrefetch.h>
 #endif
 
 namespace MWWorld
@@ -49,6 +51,13 @@ namespace MWWorld
                 reader->setEncoder(mEncoder);
                 reader->setIndex(index);
 #ifdef __vita__
+                Vita::DialogueText::registerContentFile(index, filepath);
+                if (auto prefetched = Vita::EsmPrefetch::takeStream(filepath))
+                {
+                    // Parse behind the background reader's watermark.
+                    reader->open(std::move(prefetched), filepath);
+                }
+                else
                 // Slurp the whole file: one bulk SD read, then parse from RAM
                 // with zero syscalls. Buffers released after setUp (worldimp
                 // clears the readers cache; contexts reopen from disk later).

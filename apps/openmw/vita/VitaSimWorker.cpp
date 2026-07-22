@@ -2,6 +2,7 @@
 
 #ifdef __vita__
 
+#include <atomic>
 #include <cstdio>
 #include <exception>
 
@@ -14,11 +15,25 @@ namespace Vita
     namespace
     {
         thread_local bool tIsSimThread = false;
+        std::atomic<bool> sDrawInFlight{ false };
     }
 
     bool isSimThread()
     {
         return tIsSimThread;
+    }
+
+    void setDrawInFlight(bool inFlight)
+    {
+        sDrawInFlight.store(inFlight, std::memory_order_release);
+    }
+
+    void simFence()
+    {
+        if (!tIsSimThread)
+            return;
+        while (sDrawInFlight.load(std::memory_order_acquire))
+            sceKernelDelayThread(50);
     }
 
     SimWorker::SimWorker()

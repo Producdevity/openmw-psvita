@@ -11,6 +11,8 @@
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 
+#include <vitaGL.h>
+
 #include <cstdint>
 
 #include <osg/Camera>
@@ -29,6 +31,7 @@
 #include <components/resource/objectcache.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
+#include <components/sceneutil/lightmanager.hpp>
 
 #include "../mwworld/cellstore.hpp"
 #include "../mwworld/esmstore.hpp"
@@ -315,23 +318,30 @@ namespace Vita
         s_renderUsAccum = 0;
         s_renderSamples = 0;
 
+        const unsigned vramFreeMB = static_cast<unsigned>(vglMemFree(VGL_MEM_VRAM) >> 20);
+        const unsigned vramTotalMB = static_cast<unsigned>(vglMemTotal(VGL_MEM_VRAM) >> 20);
+
         char buf[256];
         snprintf(buf, sizeof(buf),
             "[Frame] avg=%.1fms render=%.1f (cull=%.1f draw=%.1f) update=%.1f | mech=%.1f phys=%.1f world=%.1f "
-            "gui=%.1f lua=%.1f script=%.1f input=%.1f sound=%.1f",
+            "gui=%.1f lua=%.1f script=%.1f input=%.1f sound=%.1f | vram=%u/%uMB free",
             frameMs, renderMs, msOf(camStats, "Cull traversal time taken"),
             msOf(camStats, "Draw traversal time taken"), msOf(viewerStats, "Update traversal time taken"),
             msOf(viewerStats, "mechanics_time_taken"), msOf(viewerStats, "physics_time_taken"),
             msOf(viewerStats, "world_time_taken"), msOf(viewerStats, "gui_time_taken"),
             msOf(viewerStats, "lua_time_taken"), msOf(viewerStats, "script_time_taken"),
-            msOf(viewerStats, "input_time_taken"), msOf(viewerStats, "sound_time_taken"));
+            msOf(viewerStats, "input_time_taken"), msOf(viewerStats, "sound_time_taken"), vramFreeMB, vramTotalMB);
         auditLog(buf);
         snprintf(buf, sizeof(buf),
-            "[Scene] drawables=%.0f fast=%.0f lights=%.0f bins=%.0f tris=%.0f strips=%.0f",
+            "[Scene] drawables=%.0f fast=%.0f lights=%.0f bins=%.0f tris=%.0f strips=%.0f lightCb=%u/%.2fms",
             countOf(camStats, "Visible number of drawables"), countOf(camStats, "Visible number of fast drawables"),
             countOf(camStats, "Visible number of lights"), countOf(camStats, "Visible number of render bins"),
             countOf(camStats, "Visible number of GL_TRIANGLES"),
-            countOf(camStats, "Visible number of GL_TRIANGLE_STRIP"));
+            countOf(camStats, "Visible number of GL_TRIANGLE_STRIP"),
+            SceneUtil::gLightCbCalls / kReportEveryFrames,
+            SceneUtil::gLightCbUs / 1000.0 / kReportEveryFrames);
+        SceneUtil::gLightCbCalls = 0;
+        SceneUtil::gLightCbUs = 0;
         auditLog(buf);
     }
 

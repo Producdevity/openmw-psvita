@@ -113,8 +113,6 @@ namespace Vita
 
     static const char* s_litFragSource =
         "uniform sampler2D diffuseMap;\n"
-        "uniform vec4 u_fogColor;\n"
-        "uniform vec3 u_ambient;\n"
         "uniform float alphaRef;\n"
         "\n"
         "varying vec2 v_texCoord;\n"
@@ -207,7 +205,6 @@ namespace Vita
         "uniform sampler2D blendMap;\n"
         "uniform int u_hasBlendMap;\n"
         "uniform vec4 u_fogColor;\n"
-        "uniform vec3 u_ambient;\n"
         "\n"
         "varying vec2 v_texCoord;\n"
         "varying vec2 v_texCoord2;\n"
@@ -240,7 +237,6 @@ namespace Vita
         "uniform int u_numLayers;\n"
         "uniform vec4 u_fogColor;\n"
         "uniform vec3 u_fogColorEffective;\n"
-        "uniform vec3 u_ambient;\n"
         "\n"
         "varying vec2 v_texCoord;\n"
         "varying vec2 v_texCoord2;\n"

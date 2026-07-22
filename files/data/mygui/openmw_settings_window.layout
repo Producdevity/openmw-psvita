@@ -815,6 +815,8 @@
                         <Property key="AddItem" value="15 (Max Distance)"/>
                         <Property key="AddItem" value="18 (Long Distance)"/>
                         <Property key="AddItem" value="20 (Balanced)"/>
+                        <Property key="AddItem" value="25 (Smooth)"/>
+                        <Property key="AddItem" value="30 (Fluid)"/>
                     </Widget>
                 </Widget>
                 <!-- Dynamic Fog Aggression: how hard the controller shrinks fog when fps lags target -->

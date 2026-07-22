@@ -141,10 +141,13 @@ namespace Vita
 
         breadcrumb("[VitaIME] Dialog opened, entering poll loop.");
 
-        // Poll until dialog finishes, calling vglSwapBuffers(GL_TRUE)
-        // to keep the common dialog overlay rendering.
+        // Poll until dialog finishes. Render a real cleared scene each
+        // swap: the common dialog composites onto the frame, and a swap
+        // with no scene leaves it nothing valid to draw into.
         while (sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING)
         {
+            glClearColor(0.f, 0.f, 0.f, 1.f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             vglSwapBuffers(GL_TRUE);
         }
 
@@ -163,7 +166,14 @@ namespace Vita
             return text;
         }
 
-        breadcrumb("[VitaIME] Dialog cancelled.");
+        {
+            // Diagnose: which button closed it, and what was typed.
+            const std::string text = utf16ToUtf8(resultUtf16);
+            char buf[256];
+            snprintf(buf, sizeof(buf), "[VitaIME] Dialog cancelled (button=%d, buffer=\"%s\")",
+                (int)dialogResult.button, text.c_str());
+            breadcrumb(buf);
+        }
         return {};
     }
 

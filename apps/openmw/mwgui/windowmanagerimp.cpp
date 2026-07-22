@@ -799,8 +799,7 @@ namespace MWGui
         std::string_view message, const std::vector<std::string>& buttons, bool block, int defaultFocus)
     {
 #ifdef __vita__
-        if (Vita::isSimThread())
-            vitaBreadcrumb("[SimWorker] WARNING: interactive messagebox from sim thread");
+        Vita::simFence(); // GUI mutation; wait out overlapped draw.
 #endif
         mMessageBoxManager->createInteractiveMessageBox(message, buttons, block, defaultFocus);
         updateVisible();
@@ -1449,6 +1448,9 @@ namespace MWGui
 
     void WindowManager::pushGuiMode(GuiMode mode, const MWWorld::Ptr& arg, bool force)
     {
+#ifdef __vita__
+        Vita::simFence(); // GUI mutation; wait out overlapped draw.
+#endif
         if (mode == GM_Inventory && mAllowed == GW_None)
             return;
 
@@ -1573,6 +1575,9 @@ namespace MWGui
 
     void WindowManager::removeGuiMode(GuiMode mode)
     {
+#ifdef __vita__
+        Vita::simFence(); // GUI mutation; wait out overlapped draw.
+#endif
         if (!mGuiModes.empty() && mGuiModes.back() == mode)
         {
             popGuiMode();
@@ -1736,6 +1741,9 @@ namespace MWGui
 
     void WindowManager::allow(GuiWindow wnd)
     {
+#ifdef __vita__
+        Vita::simFence(); // GUI mutation; wait out overlapped draw.
+#endif
         mAllowed = (GuiWindow)(mAllowed | wnd);
 
         if (wnd & GW_Inventory)
@@ -1883,6 +1891,9 @@ namespace MWGui
 
     void WindowManager::addVisitedLocation(const std::string& name, int x, int y)
     {
+#ifdef __vita__
+        Vita::simFence(); // GUI mutation; wait out overlapped draw.
+#endif
         mMap->addVisitedLocation(name, x, y);
     }
 
@@ -2049,6 +2060,9 @@ namespace MWGui
         mToolTips->clear();
 
         mSelectedSpell = ESM::RefId();
+        // Ptrs into the old world; preloadSpells derefs them after new game.
+        mSelectedEnchantItem = MWWorld::Ptr();
+        mSelectedWeapon = MWWorld::Ptr();
         mCustomMarkers.clear();
 
         mForceHidden = GW_None;

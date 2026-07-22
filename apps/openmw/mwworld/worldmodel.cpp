@@ -461,7 +461,8 @@ std::size_t MWWorld::WorldModel::evictSweptCellStores()
     return std::erase_if(mCells, [&](auto& entry) { return toEvict.count(&entry.second) > 0; });
 }
 
-std::size_t MWWorld::WorldModel::evictInactiveLoadedCellStores(const std::set<CellStore*, std::less<>>& activeCells)
+std::size_t MWWorld::WorldModel::evictInactiveLoadedCellStores(
+    const std::set<CellStore*, std::less<>>& activeCells, const std::function<void(CellStore&)>& onEvict)
 {
     std::unordered_set<const CellStore*> toEvict;
     for (auto& [id, store] : mCells)
@@ -479,6 +480,12 @@ std::size_t MWWorld::WorldModel::evictInactiveLoadedCellStores(const std::set<Ce
 
     if (toEvict.empty())
         return 0;
+
+    // Engine registries drop their Ptrs before the refs die.
+    if (onEvict)
+        for (auto& [id, store] : mCells)
+            if (toEvict.count(&store) > 0)
+                onEvict(store);
 
     std::erase_if(mInteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
     std::erase_if(mExteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });

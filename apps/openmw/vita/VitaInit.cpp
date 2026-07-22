@@ -2,6 +2,8 @@
 
 #include "VitaInit.h"
 
+#include <pthread.h>
+
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
@@ -35,8 +37,6 @@
 // newlib crt0 resolve them as unmangled C symbols at process startup.
 // Inside a C++ namespace they get name-mangled and the loader can't find them,
 // silently falling back to defaults (wrong heap size, 256KB stack -> overflow).
-// These symbols MUST be at file scope with C linkage — the Vita loader and
-// newlib crt0 resolve them as unmangled C symbols at process startup.
 extern "C" {
 // Extra memory mode (ATTRIBUTE2=12) grants ~357MB total user RAM.
 // Heap arc: 272 -> 288 -> 304 -> 312 -> 320 (game launched but froze
@@ -50,6 +50,21 @@ extern "C" {
 // meaningfully more usable working set than 312 originally did.
 unsigned int _newlib_heap_size_user = 312 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
+
+// Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.
+// Linker --wrap gives every attr-less thread 256KB instead.
+int __real_pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);
+int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg)
+{
+    if (attr)
+        return __real_pthread_create(thread, attr, fn, arg);
+    pthread_attr_t big;
+    pthread_attr_init(&big);
+    pthread_attr_setstacksize(&big, 256 * 1024);
+    const int result = __real_pthread_create(thread, &big, fn, arg);
+    pthread_attr_destroy(&big);
+    return result;
+}
 
 // Write an unsigned int as decimal to fd (no heap allocation)
 static void writeUint(SceUID fd, unsigned int val)
@@ -1215,6 +1230,11 @@ namespace Vita
         vglUseLowPrecision(GL_TRUE);
         // SHARK_OPT_UNSAFE: most aggressive ALU rewrites; HAVE_SHADER_CACHE=1 amortises compile.
         vglSetupRuntimeShaderCompiler(SHARK_OPT_UNSAFE, 1, 1, 1);
+        {
+            char bstamp[96];
+            snprintf(bstamp, sizeof(bstamp), "BOOT: build %s %s", __DATE__, __TIME__);
+            breadcrumb(bstamp);
+        }
         breadcrumb("BOOT: vitaGL initialized");
 
         // IME sysmodule is loaded later by Vita::initIme()
