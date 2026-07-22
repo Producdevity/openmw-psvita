@@ -300,7 +300,13 @@ namespace MWWorld
 
         fillGlobalVariables();
 
+#ifdef __vita__
+        VITA_CRUMB("loadData: store setUp");
+#endif
         mStore.setUp();
+#ifdef __vita__
+        VITA_CRUMB("loadData: validateRecords");
+#endif
         mStore.validateRecords(mReaders);
         mStore.movePlayerRecord();
 #ifdef __vita__
@@ -308,9 +314,8 @@ namespace MWWorld
         // Later context restores reopen the files from disk on demand.
         mReaders.clear();
         Vita::EsmPrefetch::finish();
-        // Coalesce the freed slurp buffers; a fragmented free list makes the
-        // next allocation storm (first NpcAnimation) pathologically slow.
-        malloc_trim(0);
+        // malloc_trim moved to Engine after the load join: trimming here
+        // ran concurrently with main-thread GUI allocation.
         vitaMemBreadcrumb("[VitaAudit] after ESMStore setUp");
         Vita::auditDialogueStore(mStore);
 #endif

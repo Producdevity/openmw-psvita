@@ -4,6 +4,10 @@
 #include <chrono>
 #include <future>
 #include <system_error>
+#include <thread>
+#ifdef __vita__
+#include <malloc.h>
+#endif
 
 #include <osgDB/ReaderWriter>
 #include <osgDB/Registry>
@@ -21,6 +25,7 @@
 #include "vita/VitaMemAudit.h"
 #include "vita/VitaSimWorker.h"
 #include <components/vita/VitaDialogueText.h>
+#include <components/vita/VitaEsmPrefetch.h>
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
@@ -28,6 +33,7 @@
 #endif
 
 #include <components/misc/rng.hpp>
+#include <components/misc/pathhelpers.hpp>
 #include <components/misc/strings/format.hpp>
 
 #include <components/vfs/manager.hpp>
@@ -922,6 +928,20 @@ void OMW::Engine::prepareEngine()
         VFS::registerArchives(mVFS.get(), mFileCollections, mArchives, true,
             &mEncoder.get()->getStatelessEncoder(), cacheDir);
     }
+
+    {
+        // Kick ESM reads now; the parser consumes them after GUI bring-up.
+        std::vector<std::filesystem::path> toPrefetch;
+        for (const std::string& file : mContentFiles)
+        {
+            if (Misc::getFileExtension(file) == "omwscripts")
+                continue;
+            const Files::MultiDirCollection& col = mFileCollections.getCollection(Misc::getFileExtension(file));
+            if (col.doesExist(file))
+                toPrefetch.push_back(col.getPath(file));
+        }
+        Vita::EsmPrefetch::start(std::move(toPrefetch));
+    }
 #else
     VFS::registerArchives(mVFS.get(), mFileCollections, mArchives, true, &mEncoder.get()->getStatelessEncoder());
 #endif
@@ -1056,14 +1076,21 @@ void OMW::Engine::prepareEngine()
         Vita::DialogueText::setEncoding(mEncoding);
     }
     Vita::logMemoryStatus("Pre-data-load");
-    VITA_CRUMB("prepareEngine() loading data sync");
-    // Load data synchronously on Vita — saves async thread stack (~1MB)
-    // Pass listener directly (not asyncListener) since loading is synchronous.
-    // AsyncListener buffers updates for cross-thread use, but nobody calls update()
-    // on the main thread during sync loading, so the loading screen never draws.
+    VITA_CRUMB("prepareEngine() loading data async");
+    // Parse chases the prefetch reads started before createWindow.
     listener->loadingOn();
-    mWorld->loadData(mFileCollections, mContentFiles, mGroundcoverFiles, mEncoder.get(), listener);
-    listener->loadingOff();
+    {
+        auto dataLoading = std::async(std::launch::async,
+            [&] { mWorld->loadData(mFileCollections, mContentFiles, mGroundcoverFiles, mEncoder.get(), &asyncListener); });
+        using namespace std::chrono_literals;
+        while (dataLoading.wait_for(50ms) != std::future_status::ready)
+            asyncListener.update();
+        dataLoading.get();
+    }
+    // Loader stays on through world init and initUI; off before main loop.
+    listener->setLabel("Initializing...", true);
+    // Coalesce freed slurp buffers before initUI's allocation storm.
+    malloc_trim(0);
     Files::saveScanCache(
         mCfgMgr.getUserConfigPath() / "scan_cache.bin", mDataDirs, mFileCollections.getCollections());
     Vita::logMemoryStatus("Post-data-load");
@@ -1176,6 +1203,7 @@ void OMW::Engine::prepareEngine()
     mLuaWorker = std::make_unique<MWLua::Worker>(*mLuaManager);
 #ifdef __vita__
     Vita::logMemoryStatus("Post-LuaInit");
+    listener->loadingOff();
 #endif
     VITA_CRUMB("prepareEngine() done");
 }
