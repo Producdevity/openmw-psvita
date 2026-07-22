@@ -8,6 +8,7 @@
 #include <osgDB/ReaderWriter>
 #include <osgDB/Registry>
 #include <osgUtil/RenderBin>
+#include <osgViewer/Renderer>
 #include <osgViewer/ViewerEventHandlers>
 
 #include <SDL.h>
@@ -18,6 +19,7 @@
 #ifdef __vita__
 #include "vita/VitaInit.h"
 #include "vita/VitaMemAudit.h"
+#include "vita/VitaSimWorker.h"
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
@@ -199,56 +201,10 @@ void OMW::Engine::executeLocalScripts()
     }
 }
 
-bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, float frametime, bool paused)
 {
-    const osg::Timer_t frameStart = mViewer->getStartTick();
     const osg::Timer* const timer = osg::Timer::instance();
     osg::Stats* const stats = mViewer->getViewerStats();
-
-    mEnvironment.setFrameDuration(frametime);
-
-    try
-    {
-        // update input
-        {
-            ScopedProfile<UserStatsType::Input> profile(frameStart, frameNumber, *timer, *stats);
-            mInputManager->update(frametime, false);
-        }
-
-        // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
-        // If we are not currently rendering, then RenderItems will not be reused resulting in a memory leak upon
-        // changing widget textures (fixed in MyGUI 3.3.2), and destroyed widgets will not be deleted (not fixed yet,
-        // https://github.com/MyGUI/mygui/issues/21)
-        {
-            ScopedProfile<UserStatsType::Sound> profile(frameStart, frameNumber, *timer, *stats);
-
-            if (!mWindowManager->isWindowVisible())
-            {
-                mSoundManager->pausePlayback();
-                return false;
-            }
-            else
-                mSoundManager->resumePlayback();
-
-            // sound
-            if (mUseSound)
-                mSoundManager->update(frametime);
-        }
-
-        {
-            ScopedProfile<UserStatsType::LuaSyncUpdate> profile(frameStart, frameNumber, *timer, *stats);
-            // Should be called after input manager update and before any change to the game world.
-            // It applies to the game world queued changes from the previous frame.
-            mLuaManager->synchronizedUpdate();
-        }
-
-        // update game state
-        {
-            ScopedProfile<UserStatsType::State> profile(frameStart, frameNumber, *timer, *stats);
-            mStateManager->update(frametime);
-        }
-
-        bool paused = mWorld->getTimeManager()->isPaused();
 
         {
             ScopedProfile<UserStatsType::Script> profile(frameStart, frameNumber, *timer, *stats);
@@ -328,6 +284,86 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             }
         }
 
+}
+
+bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+{
+    const osg::Timer_t frameStart = mViewer->getStartTick();
+    const osg::Timer* const timer = osg::Timer::instance();
+    osg::Stats* const stats = mViewer->getViewerStats();
+
+    mEnvironment.setFrameDuration(frametime);
+
+    try
+    {
+#ifdef __vita__
+        // Finish overlapped sim before touching game state.
+        if (mSimWorker && mSimOverlap && mSimPrimed)
+            mSimWorker->finish();
+#endif
+        // update input
+        {
+            ScopedProfile<UserStatsType::Input> profile(frameStart, frameNumber, *timer, *stats);
+            mInputManager->update(frametime, false);
+        }
+
+        // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
+        // If we are not currently rendering, then RenderItems will not be reused resulting in a memory leak upon
+        // changing widget textures (fixed in MyGUI 3.3.2), and destroyed widgets will not be deleted (not fixed yet,
+        // https://github.com/MyGUI/mygui/issues/21)
+        {
+            ScopedProfile<UserStatsType::Sound> profile(frameStart, frameNumber, *timer, *stats);
+
+            if (!mWindowManager->isWindowVisible())
+            {
+                mSoundManager->pausePlayback();
+                return false;
+            }
+            else
+                mSoundManager->resumePlayback();
+
+            // sound
+            if (mUseSound)
+                mSoundManager->update(frametime);
+        }
+
+        {
+            ScopedProfile<UserStatsType::LuaSyncUpdate> profile(frameStart, frameNumber, *timer, *stats);
+            // Should be called after input manager update and before any change to the game world.
+            // It applies to the game world queued changes from the previous frame.
+            mLuaManager->synchronizedUpdate();
+        }
+
+        // update game state
+        {
+            ScopedProfile<UserStatsType::State> profile(frameStart, frameNumber, *timer, *stats);
+            mStateManager->update(frametime);
+        }
+
+        bool paused = mWorld->getTimeManager()->isPaused();
+
+#ifdef __vita__
+        if (mSimWorker && mSimOverlap)
+        {
+            // Sim already ran during draw; first frame bootstraps here.
+            if (!mSimPrimed)
+            {
+                mSimWorker->run([&] { runSimPhases(frameStart, frameNumber, frametime, paused); });
+                mSimWorker->finish();
+            }
+        }
+        else if (mSimWorker)
+        {
+            // Synchronous: sim on worker, same ordering.
+            mSimWorker->run([&] { runSimPhases(frameStart, frameNumber, frametime, paused); });
+            mSimWorker->finish();
+        }
+        else
+            runSimPhases(frameStart, frameNumber, frametime, paused);
+#else
+        runSimPhases(frameStart, frameNumber, frametime, paused);
+#endif
+
         // update world
         {
             ScopedProfile<UserStatsType::World> profile(frameStart, frameNumber, *timer, *stats);
@@ -397,9 +433,39 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     // if there is a separate Lua thread, it starts the update now
     mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
 
+#ifdef __vita__
+    const uint64_t renderStartUs = sceKernelGetProcessTimeWide();
+    if (mSimWorker && mSimOverlap)
+    {
+        // Kick next frame's sim after cull; it overlaps draw+swap.
+        // Draw reads cull-cached matrices, so sim writes are safe.
+        auto* renderer = static_cast<osgViewer::Renderer*>(mViewer->getCamera()->getRenderer());
+        // Else cull() no-ops and draw() blocks forever.
+        if (renderer->getGraphicsThreadDoesCull())
+            renderer->setGraphicsThreadDoesCull(false);
+        renderer->cull();
+        const bool nextPaused = mWorld->getTimeManager()->isPaused();
+        const float nextDt = frametime; // estimate; corrected next frame
+        const unsigned nextFrame = frameNumber + 1;
+        mSimWorker->run([this, frameStart, nextFrame, nextDt, nextPaused] {
+            runSimPhases(frameStart, nextFrame, nextDt, nextPaused);
+        });
+        mSimPrimed = true;
+        renderer->draw();
+        mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+    }
+    else
+        mViewer->renderingTraversals();
+    Vita::noteRenderTime(sceKernelGetProcessTimeWide() - renderStartUs);
+#else
     mViewer->renderingTraversals();
+#endif
 
     mLuaWorker->finishUpdate(frameStart, frameNumber, *stats);
+
+#ifdef __vita__
+    Vita::auditFrameStats(*mViewer);
+#endif
 
     return true;
 }
@@ -462,6 +528,9 @@ OMW::Engine::~Engine()
     mInputManager = nullptr;
     mStateManager = nullptr;
     mLuaWorker = nullptr;
+#ifdef __vita__
+    mSimWorker = nullptr;
+#endif
     mLuaManager = nullptr;
     mL10nManager = nullptr;
 
@@ -1107,8 +1176,17 @@ void OMW::Engine::go()
     // DrawThreadPerContext crashes on launch — vitaGL/SceGxm isn't safe
     // for draw submission from a non-main thread.
     mViewer->setThreadingModel(osgViewer::ViewerBase::SingleThreaded);
-    // Cheapest sort — skip per-frame state sorting in render bins.
-    osgUtil::RenderBin::setDefaultRenderBinSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
+    // Bin sort mode A/B via setting.
+    if (Settings::general().mVitaStateSortedBins)
+        osgUtil::RenderBin::setDefaultRenderBinSortMode(osgUtil::RenderBin::SORT_BY_STATE);
+    else
+        osgUtil::RenderBin::setDefaultRenderBinSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
+    // vitaGL is single-threaded; sim moves to a worker instead.
+    if (Settings::general().mVitaSimThread)
+    {
+        mSimWorker = std::make_unique<Vita::SimWorker>();
+        mSimOverlap = Settings::general().mVitaSimOverlap;
+    }
 #endif
 
     // Do not try to outsmart the OS thread scheduler (see bug #4785).
@@ -1386,6 +1464,10 @@ void OMW::Engine::go()
     }
 
     mLuaWorker->join();
+#ifdef __vita__
+    if (mSimWorker)
+        mSimWorker->join();
+#endif
 
     // Save user settings
     Settings::Manager::saveUser(mCfgMgr.getUserConfigPath() / "settings.cfg");

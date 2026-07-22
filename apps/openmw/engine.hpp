@@ -43,6 +43,13 @@ namespace MWLua
     class Worker;
 }
 
+#ifdef __vita__
+namespace Vita
+{
+    class SimWorker;
+}
+#endif
+
 namespace Stereo
 {
     class Manager;
@@ -141,6 +148,11 @@ namespace OMW
         std::unique_ptr<MWState::StateManager> mStateManager;
         std::unique_ptr<MWLua::LuaManager> mLuaManager;
         std::unique_ptr<MWLua::Worker> mLuaWorker;
+#ifdef __vita__
+        std::unique_ptr<Vita::SimWorker> mSimWorker;
+        bool mSimOverlap = false;
+        bool mSimPrimed = false;
+#endif
         std::unique_ptr<L10n::Manager> mL10nManager;
         MWBase::Environment mEnvironment;
         ToUTF8::FromType mEncoding;
@@ -192,6 +204,9 @@ namespace OMW
         Engine& operator=(const Engine&);
 
         void executeLocalScripts();
+
+        /// Scripts, mechanics, physics; may run on sim worker.
+        void runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, float frametime, bool paused);
 
         bool frame(unsigned frameNumber, float dt);
 

@@ -14,6 +14,11 @@ namespace Resource
     class ResourceSystem;
 }
 
+namespace osgViewer
+{
+    class Viewer;
+}
+
 namespace Vita
 {
     // Heap audits: [VitaAudit] lines to boot.log + sceClibPrintf.
@@ -26,6 +31,12 @@ namespace Vita
 
     // Resource cache entry counts and byte estimates.
     void auditResourceCaches(Resource::ResourceSystem* resourceSystem);
+
+    // Frame-phase and visible-scene stats, reported every ~5s. Call per frame.
+    void auditFrameStats(osgViewer::Viewer& viewer);
+
+    // Record this frame's renderingTraversals wall time (microseconds).
+    void noteRenderTime(unsigned long long us);
 }
 
 #endif // __vita__

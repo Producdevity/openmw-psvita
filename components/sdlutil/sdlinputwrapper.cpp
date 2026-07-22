@@ -1,5 +1,10 @@
 #include "sdlinputwrapper.hpp"
 
+#ifdef __vita__
+#include <cstdio>
+extern "C" void vitaBreadcrumb(const char* msg); // apps/openmw/vita/VitaInit.cpp
+#endif
+
 #include <components/debug/debuglog.hpp>
 #include <components/settings/values.hpp>
 
@@ -56,6 +61,30 @@ namespace SDLUtil
         mViewer->getEventQueue()->frame(0.f);
 
         SDL_PumpEvents();
+
+#ifdef __vita__
+        // ~1 Hz input health line.
+        {
+            static unsigned s_calls = 0;
+            static unsigned s_events = 0;
+            static unsigned s_padEvents = 0;
+            SDL_Event peek[16];
+            const int pending
+                = SDL_PeepEvents(peek, 16, SDL_PEEKEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT);
+            s_events += pending > 0 ? pending : 0;
+            for (int i = 0; i < (pending > 0 ? pending : 0); ++i)
+                if (peek[i].type == SDL_CONTROLLERBUTTONDOWN || peek[i].type == SDL_CONTROLLERBUTTONUP
+                    || peek[i].type == SDL_CONTROLLERAXISMOTION)
+                    ++s_padEvents;
+            if ((++s_calls & 31) == 0)
+            {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "[Input] calls=%u pending=%d pad=%u focus=%d", s_calls, pending,
+                    s_padEvents, mWindowHasFocus ? 1 : 0);
+                vitaBreadcrumb(buf);
+            }
+        }
+#endif
 
         SDL_Event evt;
 

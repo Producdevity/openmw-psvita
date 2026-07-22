@@ -1,5 +1,10 @@
 #include "windowmanagerimp.hpp"
 
+#ifdef __vita__
+#include "../vita/VitaInit.h"
+#include "../vita/VitaSimWorker.h"
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -793,6 +798,10 @@ namespace MWGui
     void WindowManager::interactiveMessageBox(
         std::string_view message, const std::vector<std::string>& buttons, bool block, int defaultFocus)
     {
+#ifdef __vita__
+        if (Vita::isSimThread())
+            vitaBreadcrumb("[SimWorker] WARNING: interactive messagebox from sim thread");
+#endif
         mMessageBoxManager->createInteractiveMessageBox(message, buttons, block, defaultFocus);
         updateVisible();
 
@@ -833,6 +842,14 @@ namespace MWGui
 
     void WindowManager::messageBox(std::string_view message, enum MWGui::ShowInDialogueMode showInDialogueMode)
     {
+#ifdef __vita__
+        // Sim thread must not build widgets mid-draw.
+        if (Vita::isSimThread())
+        {
+            scheduleMessageBox(std::string(message), showInDialogueMode);
+            return;
+        }
+#endif
         if (getMode() == GM_Dialogue && showInDialogueMode != MWGui::ShowInDialogueMode_Never)
         {
             MyGUI::UString text = MyGUI::LanguageManager::getInstance().replaceTags(MyGUI::UString(message));

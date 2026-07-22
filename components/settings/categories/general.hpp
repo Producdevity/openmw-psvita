@@ -44,6 +44,12 @@ namespace Settings
         // Vita: full cache clear at grid change only above this heap usage.
         SettingValue<int> mVitaFlushThresholdMb{ mIndex, "General", "vita flush threshold mb", 225,
             makeClampSanitizerInt(0, 272) };
+        // Vita: sort render bins by state (fewer GL state changes per draw).
+        SettingValue<bool> mVitaStateSortedBins{ mIndex, "General", "vita state sorted bins", false };
+        // Vita: run scripts/mechanics/physics on a worker thread.
+        SettingValue<bool> mVitaSimThread{ mIndex, "General", "vita sim thread", true };
+        // Vita: overlap next frame's sim with draw (requires sim thread).
+        SettingValue<bool> mVitaSimOverlap{ mIndex, "General", "vita sim overlap", true };
         SettingValue<bool> mNotifyOnSavedScreenshot{ mIndex, "General", "notify on saved screenshot" };
         SettingValue<std::vector<std::string>> mPreferredLocales{ mIndex, "General", "preferred locales" };
         SettingValue<bool> mGmstOverridesL10n{ mIndex, "General", "gmst overrides l10n" };

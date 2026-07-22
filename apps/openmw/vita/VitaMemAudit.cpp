@@ -9,10 +9,16 @@
 #include <string>
 
 #include <psp2/kernel/clib.h>
+#include <psp2/kernel/processmgr.h>
 
+#include <cstdint>
+
+#include <osg/Camera>
 #include <osg/Geometry>
 #include <osg/Image>
 #include <osg/NodeVisitor>
+#include <osg/Stats>
+#include <osgViewer/Viewer>
 
 #include <components/esm3/loaddial.hpp>
 #include <components/esm3/loadinfo.hpp>
@@ -241,6 +247,98 @@ namespace Vita
             (unsigned)imageCount, (unsigned)(imageBytes / 1024), (unsigned)nodeCount,
             (unsigned)(geomBytes.mBytes / 1024), (unsigned)keyframeCount);
         auditLog(buf);
+    }
+
+    namespace
+    {
+        uint64_t s_renderUsAccum = 0;
+        unsigned s_renderSamples = 0;
+
+        // Engine frame numbers lag the viewer's; scan back.
+        double msOf(const osg::Stats* stats, const char* name)
+        {
+            double v = 0.0;
+            if (stats)
+            {
+                const unsigned int latest = stats->getLatestFrameNumber();
+                const unsigned int earliest = stats->getEarliestFrameNumber();
+                for (unsigned int f = latest;; --f)
+                {
+                    if (stats->getAttribute(f, name, v))
+                        break;
+                    if (f == earliest || f == 0)
+                        break;
+                }
+            }
+            return v * 1000.0;
+        }
+
+        double countOf(const osg::Stats* stats, const char* name)
+        {
+            double v = 0.0;
+            if (stats)
+                stats->getAttribute(stats->getLatestFrameNumber() > 0 ? stats->getLatestFrameNumber() - 1 : 0, name, v);
+            return v;
+        }
+    }
+
+    void auditFrameStats(osgViewer::Viewer& viewer)
+    {
+        constexpr int kReportEveryFrames = 150; // ~5s at 30fps
+        static int s_frames = 0;
+        static uint64_t s_lastReportUs = 0;
+        static bool s_enabled = false;
+
+        osg::Stats* viewerStats = viewer.getViewerStats();
+        osg::Stats* camStats = viewer.getCamera() ? viewer.getCamera()->getStats() : nullptr;
+        if (!s_enabled && viewerStats && camStats)
+        {
+            viewerStats->collectStats("engine", true);
+            viewerStats->collectStats("update", true);
+            camStats->collectStats("rendering", true);
+            camStats->collectStats("scene", true);
+            s_enabled = true;
+        }
+        if (!s_enabled)
+            return;
+
+        if (++s_frames < kReportEveryFrames)
+            return;
+        const uint64_t nowUs = sceKernelGetProcessTimeWide();
+        const double frameMs
+            = s_lastReportUs ? (nowUs - s_lastReportUs) / 1000.0 / static_cast<double>(s_frames) : 0.0;
+        s_lastReportUs = nowUs;
+        s_frames = 0;
+
+        const double renderMs
+            = s_renderSamples ? s_renderUsAccum / 1000.0 / static_cast<double>(s_renderSamples) : 0.0;
+        s_renderUsAccum = 0;
+        s_renderSamples = 0;
+
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "[Frame] avg=%.1fms render=%.1f (cull=%.1f draw=%.1f) update=%.1f | mech=%.1f phys=%.1f world=%.1f "
+            "gui=%.1f lua=%.1f script=%.1f input=%.1f sound=%.1f",
+            frameMs, renderMs, msOf(camStats, "Cull traversal time taken"),
+            msOf(camStats, "Draw traversal time taken"), msOf(viewerStats, "Update traversal time taken"),
+            msOf(viewerStats, "mechanics_time_taken"), msOf(viewerStats, "physics_time_taken"),
+            msOf(viewerStats, "world_time_taken"), msOf(viewerStats, "gui_time_taken"),
+            msOf(viewerStats, "lua_time_taken"), msOf(viewerStats, "script_time_taken"),
+            msOf(viewerStats, "input_time_taken"), msOf(viewerStats, "sound_time_taken"));
+        auditLog(buf);
+        snprintf(buf, sizeof(buf),
+            "[Scene] drawables=%.0f fast=%.0f lights=%.0f bins=%.0f tris=%.0f strips=%.0f",
+            countOf(camStats, "Visible number of drawables"), countOf(camStats, "Visible number of fast drawables"),
+            countOf(camStats, "Visible number of lights"), countOf(camStats, "Visible number of render bins"),
+            countOf(camStats, "Visible number of GL_TRIANGLES"),
+            countOf(camStats, "Visible number of GL_TRIANGLE_STRIP"));
+        auditLog(buf);
+    }
+
+    void noteRenderTime(unsigned long long us)
+    {
+        s_renderUsAccum += us;
+        ++s_renderSamples;
     }
 }
 

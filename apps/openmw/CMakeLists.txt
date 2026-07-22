@@ -8,6 +8,7 @@ if(VITA)
         vita/VitaInit.cpp
         vita/VitaIme.cpp
         vita/VitaMemAudit.cpp
+        vita/VitaSimWorker.cpp
     )
 endif()
 

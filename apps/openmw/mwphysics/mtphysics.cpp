@@ -369,7 +369,11 @@ namespace MWPhysics
         void wakeUpWorkers()
         {
 #ifdef __vita__
-            mFrameCounter.fetch_add(1, std::memory_order_release);
+            // Increment under mutex; else lost wakeup freezes workers.
+            {
+                const std::lock_guard lock(mHasJobMutex);
+                mFrameCounter.fetch_add(1, std::memory_order_release);
+            }
             mHasJob.notify_all();
 #else
             const std::lock_guard lock(mHasJobMutex);
