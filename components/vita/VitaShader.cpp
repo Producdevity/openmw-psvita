@@ -29,17 +29,10 @@ namespace Vita
         "uniform float u_fogEnd;\n"
         "\n"
         "uniform int colorMode;\n"
-        "uniform vec4 u_materialDiffuse;\n"
-        "uniform vec4 u_materialAmbient;\n"
-        "uniform vec4 u_materialEmission;\n"
+        "uniform vec4 u_material[3];\n"
         "\n"
-        // 2 light slots match Settings::shaders().mMaxLights on Vita.
-        "uniform vec4 u_lightPos0;\n"
-        "uniform vec4 u_lightDiffuse0;\n"
-        "uniform vec4 u_lightAtten0;\n"
-        "uniform vec4 u_lightPos1;\n"
-        "uniform vec4 u_lightDiffuse1;\n"
-        "uniform vec4 u_lightAtten1;\n"
+        // 2 lights packed as pos,diffuse,atten triples: one uniform apply.
+        "uniform vec4 u_lights[6];\n"
         "\n"
         "uniform float u_skyHorizonBlend;\n"
         // for waterfalls and other texture-scrolling effects. Defaults to identity
@@ -70,9 +63,9 @@ namespace Vita
         "    vec3 viewPos = (osg_ModelViewMatrix * osg_Vertex).xyz;\n"
         "    vec3 viewNormal = normalize(osg_NormalMatrix * osg_Normal);\n"
         "\n"
-        "    vec3 emission = u_materialEmission.rgb;\n"
-        "    vec4 matDiffuse = u_materialDiffuse;\n"
-        "    vec4 matAmbient = u_materialAmbient;\n"
+        "    vec3 emission = u_material[2].rgb;\n"
+        "    vec4 matDiffuse = u_material[0];\n"
+        "    vec4 matAmbient = u_material[1];\n"
         "\n"
         "    if (colorMode == 1) {\n"
         "        emission = osg_Color.rgb;\n"
@@ -92,8 +85,8 @@ namespace Vita
         "                  + effAmbient * matAmbient.rgb\n"
         "                  + u_sunColor * matDiffuse.rgb * NdotL;\n"
         "\n"
-        "    lighting += calcPointLight(viewPos, u_lightPos0, u_lightDiffuse0, u_lightAtten0, viewNormal, matDiffuse.rgb);\n"
-        "    lighting += calcPointLight(viewPos, u_lightPos1, u_lightDiffuse1, u_lightAtten1, viewNormal, matDiffuse.rgb);\n"
+        "    lighting += calcPointLight(viewPos, u_lights[0], u_lights[1], u_lights[2], viewNormal, matDiffuse.rgb);\n"
+        "    lighting += calcPointLight(viewPos, u_lights[3], u_lights[4], u_lights[5], viewNormal, matDiffuse.rgb);\n"
         "\n"
         "    v_color = vec4(min(lighting, vec3(1.0)), matDiffuse.a);\n"
         "    v_texCoord = (u_texMat0 * vec4(osg_MultiTexCoord0, 0.0, 1.0)).xy;\n"
@@ -146,9 +139,7 @@ namespace Vita
         "uniform float u_fogEnd;\n"
         "\n"
         "uniform int colorMode;\n"
-        "uniform vec4 u_materialDiffuse;\n"
-        "uniform vec4 u_materialAmbient;\n"
-        "uniform vec4 u_materialEmission;\n"
+        "uniform vec4 u_material[3];\n"
         "\n"
         "uniform mat4 u_texMat0;\n"
         "uniform mat4 u_texMat1;\n"
@@ -169,9 +160,9 @@ namespace Vita
         "    vec3 viewPos = (osg_ModelViewMatrix * osg_Vertex).xyz;\n"
         "    vec3 viewNormal = normalize(osg_NormalMatrix * osg_Normal);\n"
         "\n"
-        "    vec3 emission = u_materialEmission.rgb;\n"
-        "    vec4 matDiffuse = u_materialDiffuse;\n"
-        "    vec4 matAmbient = u_materialAmbient;\n"
+        "    vec3 emission = u_material[2].rgb;\n"
+        "    vec4 matDiffuse = u_material[0];\n"
+        "    vec4 matAmbient = u_material[1];\n"
         "\n"
         "    if (colorMode == 1) {\n"
         "        emission = osg_Color.rgb;\n"
@@ -351,18 +342,11 @@ namespace Vita
         ss->addUniform(new osg::Uniform("colorMode", colorMode));
         ss->addUniform(new osg::Uniform("alphaRef", alphaRef));
         ss->addUniform(new osg::Uniform("diffuseMap", 0));
-        if (mat)
-        {
-            ss->addUniform(new osg::Uniform("u_materialDiffuse", mat->getDiffuse(osg::Material::FRONT)));
-            ss->addUniform(new osg::Uniform("u_materialAmbient", mat->getAmbient(osg::Material::FRONT)));
-            ss->addUniform(new osg::Uniform("u_materialEmission", mat->getEmission(osg::Material::FRONT)));
-        }
-        else
-        {
-            ss->addUniform(new osg::Uniform("u_materialDiffuse", osg::Vec4f(1, 1, 1, 1)));
-            ss->addUniform(new osg::Uniform("u_materialAmbient", osg::Vec4f(1, 1, 1, 1)));
-            ss->addUniform(new osg::Uniform("u_materialEmission", osg::Vec4f(0, 0, 0, 1)));
-        }
+        osg::Uniform* material = new osg::Uniform(osg::Uniform::FLOAT_VEC4, "u_material", 3);
+        material->setElement(0u, mat ? mat->getDiffuse(osg::Material::FRONT) : osg::Vec4f(1, 1, 1, 1));
+        material->setElement(1u, mat ? mat->getAmbient(osg::Material::FRONT) : osg::Vec4f(1, 1, 1, 1));
+        material->setElement(2u, mat ? mat->getEmission(osg::Material::FRONT) : osg::Vec4f(0, 0, 0, 1));
+        ss->addUniform(material);
     }
 
     // Scene Uniforms
@@ -381,17 +365,24 @@ namespace Vita
         ss->addUniform(new osg::Uniform("u_fogColorEffective", osg::Vec3f(0.7f, 0.7f, 0.7f)));
 
         // Default material uniforms (overridden per-node by applyVitaShader)
-        ss->addUniform(new osg::Uniform("u_materialDiffuse", osg::Vec4f(1, 1, 1, 1)));
-        ss->addUniform(new osg::Uniform("u_materialAmbient", osg::Vec4f(1, 1, 1, 1)));
-        ss->addUniform(new osg::Uniform("u_materialEmission", osg::Vec4f(0, 0, 0, 1)));
-
-        // Default light uniforms — slot count matches the shader.
-        for (int i = 0; i < 2; ++i)
         {
-            std::string idx = std::to_string(i);
-            ss->addUniform(new osg::Uniform(("u_lightPos" + idx).c_str(), osg::Vec4f(0, 0, 0, 0)));
-            ss->addUniform(new osg::Uniform(("u_lightDiffuse" + idx).c_str(), osg::Vec4f(0, 0, 0, 0)));
-            ss->addUniform(new osg::Uniform(("u_lightAtten" + idx).c_str(), osg::Vec4f(1, 0, 0, 0)));
+            osg::Uniform* material = new osg::Uniform(osg::Uniform::FLOAT_VEC4, "u_material", 3);
+            material->setElement(0u, osg::Vec4f(1, 1, 1, 1));
+            material->setElement(1u, osg::Vec4f(1, 1, 1, 1));
+            material->setElement(2u, osg::Vec4f(0, 0, 0, 1));
+            ss->addUniform(material);
+        }
+
+        // Default packed light array — all slots inactive.
+        {
+            osg::Uniform* lights = new osg::Uniform(osg::Uniform::FLOAT_VEC4, "u_lights", 6);
+            for (unsigned int i = 0; i < 2; ++i)
+            {
+                lights->setElement(i * 3 + 0, osg::Vec4f(0, 0, 0, 0));
+                lights->setElement(i * 3 + 1, osg::Vec4f(0, 0, 0, 0));
+                lights->setElement(i * 3 + 2, osg::Vec4f(1, 0, 0, 0));
+            }
+            ss->addUniform(lights);
         }
 
         // Default terrain uniforms

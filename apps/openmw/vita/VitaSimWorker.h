@@ -19,6 +19,10 @@ namespace Vita
     /// After it returns, main only touches stats until next finish().
     void simFence();
 
+    /// Cull overlap: draw a pending culled frame before nested render loops.
+    void setDrainDrawHook(std::function<void()> hook);
+    void drainPendingDraw();
+
     /// Runs sim phases off the GL thread (vitaGL is single-threaded).
     /// Atomic polling handshake; condition_variable is unreliable on Vita.
     class SimWorker

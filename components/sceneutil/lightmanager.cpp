@@ -451,13 +451,8 @@ namespace SceneUtil
             osg::ref_ptr<osg::StateSet> stateset = new osg::StateSet;
 
 #ifdef __vita__
-            // VitaLit reads lights from uniforms; slot count matches the shader.
-            for (size_t i = 0; i < 2; ++i)
-            {
-                stateset->addUniform(new osg::Uniform(kPosNames[i], osg::Vec4f(0, 0, 0, 0)));
-                stateset->addUniform(new osg::Uniform(kDiffNames[i], osg::Vec4f(0, 0, 0, 0)));
-                stateset->addUniform(new osg::Uniform(kAttenNames[i], osg::Vec4f(1, 0, 0, 0)));
-            }
+            // VitaLit reads lights from one packed array uniform.
+            stateset->addUniform(new osg::Uniform(osg::Uniform::FLOAT_VEC4, "u_lights", 6));
             update(stateset, lightList, frameNum);
 #else
             std::vector<osg::ref_ptr<osg::Light>> lights;
@@ -489,34 +484,29 @@ namespace SceneUtil
         // View-space positions go stale as the camera moves; refresh.
         void update(osg::StateSet* stateset, const LightManager::LightList& lightList, size_t frameNum) override
         {
+            osg::Uniform* packed = stateset->getUniform("u_lights");
+            if (!packed)
+                return;
             for (size_t i = 0; i < 2; ++i)
             {
-                osg::Uniform* pos = stateset->getUniform(kPosNames[i]);
-                osg::Uniform* diff = stateset->getUniform(kDiffNames[i]);
-                osg::Uniform* atten = stateset->getUniform(kAttenNames[i]);
-                if (!pos || !diff || !atten)
-                    continue;
+                const unsigned int base = static_cast<unsigned int>(i) * 3;
                 if (i < lightList.size())
                 {
                     const auto* light = lightList[i]->mLightSource->getLight(frameNum);
                     const osg::Vec3f vp = lightList[i]->mViewBound.center();
-                    pos->set(osg::Vec4f(vp.x(), vp.y(), vp.z(), 1.0f));
-                    diff->set(light->getDiffuse());
-                    atten->set(osg::Vec4f(light->getConstantAttenuation(), light->getLinearAttenuation(),
-                        light->getQuadraticAttenuation(), 0.f));
+                    packed->setElement(base + 0, osg::Vec4f(vp.x(), vp.y(), vp.z(), 1.0f));
+                    packed->setElement(base + 1, light->getDiffuse());
+                    packed->setElement(base + 2, osg::Vec4f(light->getConstantAttenuation(),
+                        light->getLinearAttenuation(), light->getQuadraticAttenuation(), 0.f));
                 }
                 else
                 {
-                    pos->set(osg::Vec4f(0, 0, 0, 0));
-                    diff->set(osg::Vec4f(0, 0, 0, 0));
-                    atten->set(osg::Vec4f(1, 0, 0, 0));
+                    packed->setElement(base + 0, osg::Vec4f(0, 0, 0, 0));
+                    packed->setElement(base + 1, osg::Vec4f(0, 0, 0, 0));
+                    packed->setElement(base + 2, osg::Vec4f(1, 0, 0, 0));
                 }
             }
         }
-
-        static constexpr const char* kPosNames[] = { "u_lightPos0", "u_lightPos1" };
-        static constexpr const char* kDiffNames[] = { "u_lightDiffuse0", "u_lightDiffuse1" };
-        static constexpr const char* kAttenNames[] = { "u_lightAtten0", "u_lightAtten1" };
 #endif
     };
 

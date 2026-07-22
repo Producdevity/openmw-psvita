@@ -152,6 +152,9 @@ namespace MWGui
 
     void LoadingScreen::loadingOn()
     {
+#ifdef __vita__
+        Vita::drainPendingDraw(); // nested renders next; consume queued cull
+#endif
         // Early-out if already on
         if (mNestedLoadingCount++ > 0 && mMainWidget->getVisible())
             return;

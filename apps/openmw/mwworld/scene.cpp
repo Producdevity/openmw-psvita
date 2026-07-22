@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <chrono>
 #include <functional>
 #include <limits>
@@ -9,8 +10,13 @@
 #ifdef __vita__
 #include <malloc.h>
 #include <psp2/kernel/processmgr.h>
+#include <osg/Billboard>
 #include <osg/Geometry>
+#include <osg/LOD>
 #include <osg/MatrixTransform>
+#include <osg/Sequence>
+#include <osg/Switch>
+#include <set>
 #include "../vita/VitaInit.h"
 #include "../vita/VitaSimWorker.h"
 #include "../vita/VitaMemAudit.h"
@@ -63,6 +69,7 @@ static void countDrawables(const osg::Node* node, unsigned int& drawableCount, u
 #include <components/misc/resourcehelpers.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
+#include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/optimizer.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/settings/values.hpp>
@@ -681,11 +688,654 @@ namespace MWWorld
 #endif
     }
 
+#ifdef __vita__
+    namespace VitaMerge
+    {
+        // Per-cell static merging: bake world transforms into copied arrays,
+        // one geometry per (state chain, array signature, 2km bucket).
+        struct Batch
+        {
+            osg::ref_ptr<osg::Node> mMerged;
+            std::vector<uint64_t> mRefs;
+            bool mActive = true;
+        };
+        struct ObjInfo
+        {
+            osg::ref_ptr<osg::Node> mNode;
+            unsigned int mOldMask = 0;
+            std::vector<size_t> mBatches;
+        };
+        struct CellState
+        {
+            osg::ref_ptr<osg::Group> mGroup;
+            std::vector<Batch> mBatches;
+            std::map<uint64_t, ObjInfo> mObjects;
+        };
+        std::map<const MWWorld::CellStore*, CellState> sCells;
+
+        uint64_t refKey(const ESM::RefNum& rn)
+        {
+            return (uint64_t(uint32_t(rn.mContentFile)) << 32) | rn.mIndex;
+        }
+
+        // Array layout bits; 0 = geometry not mergeable.
+        unsigned int arraySig(const osg::Geometry* geom)
+        {
+            const osg::Array* v = geom->getVertexArray();
+            if (!v || v->getType() != osg::Array::Vec3ArrayType || v->getNumElements() > 65535
+                || v->getNumElements() == 0)
+                return 0;
+            unsigned int sig = 1;
+            if (const osg::Array* n = geom->getNormalArray())
+            {
+                if (n->getType() != osg::Array::Vec3ArrayType || n->getBinding() != osg::Array::BIND_PER_VERTEX)
+                    return 0;
+                sig |= 2;
+            }
+            if (const osg::Array* c = geom->getColorArray())
+            {
+                if (c->getBinding() != osg::Array::BIND_PER_VERTEX)
+                    return 0;
+                if (c->getType() == osg::Array::Vec4ubArrayType)
+                    sig |= 4;
+                else if (c->getType() == osg::Array::Vec4ArrayType)
+                    sig |= 8;
+                else
+                    return 0;
+            }
+            if (geom->getColorArray() && geom->getColorArray()->getNumElements() != v->getNumElements())
+                return 0;
+            for (unsigned int unit = 0; unit < geom->getNumTexCoordArrays(); ++unit)
+            {
+                const osg::Array* t = geom->getTexCoordArray(unit);
+                if (!t)
+                    continue;
+                if (unit == 7)
+                    continue; // tangents: unused by FFP path, dropped
+                if (unit > 1 || t->getType() != osg::Array::Vec2ArrayType
+                    || t->getNumElements() != v->getNumElements())
+                    return 0;
+                sig |= (16u << unit);
+            }
+            for (unsigned int i = 0; i < geom->getNumVertexAttribArrays(); ++i)
+                if (geom->getVertexAttribArray(i))
+                    return 0;
+            if (geom->getNumPrimitiveSets() == 0)
+                return 0;
+            for (unsigned int i = 0; i < geom->getNumPrimitiveSets(); ++i)
+            {
+                const osg::PrimitiveSet* ps = geom->getPrimitiveSet(i);
+                if (!ps->getDrawElements() || ps->getMode() != osg::PrimitiveSet::TRIANGLES)
+                    return 0;
+            }
+            return sig;
+        }
+
+        struct Collector : osg::NodeVisitor
+        {
+            struct Item
+            {
+                osg::Geometry* mGeom;
+                osg::Matrix mWorld;
+                std::vector<osg::StateSet*> mChain;
+                unsigned int mSig;
+            };
+            std::vector<Item> mItems;
+            bool mViable = true;
+            std::vector<osg::StateSet*> mChain;
+
+            Collector()
+                : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+            {
+            }
+
+            // Light-list cull callbacks are expected on object roots; anything
+            // else disqualifies.
+            static bool onlyLightList(const osg::Callback* cb)
+            {
+                while (cb)
+                {
+                    if (!dynamic_cast<const SceneUtil::LightListCallback*>(cb))
+                        return false;
+                    cb = cb->getNestedCallback();
+                }
+                return true;
+            }
+
+            static bool clean(const osg::Node& n)
+            {
+                return !n.getUpdateCallback() && onlyLightList(n.getCullCallback())
+                    && n.getDataVariance() != osg::Object::DYNAMIC;
+            }
+
+            void apply(osg::Node& node) override
+            {
+                if (!mViable)
+                    return;
+                if (!clean(node) || dynamic_cast<osg::Switch*>(&node) || dynamic_cast<osg::LOD*>(&node)
+                    || dynamic_cast<osg::Sequence*>(&node) || dynamic_cast<osg::Billboard*>(&node))
+                {
+                    mViable = false;
+                    return;
+                }
+                bool pushed = false;
+                if (osg::StateSet* ss = node.getStateSet())
+                {
+                    mChain.push_back(ss);
+                    pushed = true;
+                }
+                traverse(node);
+                if (pushed)
+                    mChain.pop_back();
+            }
+
+            void apply(osg::Drawable& drawable) override
+            {
+                if (!mViable)
+                    return;
+                osg::Geometry* geom = drawable.asGeometry();
+                if (!clean(drawable) || !geom || strcmp(geom->className(), "Geometry") != 0)
+                {
+                    mViable = false;
+                    return;
+                }
+                std::vector<osg::StateSet*> chain = mChain;
+                if (osg::StateSet* ss = geom->getStateSet())
+                    chain.push_back(ss);
+                for (const osg::StateSet* ss : chain)
+                    if (ss->getRenderingHint() & osg::StateSet::TRANSPARENT_BIN)
+                    {
+                        mViable = false;
+                        return;
+                    }
+                unsigned int sig = arraySig(geom);
+                if (!sig)
+                {
+                    mViable = false;
+                    return;
+                }
+                mItems.push_back({ geom, osg::computeLocalToWorld(getNodePath()), std::move(chain), sig });
+            }
+        };
+
+        struct BatchKey
+        {
+            std::vector<osg::StateSet*> mChain;
+            unsigned int mSig;
+            int mBx, mBy, mBz;
+            bool operator<(const BatchKey& o) const
+            {
+                if (mChain != o.mChain)
+                    return mChain < o.mChain;
+                if (mSig != o.mSig)
+                    return mSig < o.mSig;
+                if (mBx != o.mBx)
+                    return mBx < o.mBx;
+                if (mBy != o.mBy)
+                    return mBy < o.mBy;
+                return mBz < o.mBz;
+            }
+        };
+
+        // Restore originals for a batch and every batch sharing an object.
+        void unmergeClosure(CellState& state, size_t firstBatch)
+        {
+            std::vector<size_t> work{ firstBatch };
+            std::set<size_t> visited;
+            while (!work.empty())
+            {
+                size_t bi = work.back();
+                work.pop_back();
+                if (!visited.insert(bi).second)
+                    continue;
+                Batch& batch = state.mBatches[bi];
+                if (!batch.mActive)
+                    continue;
+                batch.mActive = false;
+                if (state.mGroup && batch.mMerged)
+                    state.mGroup->removeChild(batch.mMerged);
+                for (uint64_t ref : batch.mRefs)
+                {
+                    auto it = state.mObjects.find(ref);
+                    if (it == state.mObjects.end())
+                        continue;
+                    if (it->second.mNode)
+                        it->second.mNode->setNodeMask(it->second.mOldMask);
+                    for (size_t other : it->second.mBatches)
+                        work.push_back(other);
+                }
+            }
+        }
+
+        void onObjectRemoved(const MWWorld::Ptr& ptr)
+        {
+            if (sCells.empty() || ptr.isEmpty() || !ptr.getCellRef().getRefNum().isSet())
+                return;
+            auto cit = sCells.find(ptr.getCell());
+            if (cit == sCells.end())
+                return;
+            auto oit = cit->second.mObjects.find(refKey(ptr.getCellRef().getRefNum()));
+            if (oit == cit->second.mObjects.end() || oit->second.mBatches.empty())
+                return;
+            unmergeClosure(cit->second, oit->second.mBatches.front());
+        }
+
+        void onCellUnload(const MWWorld::CellStore* cell)
+        {
+            sCells.erase(cell);
+        }
+
+        // Re-parents static drawables directly under their object roots,
+        // dropping intermediate NIF groups/transforms. Pure pointer surgery:
+        // shared drawables and their statesets are never modified.
+        struct FlatCollector : osg::NodeVisitor
+        {
+            struct Item
+            {
+                osg::ref_ptr<osg::Geometry> mGeom;
+                osg::Matrixf mLocal;
+                // ref_ptrs: sources may die with removed nodes; keys must not dangle.
+                std::vector<osg::ref_ptr<osg::StateSet>> mChain;
+            };
+            std::vector<Item> mItems;
+            bool mViable = true;
+            std::vector<osg::StateSet*> mChain;
+
+            FlatCollector()
+                : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+            {
+            }
+
+            void apply(osg::Node& node) override
+            {
+                if (!mViable)
+                    return;
+                if (!Collector::clean(node) || dynamic_cast<osg::Switch*>(&node) || dynamic_cast<osg::LOD*>(&node)
+                    || dynamic_cast<osg::Sequence*>(&node) || dynamic_cast<osg::Billboard*>(&node))
+                {
+                    mViable = false;
+                    return;
+                }
+                bool pushed = false;
+                if (osg::StateSet* ss = node.getStateSet())
+                {
+                    mChain.push_back(ss);
+                    pushed = true;
+                }
+                traverse(node);
+                if (pushed)
+                    mChain.pop_back();
+            }
+
+            void apply(osg::Drawable& drawable) override
+            {
+                if (!mViable)
+                    return;
+                osg::Geometry* geom = drawable.asGeometry();
+                if (!Collector::clean(drawable) || !geom || strcmp(geom->className(), "Geometry") != 0)
+                {
+                    mViable = false;
+                    return;
+                }
+                std::vector<osg::ref_ptr<osg::StateSet>> chain(mChain.begin(), mChain.end());
+                mItems.push_back({ geom, osg::computeLocalToWorld(getNodePath()), std::move(chain) });
+            }
+        };
+
+        void flattenCell(const MWWorld::CellStore& cell, osg::Group* cellRoot)
+        {
+            struct FlatKey
+            {
+                osg::Matrixf mM;
+                std::vector<osg::ref_ptr<osg::StateSet>> mChain;
+                bool operator<(const FlatKey& o) const
+                {
+                    int c = memcmp(mM.ptr(), o.mM.ptr(), 16 * sizeof(float));
+                    if (c != 0)
+                        return c < 0;
+                    return mChain < o.mChain;
+                }
+            };
+
+            int objsSeen = 0, objsFlat = 0, itemsFlat = 0, holders = 0;
+            std::map<std::vector<osg::ref_ptr<osg::StateSet>>, osg::ref_ptr<osg::StateSet>> composedCache;
+
+            for (unsigned int i = 0; i < cellRoot->getNumChildren(); ++i)
+            {
+                osg::Node* child = cellRoot->getChild(i);
+                osg::UserDataContainer* udc = child->getUserDataContainer();
+                if (!udc || udc->getNumUserObjects() == 0)
+                    continue;
+                auto* ptrHolder = dynamic_cast<MWRender::PtrHolder*>(udc->getUserObject(0));
+                if (!ptrHolder)
+                    continue;
+                unsigned int t = ptrHolder->mPtr.getType();
+                if (t != ESM::REC_STAT && t != ESM::REC_STAT4)
+                    continue;
+                osg::Group* pat = child->asGroup();
+                if (!pat)
+                    continue;
+                ++objsSeen;
+
+                // PAT and object root are contract nodes (Ptr ops, light list,
+                // effect attach); flatten only below the root.
+                for (unsigned int r = 0; r < pat->getNumChildren(); ++r)
+                {
+                    osg::Group* root = pat->getChild(r)->asGroup();
+                    if (!root || root->getNumChildren() == 0)
+                        continue;
+                    bool done = false;
+                    if (root->getUserValue("vitaFlat", done) && done)
+                        continue;
+                    if (!Collector::clean(*root) || dynamic_cast<osg::Switch*>(root) || dynamic_cast<osg::LOD*>(root)
+                        || dynamic_cast<osg::Sequence*>(root))
+                        continue;
+
+                    FlatCollector fc;
+                    for (unsigned int c = 0; c < root->getNumChildren(); ++c)
+                        root->getChild(c)->accept(fc);
+                    if (!fc.mViable || fc.mItems.empty())
+                        continue;
+
+                    std::map<FlatKey, std::vector<osg::ref_ptr<osg::Geometry>>> flatGroups;
+                    for (auto& item : fc.mItems)
+                        flatGroups[{ item.mLocal, item.mChain }].push_back(item.mGeom);
+
+                    root->removeChildren(0, root->getNumChildren());
+                    const osg::Matrixf identity;
+                    for (auto& [key, geoms] : flatGroups)
+                    {
+                        osg::StateSet* chainSS = nullptr;
+                        if (!key.mChain.empty())
+                        {
+                            osg::ref_ptr<osg::StateSet>& composed = composedCache[key.mChain];
+                            if (!composed)
+                            {
+                                composed = new osg::StateSet;
+                                for (const osg::ref_ptr<osg::StateSet>& ss : key.mChain)
+                                    composed->merge(*ss);
+                            }
+                            chainSS = composed.get();
+                        }
+                        osg::Group* parent = root;
+                        if (memcmp(key.mM.ptr(), identity.ptr(), 16 * sizeof(float)) != 0)
+                        {
+                            osg::MatrixTransform* mt = new osg::MatrixTransform(key.mM);
+                            mt->setDataVariance(osg::Object::STATIC);
+                            if (chainSS)
+                                mt->setStateSet(chainSS);
+                            root->addChild(mt);
+                            parent = mt;
+                            ++holders;
+                        }
+                        else if (chainSS)
+                        {
+                            osg::Group* g = new osg::Group;
+                            g->setDataVariance(osg::Object::STATIC);
+                            g->setStateSet(chainSS);
+                            root->addChild(g);
+                            parent = g;
+                            ++holders;
+                        }
+                        for (auto& g : geoms)
+                            parent->addChild(g);
+                    }
+                    root->setUserValue("vitaFlat", true);
+                    ++objsFlat;
+                    itemsFlat += (int)fc.mItems.size();
+                }
+            }
+
+            if (objsSeen > 0)
+            {
+                const std::string desc(cell.getCell()->getDescription());
+                char buf[160];
+                snprintf(buf, sizeof(buf), "[CellFlat] %s objs=%d/%d items=%d holders=%d",
+                    desc.c_str(), objsFlat, objsSeen, itemsFlat, holders);
+                Vita::breadcrumb(buf);
+            }
+        }
+
+        void mergeCell(const MWWorld::CellStore& cell, osg::Group* cellRoot)
+        {
+            if (sCells.count(&cell))
+                return;
+            struct TaggedItem
+            {
+                Collector::Item mItem;
+                size_t mObj;
+            };
+            struct Obj
+            {
+                osg::Node* mNode;
+                uint64_t mRef;
+            };
+            std::vector<TaggedItem> items;
+            std::vector<Obj> objs;
+            int scanned = 0;
+
+            for (unsigned int i = 0; i < cellRoot->getNumChildren(); ++i)
+            {
+                osg::Node* child = cellRoot->getChild(i);
+                osg::UserDataContainer* udc = child->getUserDataContainer();
+                if (!udc || udc->getNumUserObjects() == 0)
+                    continue;
+                auto* holder = dynamic_cast<MWRender::PtrHolder*>(udc->getUserObject(0));
+                if (!holder)
+                    continue;
+                unsigned int t = holder->mPtr.getType();
+                if (t != ESM::REC_STAT && t != ESM::REC_STAT4)
+                    continue;
+                if (!holder->mPtr.getCellRef().getRefNum().isSet())
+                    continue;
+                ++scanned;
+                Collector collector;
+                child->accept(collector);
+                if (!collector.mViable || collector.mItems.empty())
+                    continue;
+                size_t objIdx = objs.size();
+                objs.push_back({ child, refKey(holder->mPtr.getCellRef().getRefNum()) });
+                for (auto& item : collector.mItems)
+                    items.push_back({ std::move(item), objIdx });
+            }
+            if (items.empty())
+            {
+                char buf[96];
+                snprintf(buf, sizeof(buf), "[CellMerge] no candidates (stat objs scanned=%d)", scanned);
+                Vita::breadcrumb(buf);
+                return;
+            }
+
+            std::map<BatchKey, std::vector<size_t>> groups;
+            for (size_t i = 0; i < items.size(); ++i)
+            {
+                const auto& item = items[i].mItem;
+                const osg::Vec3f c = item.mGeom->getBoundingBox().center() * item.mWorld;
+                BatchKey key{ item.mChain, item.mSig, (int)std::floor(c.x() / 2048.f),
+                    (int)std::floor(c.y() / 2048.f), (int)std::floor(c.z() / 2048.f) };
+                groups[key].push_back(i);
+            }
+
+            // Objects whose parts all sit in singleton groups: no draw win,
+            // skip the copy and keep the original visible.
+            std::vector<bool> objHasMulti(objs.size(), false);
+            for (const auto& [key, members] : groups)
+                if (members.size() > 1)
+                    for (size_t i : members)
+                        objHasMulti[items[i].mObj] = true;
+
+            CellState& state = sCells[&cell];
+            state.mGroup = new osg::Group;
+            state.mGroup->setName("VitaMergedStatics");
+            state.mGroup->setNodeMask(MWRender::Mask_Static);
+            state.mGroup->setDataVariance(osg::Object::STATIC);
+            cellRoot->addChild(state.mGroup);
+
+            const bool useVbo = Settings::general().mVitaStaticGeometryVbo;
+            int mergedItems = 0;
+            size_t mergedVerts = 0;
+            // One composed stateset per chain, shared across buckets/batches.
+            std::map<std::vector<osg::StateSet*>, osg::ref_ptr<osg::StateSet>> composedCache;
+
+            for (const auto& [key, members] : groups)
+            {
+                std::vector<size_t> live;
+                for (size_t i : members)
+                    if (objHasMulti[items[i].mObj])
+                        live.push_back(i);
+                if (live.empty())
+                    continue;
+
+                // Composed state: outer to inner, child entries win.
+                osg::ref_ptr<osg::StateSet>& composed = composedCache[key.mChain];
+                if (!composed)
+                {
+                    composed = new osg::StateSet;
+                    for (osg::StateSet* ss : key.mChain)
+                        composed->merge(*ss);
+                }
+
+                size_t cursor = 0;
+                while (cursor < live.size())
+                {
+                    osg::ref_ptr<osg::Vec3Array> pos = new osg::Vec3Array;
+                    osg::ref_ptr<osg::Vec3Array> nrm
+                        = (key.mSig & 2) ? new osg::Vec3Array : nullptr;
+                    osg::ref_ptr<osg::Vec4ubArray> colUb
+                        = (key.mSig & 4) ? new osg::Vec4ubArray : nullptr;
+                    osg::ref_ptr<osg::Vec4Array> colF
+                        = (key.mSig & 8) ? new osg::Vec4Array : nullptr;
+                    osg::ref_ptr<osg::Vec2Array> uv0
+                        = (key.mSig & 16) ? new osg::Vec2Array : nullptr;
+                    osg::ref_ptr<osg::Vec2Array> uv1
+                        = (key.mSig & 32) ? new osg::Vec2Array : nullptr;
+                    osg::ref_ptr<osg::DrawElementsUShort> de
+                        = new osg::DrawElementsUShort(osg::PrimitiveSet::TRIANGLES);
+                    std::vector<size_t> batchItems;
+
+                    while (cursor < live.size())
+                    {
+                        const auto& item = items[live[cursor]].mItem;
+                        const auto* sv = static_cast<const osg::Vec3Array*>(item.mGeom->getVertexArray());
+                        if (pos->size() + sv->size() > 65535 && !batchItems.empty())
+                            break;
+                        const unsigned int base = (unsigned int)pos->size();
+                        for (const osg::Vec3f& v : *sv)
+                            pos->push_back(v * item.mWorld);
+                        if (nrm)
+                        {
+                            const auto* sn = static_cast<const osg::Vec3Array*>(item.mGeom->getNormalArray());
+                            for (const osg::Vec3f& n : *sn)
+                            {
+                                osg::Vec3f w = osg::Matrix::transform3x3(n, item.mWorld);
+                                w.normalize();
+                                nrm->push_back(w);
+                            }
+                        }
+                        if (colUb)
+                        {
+                            const auto* sc = static_cast<const osg::Vec4ubArray*>(item.mGeom->getColorArray());
+                            colUb->insert(colUb->end(), sc->begin(), sc->end());
+                        }
+                        if (colF)
+                        {
+                            const auto* sc = static_cast<const osg::Vec4Array*>(item.mGeom->getColorArray());
+                            colF->insert(colF->end(), sc->begin(), sc->end());
+                        }
+                        if (uv0)
+                        {
+                            const auto* st = static_cast<const osg::Vec2Array*>(item.mGeom->getTexCoordArray(0));
+                            uv0->insert(uv0->end(), st->begin(), st->end());
+                        }
+                        if (uv1)
+                        {
+                            const auto* st = static_cast<const osg::Vec2Array*>(item.mGeom->getTexCoordArray(1));
+                            uv1->insert(uv1->end(), st->begin(), st->end());
+                        }
+                        for (unsigned int p = 0; p < item.mGeom->getNumPrimitiveSets(); ++p)
+                        {
+                            const osg::PrimitiveSet* ps = item.mGeom->getPrimitiveSet(p);
+                            const unsigned int n = ps->getNumIndices();
+                            for (unsigned int k = 0; k < n; ++k)
+                                de->push_back((unsigned short)(base + ps->index(k)));
+                        }
+                        batchItems.push_back(live[cursor]);
+                        ++cursor;
+                    }
+
+                    osg::ref_ptr<osg::Geometry> merged = new osg::Geometry;
+                    merged->setDataVariance(osg::Object::STATIC);
+                    merged->setVertexArray(pos);
+                    if (nrm)
+                        merged->setNormalArray(nrm, osg::Array::BIND_PER_VERTEX);
+                    if (colUb)
+                        merged->setColorArray(colUb, osg::Array::BIND_PER_VERTEX);
+                    if (colF)
+                        merged->setColorArray(colF, osg::Array::BIND_PER_VERTEX);
+                    if (uv0)
+                        merged->setTexCoordArray(0, uv0);
+                    if (uv1)
+                        merged->setTexCoordArray(1, uv1);
+                    merged->addPrimitiveSet(de);
+                    merged->setStateSet(composed);
+                    merged->setNodeMask(MWRender::Mask_Static);
+                    merged->setUseDisplayList(false);
+                    merged->setUseVertexBufferObjects(useVbo);
+                    // Own light list per batch: point lights keep working.
+                    osg::ref_ptr<osg::Group> holder = new osg::Group;
+                    holder->addCullCallback(new SceneUtil::LightListCallback);
+                    holder->addChild(merged);
+                    state.mGroup->addChild(holder);
+
+                    size_t batchIdx = state.mBatches.size();
+                    Batch batch;
+                    batch.mMerged = holder;
+                    for (size_t i : batchItems)
+                    {
+                        const size_t objIdx = items[i].mObj;
+                        batch.mRefs.push_back(objs[objIdx].mRef);
+                        state.mObjects[objs[objIdx].mRef].mBatches.push_back(batchIdx);
+                    }
+                    state.mBatches.push_back(std::move(batch));
+                    mergedItems += (int)batchItems.size();
+                    mergedVerts += pos->size();
+                }
+            }
+
+            // Hide fully merged objects; record masks for un-merge.
+            int hidden = 0;
+            for (size_t o = 0; o < objs.size(); ++o)
+            {
+                if (!objHasMulti[o])
+                    continue;
+                ObjInfo& info = state.mObjects[objs[o].mRef];
+                info.mNode = objs[o].mNode;
+                info.mOldMask = objs[o].mNode->getNodeMask();
+                objs[o].mNode->setNodeMask(0);
+                ++hidden;
+            }
+
+            {
+                const std::string desc(cell.getCell()->getDescription());
+                char buf[192];
+                snprintf(buf, sizeof(buf),
+                    "[CellMerge] %s objs=%d/%d items=%d batches=%d verts=%uk",
+                    desc.c_str(), hidden, (int)objs.size(), mergedItems,
+                    (int)state.mBatches.size(), (unsigned)(mergedVerts / 1000));
+                Vita::breadcrumb(buf);
+            }
+        }
+    }
+#endif
+
     void Scene::unloadCell(CellStore* cell, const DetourNavigator::UpdateGuard* navigatorUpdateGuard)
     {
         if (mActiveCells.find(cell) == mActiveCells.end())
             return;
         Log(Debug::Info) << "Unloading cell " << cell->getCell()->getDescription();
+#ifdef __vita__
+        VitaMerge::onCellUnload(cell);
+#endif
 
         ListAndResetObjectsVisitor visitor;
 
@@ -766,6 +1416,33 @@ namespace MWWorld
     }
 
 #ifdef __vita__
+    namespace
+    {
+        // Counts drawables and distinct state combos (= merge ceiling).
+        struct BatchCensusVisitor : osg::NodeVisitor
+        {
+            BatchCensusVisitor()
+                : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+            {
+            }
+            std::map<size_t, int> mCombos;
+            int mDrawables = 0;
+            size_t mVertices = 0;
+            void apply(osg::Drawable& drawable) override
+            {
+                ++mDrawables;
+                size_t h = 0;
+                for (osg::Node* n : getNodePath())
+                    if (const osg::StateSet* ss = n->getStateSet())
+                        h = h * 31 + reinterpret_cast<size_t>(ss);
+                mCombos[h]++;
+                if (const osg::Geometry* geom = drawable.asGeometry())
+                    if (const osg::Array* v = geom->getVertexArray())
+                        mVertices += v->getNumElements();
+            }
+        };
+    }
+
     void Scene::vitaBatchCell(CellStore& cell)
     {
         // Merge sub-geometries within each NIF to reduce draw calls.
@@ -855,6 +1532,32 @@ namespace MWWorld
             {
                 if (node->getNumParents() > 0)
                     node->setUserDataContainer(udc);
+            }
+
+            if (Settings::general().mVitaCellFlatten)
+                VitaMerge::flattenCell(cell, cellRoot);
+
+            if (!cell.isExterior() && Settings::general().mVitaCellMerge)
+                VitaMerge::mergeCell(cell, cellRoot);
+
+            BatchCensusVisitor postCensus;
+            cellRoot->accept(postCensus);
+            {
+                std::vector<int> counts;
+                counts.reserve(postCensus.mCombos.size());
+                for (const auto& [h, c] : postCensus.mCombos)
+                    counts.push_back(c);
+                std::sort(counts.rbegin(), counts.rend());
+                char top[64] = {};
+                size_t off = 0;
+                for (size_t i = 0; i < counts.size() && i < 6 && off + 8 < sizeof(top); ++i)
+                    off += snprintf(top + off, sizeof(top) - off, "%s%d", i ? "," : "", counts[i]);
+                const std::string desc(cell.getCell()->getDescription());
+                char buf[192];
+                snprintf(buf, sizeof(buf), "[BatchCensus] %s draw=%d combos=%d verts=%uk top=%s", desc.c_str(),
+                    postCensus.mDrawables, (int)postCensus.mCombos.size(),
+                    (unsigned)(postCensus.mVertices / 1000), top);
+                Vita::breadcrumb(buf);
             }
 
             // Replace OSG's loose bounding-sphere cull with a tight AABB.
@@ -2751,6 +3454,9 @@ namespace MWWorld
 
     void Scene::removeObjectFromScene(const Ptr& ptr, bool keepActive)
     {
+#ifdef __vita__
+        VitaMerge::onObjectRemoved(ptr);
+#endif
         MWBase::Environment::get().getMechanicsManager()->remove(ptr, keepActive);
         // You'd expect the sounds attached to the object to be stopped here
         // because the object is nowhere to be heard, but in Morrowind, they're not.

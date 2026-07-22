@@ -362,9 +362,13 @@ namespace Terrain
             stateset->addUniform(new osg::Uniform("u_numLayers", numLayers));
             stateset->addUniform(new osg::Uniform("colorMode", 2));
             stateset->addUniform(new osg::Uniform("alphaRef", 0.0f));
-            stateset->addUniform(new osg::Uniform("u_materialDiffuse", osg::Vec4f(1, 1, 1, 1)));
-            stateset->addUniform(new osg::Uniform("u_materialAmbient", osg::Vec4f(1, 1, 1, 1)));
-            stateset->addUniform(new osg::Uniform("u_materialEmission", osg::Vec4f(0, 0, 0, 1)));
+            {
+                osg::Uniform* material = new osg::Uniform(osg::Uniform::FLOAT_VEC4, "u_material", 3);
+                material->setElement(0u, osg::Vec4f(1, 1, 1, 1));
+                material->setElement(1u, osg::Vec4f(1, 1, 1, 1));
+                material->setElement(2u, osg::Vec4f(0, 0, 0, 1));
+                stateset->addUniform(material);
+            }
 
             if (layerTileSize != 1.f)
                 stateset->addUniform(new osg::Uniform("u_texMat0",

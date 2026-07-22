@@ -36,6 +36,22 @@ namespace Vita
             sceKernelDelayThread(50);
     }
 
+    namespace
+    {
+        std::function<void()> sDrainDrawHook;
+    }
+
+    void setDrainDrawHook(std::function<void()> hook)
+    {
+        sDrainDrawHook = std::move(hook);
+    }
+
+    void drainPendingDraw()
+    {
+        if (sDrainDrawHook)
+            sDrainDrawHook();
+    }
+
     SimWorker::SimWorker()
     {
         breadcrumb("[SimWorker] spawning sim thread");

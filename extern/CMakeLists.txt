@@ -173,7 +173,7 @@ if(NOT OPENMW_USE_SYSTEM_OSG)
     include(FetchContent)
     # Vita-only OSG compatibility patches.
     if(VITA)
-        set(_osg_patch_cmd PATCH_COMMAND patch -p1 -N -r- --input=${CMAKE_SOURCE_DIR}/patches/osg/vita-compat.patch || true)
+        set(_osg_patch_cmd PATCH_COMMAND patch -p1 -N -r- --input=${CMAKE_SOURCE_DIR}/patches/osg/vita-compat.patch && patch -p1 -N -r- --input=${CMAKE_SOURCE_DIR}/patches/osg/vita-perf.patch || true)
     else()
         set(_osg_patch_cmd "")
     endif()

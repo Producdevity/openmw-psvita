@@ -152,6 +152,8 @@ namespace OMW
         std::unique_ptr<Vita::SimWorker> mSimWorker;
         bool mSimOverlap = false;
         bool mSimPrimed = false;
+        bool mCullOverlap = false;
+        bool mCullPrimed = false;
 #endif
         std::unique_ptr<L10n::Manager> mL10nManager;
         MWBase::Environment mEnvironment;
