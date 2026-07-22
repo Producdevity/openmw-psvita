@@ -82,12 +82,19 @@ namespace Vita::EsmPrefetch
             // Waits until \a target bytes are readable; false on read failure.
             bool waitFor(size_t target)
             {
-                while (mEntry->mAvail.load(std::memory_order_acquire) < target)
+                if (mComplete)
+                    return true;
+                size_t avail = mEntry->mAvail.load(std::memory_order_acquire);
+                while (avail < target)
                 {
                     if (mEntry->mFailed.load(std::memory_order_acquire))
                         return mEntry->mAvail.load(std::memory_order_acquire) >= target;
                     sceKernelDelayThread(200);
+                    avail = mEntry->mAvail.load(std::memory_order_acquire);
                 }
+                // Millions of tiny reads follow; skip atomics once all bytes landed.
+                if (avail >= mEntry->mSize)
+                    mComplete = true;
                 return true;
             }
 
@@ -96,7 +103,8 @@ namespace Vita::EsmPrefetch
             void window(size_t newPos)
             {
                 char* base = mEntry->mData.get();
-                const size_t avail = mEntry->mAvail.load(std::memory_order_acquire);
+                const size_t avail
+                    = mComplete ? mEntry->mSize : mEntry->mAvail.load(std::memory_order_acquire);
                 setg(base, base + newPos, base + std::max(newPos, avail));
             }
 
@@ -122,7 +130,9 @@ namespace Vita::EsmPrefetch
 
             std::streamsize showmanyc() override
             {
-                return static_cast<std::streamsize>(mEntry->mAvail.load(std::memory_order_acquire) - pos());
+                const size_t avail
+                    = mComplete ? mEntry->mSize : mEntry->mAvail.load(std::memory_order_acquire);
+                return static_cast<std::streamsize>(avail - pos());
             }
 
             pos_type seekoff(off_type off, std::ios_base::seekdir dir, std::ios_base::openmode) override
@@ -146,6 +156,7 @@ namespace Vita::EsmPrefetch
             }
 
             std::shared_ptr<Entry> mEntry;
+            bool mComplete = false;
         };
 
         class WaitingIMemStream : public std::istream
@@ -165,6 +176,8 @@ namespace Vita::EsmPrefetch
 
     void start(std::vector<std::filesystem::path> files)
     {
+        if (!sEntries.empty())
+            return; // engine already kicked the reader at boot
         for (auto& path : files)
         {
             std::error_code ec;

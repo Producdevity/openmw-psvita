@@ -20,7 +20,7 @@ Font Licenses:
 PS Vita Port
 ------------
 
-Full port of OpenMW to PS Vita via [vitaGL](https://github.com/Rinnegatamante/vitaGL). Runs Morrowind, Tribunal, and Bloodmoon at 15–30 FPS at 640x368 render resolution (upscaled to native 960x544) with controller input, front touchscreen cursor, and a dynamic fog system that auto-scales draw distance to hold target framerate. Ships with the Morrowind Optimization Patch and Project Atlas baked in for better out-of-the-box performance, plus a dynamic memory-management layer (heap defrag, texture-quality tier-down, cell-demotion under pressure) tuned to the Vita's 357 MB user-RAM budget.
+Full port of OpenMW to PS Vita via [vitaGL](https://github.com/Rinnegatamante/vitaGL). Runs Morrowind, Tribunal, and Bloodmoon at 20–30 FPS at native 960x544 with controller input, front touchscreen cursor, and a dynamic fog system that auto-scales draw distance to hold target framerate. Ships with the Morrowind Optimization Patch and Project Atlas baked in for better out-of-the-box performance, plus a dynamic memory-management layer (heap defrag, texture-quality tier-down, cell-demotion under pressure) tuned to the Vita's 357 MB user-RAM budget.
 
 AI Usage: AI Assisted (Dependency/Build system detangling, other odds ends and analysis.)
 
@@ -91,6 +91,7 @@ Both mods are distributed under their original Nexus license terms — please se
 
 ### Mods
 
+Mods are not a priority in support at the moment, but are technically supported. (Results can drastically vary - Expect issues)
 Drop full mod folders into `ux0:data/openmw/mods/<name>/`. Plugin files (`.esm`, `.esp`, `.omwaddon`, `.omwscripts`) and `.bsa` archives inside are auto-detected and added to the load order on next boot. Loose meshes/textures can also go directly under `Data Files/`. Saves live in `ux0:data/openmw/saves/` and are interchangeable with PC OpenMW saves.
 
 ### Notes
