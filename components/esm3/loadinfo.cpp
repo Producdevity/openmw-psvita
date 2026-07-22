@@ -5,6 +5,10 @@
 
 #include <components/misc/concepts.hpp>
 
+#ifdef __vita__
+#include <components/vita/VitaDialogueText.h>
+#endif
+
 namespace ESM
 {
     template <Misc::SameAsWithoutCvref<DialInfo::DATAstruct> T>
@@ -62,6 +66,19 @@ namespace ESM
                     mSound = esm.getHString();
                     break;
                 case SREC_NAME:
+#ifdef __vita__
+                    if (Vita::DialogueText::enabled())
+                    {
+                        // Record where the text lives, skip reading it.
+                        // skipHString handles the zero-length stray-byte quirk.
+                        const size_t headerPos = esm.getFileOffset();
+                        esm.skipHString();
+                        mResponseFile = static_cast<int16_t>(esm.getIndex());
+                        mResponseOffset = static_cast<uint32_t>(headerPos + 4);
+                        mResponseSize = static_cast<uint32_t>(esm.getFileOffset() - headerPos - 4);
+                        break;
+                    }
+#endif
                     mResponse = esm.getHString();
                     break;
                 case fourCC("SCVR"):
@@ -158,5 +175,17 @@ namespace ESM
         mResultScript.clear();
         mFactionLess = false;
         mQuestStatus = QS_None;
+#ifdef __vita__
+        mResponseFile = -1;
+        mResponseOffset = 0;
+        mResponseSize = 0;
+#endif
     }
+
+#ifdef __vita__
+    const std::string& getDialInfoText(const DialInfo& info)
+    {
+        return Vita::DialogueText::fetch(info);
+    }
+#endif
 }

@@ -78,12 +78,8 @@ namespace MWGui
     {
         center();
         MWBase::Environment::get().getWindowManager()->setKeyFocusWidget(mName);
-#ifdef __vita__
-        // Auto-pop IME so controller-only users (the name field isn't in
-        // the controller focus rotation) can name the enchantment. Touch
-        // users can also re-tap to reopen via the click handler (ctor).
-        Vita::fillEditBoxFromIme(mName, "Enchantment Name", 31);
-#endif
+        // Vita IME auto-pop happens in setPtr — pushGuiMode calls setPtr
+        // AFTER onOpen, and setPtr resets the caption (wiped IME input).
     }
 
 #ifdef __vita__
@@ -201,6 +197,12 @@ namespace MWGui
         setItem(MWWorld::Ptr());
         startEditing();
         updateLabels();
+#ifdef __vita__
+        // Name field isn't in the controller focus rotation; auto-pop the
+        // IME now that setPtr's caption reset is done. Touch re-opens
+        // via the click handler (ctor).
+        Vita::fillEditBoxFromIme(mName, "Enchantment Name", 31);
+#endif
     }
 
     void EnchantingDialog::onReferenceUnavailable()
@@ -315,6 +317,11 @@ namespace MWGui
 
     void EnchantingDialog::onAccept(MyGUI::EditBox* sender)
     {
+#ifdef __vita__
+        // Enter/A on the name field opens the keyboard, not the purchase.
+        Vita::fillEditBoxFromIme(mName, "Enchantment Name", 31);
+        return;
+#endif
         onBuyButtonClicked(sender);
 
         // To do not spam onAccept() again and again
@@ -331,8 +338,15 @@ namespace MWGui
 
         if (mName->getCaption().empty())
         {
-            MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage10}");
-            return;
+#ifdef __vita__
+            // Second chance for controller users: reopen the IME.
+            Vita::fillEditBoxFromIme(mName, "Enchantment Name", 31);
+            if (mName->getCaption().empty())
+#endif
+            {
+                MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage10}");
+                return;
+            }
         }
 
         if (mEnchanting.soulEmpty())

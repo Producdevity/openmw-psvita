@@ -12,6 +12,13 @@ namespace Vita
     /// True when called from the SimWorker thread.
     bool isSimThread();
 
+    /// Main thread marks draw in flight around the overlapped draw.
+    void setDrawInFlight(bool inFlight);
+
+    /// Sim thread: wait until main's draw+swap completed. No-op elsewhere.
+    /// After it returns, main only touches stats until next finish().
+    void simFence();
+
     /// Runs sim phases off the GL thread (vitaGL is single-threaded).
     /// Atomic polling handshake; condition_variable is unreliable on Vita.
     class SimWorker

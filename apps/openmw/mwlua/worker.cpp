@@ -9,6 +9,11 @@
 
 #include <cassert>
 
+#ifdef __vita__
+#include <cstdio>
+extern "C" void vitaBreadcrumb(const char* msg); // apps/openmw/vita/VitaInit.cpp
+#endif
+
 namespace MWLua
 {
     Worker::Worker(LuaManager& manager)
@@ -31,7 +36,33 @@ namespace MWLua
     void Worker::allowUpdate(osg::Timer_t frameStart, unsigned frameNumber, osg::Stats& stats)
     {
         if (!mThread)
+        {
+            // Inline: run NOW, before the sim worker is kicked — after the
+            // kick Lua would race sim's writes to actor state.
+            // Same protection as run(); a script error must not kill the game.
+            try
+            {
+                update(frameStart, frameNumber, stats);
+            }
+            catch (const std::exception& e)
+            {
+                Log(Debug::Error) << "Failed to update LuaManager: " << e.what();
+#ifdef __vita__
+                static int crumbs = 0;
+                if (crumbs++ < 5)
+                {
+                    char buf[192];
+                    snprintf(buf, sizeof(buf), "[Lua] update error: %s", e.what());
+                    vitaBreadcrumb(buf);
+                }
+#endif
+            }
+            catch (...)
+            {
+                Log(Debug::Error) << "LuaWorker: non-std exception during update";
+            }
             return;
+        }
         {
             std::lock_guard<std::mutex> lk(mMutex);
             mUpdateRequest = UpdateRequest{ .mFrameStart = frameStart, .mFrameNumber = frameNumber, .mStats = &stats };
@@ -39,15 +70,15 @@ namespace MWLua
         mCV.notify_one();
     }
 
-    void Worker::finishUpdate(osg::Timer_t frameStart, unsigned frameNumber, osg::Stats& stats)
+    void Worker::finishUpdate([[maybe_unused]] osg::Timer_t frameStart, [[maybe_unused]] unsigned frameNumber,
+        [[maybe_unused]] osg::Stats& stats)
     {
         if (mThread)
         {
             std::unique_lock<std::mutex> lk(mMutex);
             mCV.wait(lk, [&] { return !mUpdateRequest.has_value(); });
         }
-        else
-            update(frameStart, frameNumber, stats);
+        // Inline update already ran in allowUpdate.
     }
 
     void Worker::join()

@@ -42,6 +42,7 @@ namespace MWRender
 
 namespace MWWorld
 {
+    class CellStore;
 
     class ProjectileManager
     {
@@ -64,6 +65,11 @@ namespace MWWorld
 
         /// Removes all current projectiles. Should be called when switching to a new worldspace.
         void clear();
+
+#ifdef __vita__
+        /// Clear cached caster Ptrs pointing into \a store (cell eviction).
+        void purgeCasterHandles(const CellStore* store);
+#endif
 
         void write(ESM::ESMWriter& writer, Loading::Listener& progress) const;
         bool readRecord(ESM::ESMReader& reader, uint32_t type);

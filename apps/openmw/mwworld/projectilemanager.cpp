@@ -662,6 +662,19 @@ namespace MWWorld
         mMagicBolts.clear();
     }
 
+#ifdef __vita__
+    void ProjectileManager::purgeCasterHandles(const CellStore* store)
+    {
+        // getCaster() re-resolves by RefNum; empty handle is the safe state.
+        for (auto& state : mProjectiles)
+            if (state.mCasterHandle.mCell == store)
+                state.mCasterHandle = MWWorld::Ptr();
+        for (auto& state : mMagicBolts)
+            if (state.mCasterHandle.mCell == store)
+                state.mCasterHandle = MWWorld::Ptr();
+    }
+#endif
+
     void ProjectileManager::write(ESM::ESMWriter& writer, Loading::Listener& progress) const
     {
         for (const ProjectileState& projectile : mProjectiles)

@@ -1,5 +1,9 @@
 #include "dialoguemanagerimp.hpp"
 
+#ifdef __vita__
+#include "../vita/VitaSimWorker.h"
+#endif
+
 #include <algorithm>
 #include <list>
 #include <optional>
@@ -137,6 +141,9 @@ namespace MWDialogue
 
     bool DialogueManager::startDialogue(const MWWorld::Ptr& actor, ResponseCallback* callback)
     {
+#ifdef __vita__
+        Vita::simFence(); // Builds dialogue GUI; wait out overlapped draw.
+#endif
         updateGlobals();
 
         // Dialogue with dead actor (e.g. through script) should not be allowed.
@@ -181,12 +188,13 @@ namespace MWDialogue
                     }
 
                     MWScript::InterpreterContext interpreterContext(&mActor.getRefData().getLocals(), mActor);
-                    callback->addResponse({}, Interpreter::fixDefinesDialog(info->mResponse, interpreterContext));
+                    callback->addResponse(
+                        {}, Interpreter::fixDefinesDialog(ESM::getDialInfoText(*info), interpreterContext));
                     MWBase::Environment::get().getLuaManager()->onDialogueResponse(mActor, *info, dialogue);
                     executeScript(info->mResultScript, mActor);
                     mLastTopic = dialogue.mId;
 
-                    addTopicsFromText(info->mResponse);
+                    addTopicsFromText(ESM::getDialInfoText(*info));
 
                     return true;
                 }
@@ -314,7 +322,7 @@ namespace MWDialogue
                 title = dialogue.mStringId;
 
             MWScript::InterpreterContext interpreterContext(&mActor.getRefData().getLocals(), mActor);
-            callback->addResponse(title, Interpreter::fixDefinesDialog(info->mResponse, interpreterContext));
+            callback->addResponse(title, Interpreter::fixDefinesDialog(ESM::getDialInfoText(*info), interpreterContext));
             MWBase::Environment::get().getLuaManager()->onDialogueResponse(mActor, *info, dialogue);
 
             if (dialogue.mType == ESM::Dialogue::Topic)
@@ -329,7 +337,7 @@ namespace MWDialogue
 
             executeScript(info->mResultScript, mActor);
 
-            addTopicsFromText(info->mResponse);
+            addTopicsFromText(ESM::getDialInfoText(*info));
         }
     }
 
@@ -391,7 +399,7 @@ namespace MWDialogue
             if (!(topicInfo.mFlags & MWBase::DialogueManager::TopicType::Exhausted) || !mKnownTopics.count(dialogId))
                 continue;
 
-            for (const auto& topicId : parseTopicIdsFromText(topicInfo.mInfo->mResponse))
+            for (const auto& topicId : parseTopicIdsFromText(ESM::getDialInfoText(*topicInfo.mInfo)))
             {
                 if (mActorKnownTopics.count(topicId) && !mKnownTopics.count(topicId))
                 {
@@ -482,7 +490,7 @@ namespace MWDialogue
                 const auto [responseTopic, info] = filter.search(*dialogue, true);
                 if (info)
                 {
-                    const std::string& text = info->mResponse;
+                    const std::string& text = ESM::getDialInfoText(*info);
                     addTopicsFromText(text);
 
                     mChoice = -1;
@@ -612,7 +620,7 @@ namespace MWDialogue
         {
             const ESM::DialInfo* info = infos[0].second;
 
-            addTopicsFromText(info->mResponse);
+            addTopicsFromText(ESM::getDialInfoText(*info));
 
             const MWWorld::Store<ESM::GameSetting>& gmsts
                 = MWBase::Environment::get().getESMStore()->get<ESM::GameSetting>();
@@ -620,7 +628,7 @@ namespace MWDialogue
             MWScript::InterpreterContext interpreterContext(&mActor.getRefData().getLocals(), mActor);
 
             callback->addResponse(gmsts.find("sServiceRefusal")->mValue.getString(),
-                Interpreter::fixDefinesDialog(info->mResponse, interpreterContext));
+                Interpreter::fixDefinesDialog(ESM::getDialInfoText(*info), interpreterContext));
             MWBase::Environment::get().getLuaManager()->onDialogueResponse(mActor, *info, dialogue);
 
             executeScript(info->mResultScript, mActor);
@@ -660,7 +668,7 @@ namespace MWDialogue
         {
             MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
             if (Settings::gui().mSubtitles)
-                winMgr->messageBox(info->mResponse);
+                winMgr->messageBox(ESM::getDialInfoText(*info));
             if (!info->mSound.empty())
                 sndMgr->say(actor, Misc::ResourceHelpers::correctSoundPath(VFS::Path::Normalized(info->mSound)));
             if (!info->mResultScript.empty())

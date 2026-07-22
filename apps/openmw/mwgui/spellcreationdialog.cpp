@@ -623,6 +623,12 @@ namespace MWGui
         mPlayerGold->setCaptionWithReplacing(MyGUI::utility::toString(playerGold));
 
         startEditing();
+#ifdef __vita__
+        // NameEdit isn't in the controller focus rotation; auto-pop the
+        // IME now that setPtr's caption reset is done. Touch re-opens
+        // via the click handler (ctor).
+        Vita::fillEditBoxFromIme(mNameEdit, "Spell Name", 31);
+#endif
     }
 
     void SpellCreationDialog::onCancelButtonClicked(MyGUI::Widget* /*sender*/)
@@ -640,8 +646,15 @@ namespace MWGui
 
         if (mNameEdit->getCaption().empty())
         {
-            MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage10}");
-            return;
+#ifdef __vita__
+            // Second chance for controller users: reopen the IME.
+            Vita::fillEditBoxFromIme(mNameEdit, "Spell Name", 31);
+            if (mNameEdit->getCaption().empty())
+#endif
+            {
+                MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage10}");
+                return;
+            }
         }
 
         if (mMagickaCost->getCaption() == "0")
@@ -681,6 +694,11 @@ namespace MWGui
 
     void SpellCreationDialog::onAccept(MyGUI::EditBox* sender)
     {
+#ifdef __vita__
+        // Enter/A on the name field opens the keyboard, not the purchase.
+        Vita::fillEditBoxFromIme(mNameEdit, "Spell Name", 31);
+        return;
+#endif
         onBuyButtonClicked(sender);
 
         // To do not spam onAccept() again and again
@@ -691,15 +709,8 @@ namespace MWGui
     {
         center();
         MWBase::Environment::get().getWindowManager()->setKeyFocusWidget(mNameEdit);
-#ifdef __vita__
-        // The NameEdit field isn't in the controller focus rotation
-        // (see onControllerButtonEvent — focus cycles through effect
-        // selection and the Buy/Cancel buttons). Auto-pop the IME so
-        // controller-only users can name the spell. Cancel returns to
-        // the dialog with the existing/empty caption. Touch users can
-        // re-open by tapping the field (see ctor).
-        Vita::fillEditBoxFromIme(mNameEdit, "Spell Name", 31);
-#endif
+        // Vita IME auto-pop happens in setPtr — pushGuiMode calls setPtr
+        // AFTER onOpen, and setPtr resets the caption (wiped IME input).
     }
 
 #ifdef __vita__

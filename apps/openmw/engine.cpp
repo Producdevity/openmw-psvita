@@ -20,6 +20,7 @@
 #include "vita/VitaInit.h"
 #include "vita/VitaMemAudit.h"
 #include "vita/VitaSimWorker.h"
+#include <components/vita/VitaDialogueText.h>
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
@@ -447,12 +448,14 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         const bool nextPaused = mWorld->getTimeManager()->isPaused();
         const float nextDt = frametime; // estimate; corrected next frame
         const unsigned nextFrame = frameNumber + 1;
+        Vita::setDrawInFlight(true);
         mSimWorker->run([this, frameStart, nextFrame, nextDt, nextPaused] {
             runSimPhases(frameStart, nextFrame, nextDt, nextPaused);
         });
         mSimPrimed = true;
         renderer->draw();
         mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+        Vita::setDrawInFlight(false);
     }
     else
         mViewer->renderingTraversals();
@@ -1022,6 +1025,11 @@ void OMW::Engine::prepareEngine()
     Loading::Listener* listener = MWBase::Environment::get().getWindowManager()->getLoadingScreen();
     Loading::AsyncListener asyncListener(*listener);
 #ifdef __vita__
+    if (Settings::general().mVitaLazyDialogue)
+    {
+        Vita::DialogueText::setEnabled(true);
+        Vita::DialogueText::setEncoding(mEncoding);
+    }
     Vita::logMemoryStatus("Pre-data-load");
     VITA_CRUMB("prepareEngine() loading data sync");
     // Load data synchronously on Vita — saves async thread stack (~1MB)
@@ -1429,8 +1437,10 @@ void OMW::Engine::go()
                         }
                         else if (fpsGap > kDynFogDeadband)
                             step = std::clamp(fpsGap * 20.f, 20.f, 150.f);
+                        const float userMax = std::clamp(
+                            Settings::camera().mVitaDynFogMaxDistance.get(), effectiveMin, kDynFogMax);
                         vitaDynFogTarget
-                            = std::clamp(vitaDynFogTarget + step, effectiveMin, kDynFogMax);
+                            = std::clamp(vitaDynFogTarget + step, effectiveMin, userMax);
                     }
 
 

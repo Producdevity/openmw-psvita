@@ -1,5 +1,10 @@
 #include "loadingscreen.hpp"
 
+#ifdef __vita__
+#include "../vita/VitaInit.h"
+#include "../vita/VitaSimWorker.h"
+#endif
+
 #include <array>
 
 #include <osgViewer/Viewer>
@@ -320,6 +325,19 @@ namespace MWGui
 
     void LoadingScreen::draw()
     {
+#ifdef __vita__
+        // GL must never run on the sim thread; skip rendering there.
+        if (Vita::isSimThread())
+        {
+            static bool warned = false;
+            if (!warned)
+            {
+                warned = true;
+                vitaBreadcrumb("[LoadScreen] draw skipped on sim thread");
+            }
+            return;
+        }
+#endif
         if (!needToDrawLoadingScreen())
             return;
 

@@ -190,6 +190,11 @@ namespace MWWorld
         WorldModel& getWorldModel() { return mWorldModel; }
         Scene& getWorldScene() { return *mWorldScene; }
 
+#ifdef __vita__
+        /// Drop registry Ptrs into \a store before eviction frees its refs.
+        void purgeCellRefs(CellStore& store);
+#endif
+
         // FIXME
         void addContainerScripts(const Ptr& reference, CellStore* cell) override;
         void removeContainerScripts(const Ptr& reference) override;

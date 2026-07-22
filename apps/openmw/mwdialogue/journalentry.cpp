@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include <components/esm3/journalentry.hpp>
+#include <components/esm3/loadinfo.hpp>
 
 #include <components/interpreter/defines.hpp>
 
@@ -28,12 +29,12 @@ namespace MWDialogue
                 if (actor.isEmpty())
                 {
                     MWScript::InterpreterContext interpreterContext(nullptr, MWWorld::Ptr());
-                    mText = Interpreter::fixDefinesDialog(iter->mResponse, interpreterContext);
+                    mText = Interpreter::fixDefinesDialog(ESM::getDialInfoText(*iter), interpreterContext);
                 }
                 else
                 {
                     MWScript::InterpreterContext interpreterContext(&actor.getRefData().getLocals(), actor);
-                    mText = Interpreter::fixDefinesDialog(iter->mResponse, interpreterContext);
+                    mText = Interpreter::fixDefinesDialog(ESM::getDialInfoText(*iter), interpreterContext);
                 }
 
                 return;

@@ -12,6 +12,7 @@
 #include <osg/Geometry>
 #include <osg/MatrixTransform>
 #include "../vita/VitaInit.h"
+#include "../vita/VitaSimWorker.h"
 #include "../vita/VitaMemAudit.h"
 #include "../mwrender/vismask.hpp"
 #include "../mwrender/animation.hpp"
@@ -620,7 +621,8 @@ namespace MWWorld
                 Vita::auditResourceCaches(mRendering.getResourceSystem());
                 {
                     const std::size_t swept = mWorld.getWorldModel().evictSweptCellStores();
-                    const std::size_t loaded = mWorld.getWorldModel().evictInactiveLoadedCellStores(mActiveCells);
+                    const std::size_t loaded = mWorld.getWorldModel().evictInactiveLoadedCellStores(
+                        mActiveCells, [this](CellStore& store) { mWorld.purgeCellRefs(store); });
                     if (swept + loaded > 0)
                     {
                         char evictBuf[112];
@@ -1939,6 +1941,7 @@ namespace MWWorld
     void Scene::changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent)
     {
 #ifdef __vita__
+        Vita::simFence(); // Scene teardown; wait out overlapped draw.
         Vita::breadcrumb("changeCellGrid() enter");
         Vita::logMemoryStatus("Pre-changeCellGrid");
         // Drain any in-flight async physics worker before we start removing
@@ -2495,6 +2498,9 @@ namespace MWWorld
     void Scene::changeToInteriorCell(
         std::string_view cellName, const ESM::Position& position, bool adjustPlayerPos, bool changeEvent)
     {
+#ifdef __vita__
+        Vita::simFence(); // Scene teardown; wait out overlapped draw.
+#endif
         CellStore& cell = mWorld.getWorldModel().getInterior(cellName);
         bool useFading = (mCurrentCell != nullptr);
         if (useFading)
@@ -2683,6 +2689,9 @@ namespace MWWorld
     void Scene::changeToExteriorCell(
         const ESM::RefId& extCellId, const ESM::Position& position, bool adjustPlayerPos, bool changeEvent)
     {
+#ifdef __vita__
+        Vita::simFence(); // Scene teardown; wait out overlapped draw.
+#endif
 
         if (changeEvent)
             MWBase::Environment::get().getWindowManager()->fadeScreenOut(0.5);

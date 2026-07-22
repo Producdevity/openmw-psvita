@@ -18,6 +18,10 @@
 #include <components/shader/shadermanager.hpp>
 
 #include <components/misc/constants.hpp>
+
+#ifdef __vita__
+#include <psp2/kernel/processmgr.h>
+#endif
 #include <components/misc/hash.hpp>
 
 #include <components/debug/debuglog.hpp>
@@ -448,30 +452,13 @@ namespace SceneUtil
 
 #ifdef __vita__
             // VitaLit reads lights from uniforms; slot count matches the shader.
-            static const char* posNames[] = { "u_lightPos0", "u_lightPos1" };
-            static const char* diffNames[] = { "u_lightDiffuse0", "u_lightDiffuse1" };
-            static const char* attenNames[] = { "u_lightAtten0", "u_lightAtten1" };
             for (size_t i = 0; i < 2; ++i)
             {
-                if (i < lightList.size())
-                {
-                    auto* light = lightList[i]->mLightSource->getLight(frameNum);
-                    osg::Vec3f vp = lightList[i]->mViewBound.center();
-                    stateset->addUniform(new osg::Uniform(posNames[i],
-                        osg::Vec4f(vp.x(), vp.y(), vp.z(), 1.0f)));
-                    stateset->addUniform(new osg::Uniform(diffNames[i], light->getDiffuse()));
-                    stateset->addUniform(new osg::Uniform(attenNames[i], osg::Vec4f(
-                        light->getConstantAttenuation(),
-                        light->getLinearAttenuation(),
-                        light->getQuadraticAttenuation(), 0.f)));
-                }
-                else
-                {
-                    stateset->addUniform(new osg::Uniform(posNames[i], osg::Vec4f(0, 0, 0, 0)));
-                    stateset->addUniform(new osg::Uniform(diffNames[i], osg::Vec4f(0, 0, 0, 0)));
-                    stateset->addUniform(new osg::Uniform(attenNames[i], osg::Vec4f(1, 0, 0, 0)));
-                }
+                stateset->addUniform(new osg::Uniform(kPosNames[i], osg::Vec4f(0, 0, 0, 0)));
+                stateset->addUniform(new osg::Uniform(kDiffNames[i], osg::Vec4f(0, 0, 0, 0)));
+                stateset->addUniform(new osg::Uniform(kAttenNames[i], osg::Vec4f(1, 0, 0, 0)));
             }
+            update(stateset, lightList, frameNum);
 #else
             std::vector<osg::ref_ptr<osg::Light>> lights;
             lights.reserve(lightList.size());
@@ -497,6 +484,40 @@ namespace SceneUtil
 
             return stateset;
         }
+
+#ifdef __vita__
+        // View-space positions go stale as the camera moves; refresh.
+        void update(osg::StateSet* stateset, const LightManager::LightList& lightList, size_t frameNum) override
+        {
+            for (size_t i = 0; i < 2; ++i)
+            {
+                osg::Uniform* pos = stateset->getUniform(kPosNames[i]);
+                osg::Uniform* diff = stateset->getUniform(kDiffNames[i]);
+                osg::Uniform* atten = stateset->getUniform(kAttenNames[i]);
+                if (!pos || !diff || !atten)
+                    continue;
+                if (i < lightList.size())
+                {
+                    const auto* light = lightList[i]->mLightSource->getLight(frameNum);
+                    const osg::Vec3f vp = lightList[i]->mViewBound.center();
+                    pos->set(osg::Vec4f(vp.x(), vp.y(), vp.z(), 1.0f));
+                    diff->set(light->getDiffuse());
+                    atten->set(osg::Vec4f(light->getConstantAttenuation(), light->getLinearAttenuation(),
+                        light->getQuadraticAttenuation(), 0.f));
+                }
+                else
+                {
+                    pos->set(osg::Vec4f(0, 0, 0, 0));
+                    diff->set(osg::Vec4f(0, 0, 0, 0));
+                    atten->set(osg::Vec4f(1, 0, 0, 0));
+                }
+            }
+        }
+
+        static constexpr const char* kPosNames[] = { "u_lightPos0", "u_lightPos1" };
+        static constexpr const char* kDiffNames[] = { "u_lightDiffuse0", "u_lightDiffuse1" };
+        static constexpr const char* kAttenNames[] = { "u_lightAtten0", "u_lightAtten1" };
+#endif
     };
 
     struct StateSetGeneratorSingleUBO : StateSetGenerator
@@ -1308,9 +1329,21 @@ namespace SceneUtil
             mLight[i] = new osg::Light(*copy.mLight[i].get(), copyop);
     }
 
+#ifdef __vita__
+    unsigned long long gLightCbUs = 0;
+    unsigned gLightCbCalls = 0;
+#endif
+
     void LightListCallback::operator()(osg::Node* node, osgUtil::CullVisitor* cv)
     {
+#ifdef __vita__
+        const unsigned long long t0 = sceKernelGetProcessTimeWide();
         bool pushedState = pushLightState(node, cv);
+        gLightCbUs += sceKernelGetProcessTimeWide() - t0;
+        ++gLightCbCalls;
+#else
+        bool pushedState = pushLightState(node, cv);
+#endif
         traverse(node, cv);
         if (pushedState)
             cv->popStateSet();

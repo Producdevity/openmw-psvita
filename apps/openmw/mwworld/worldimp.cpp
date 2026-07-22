@@ -7,6 +7,7 @@
 #include <malloc.h>
 #include "../vita/VitaInit.h"
 #include "../vita/VitaMemAudit.h"
+#include <components/vita/VitaEsmPrefetch.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
 #define VITA_CRUMB(msg)
@@ -306,6 +307,7 @@ namespace MWWorld
         // Release the boot-time in-RAM ESM buffers (esmloader slurp).
         // Later context restores reopen the files from disk on demand.
         mReaders.clear();
+        Vita::EsmPrefetch::finish();
         // Coalesce the freed slurp buffers; a fragmented free list makes the
         // next allocation storm (first NpcAnimation) pathologically slow.
         malloc_trim(0);
@@ -1639,6 +1641,15 @@ namespace MWWorld
         return reached;
     }
 
+#ifdef __vita__
+    void World::purgeCellRefs(CellStore& store)
+    {
+        // Pointer-identity compares only; the store's refs may already be dying.
+        std::erase_if(mDoorStates, [&](const auto& entry) { return entry.first.mCell == &store; });
+        mProjectileManager->purgeCasterHandles(&store);
+    }
+#endif
+
     void World::processDoors(float duration)
     {
         auto it = mDoorStates.begin();
@@ -2937,6 +2948,19 @@ namespace MWWorld
         OMWScriptsLoader omwScriptsLoader(mStore);
         gameContentLoader.addLoader(".omwscripts", omwScriptsLoader);
 
+#ifdef __vita__
+        // Background reads run ahead of the parser (read/parse pipeline).
+        {
+            std::vector<std::filesystem::path> toPrefetch;
+            for (const std::string& file : content)
+            {
+                const Files::MultiDirCollection& col = fileCollections.getCollection(Misc::getFileExtension(file));
+                if (Misc::getFileExtension(file) != "omwscripts" && col.doesExist(file))
+                    toPrefetch.push_back(col.getPath(file));
+            }
+            Vita::EsmPrefetch::start(std::move(toPrefetch));
+        }
+#endif
         int idx = 0;
         for (const std::string& file : content)
         {

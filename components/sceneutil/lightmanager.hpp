@@ -380,6 +380,11 @@ namespace SceneUtil
     void configureStateSetSunOverride(LightManager* lightManager, const osg::Light* light, osg::StateSet* stateset,
         int mode = osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 
+#ifdef __vita__
+    // Light-callback cull cost; read and reset by VitaMemAudit.
+    extern unsigned long long gLightCbUs;
+    extern unsigned gLightCbCalls;
+#endif
 }
 
 #endif

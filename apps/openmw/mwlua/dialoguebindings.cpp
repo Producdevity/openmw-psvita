@@ -7,6 +7,7 @@
 #include "apps/openmw/mwworld/store.hpp"
 
 #include <components/esm3/loaddial.hpp>
+#include <components/esm3/loadinfo.hpp>
 #include <components/lua/luastate.hpp>
 #include <components/lua/util.hpp>
 #include <components/misc/resourcehelpers.hpp>
@@ -107,7 +108,7 @@ namespace
                   {
                       if (mwDialogueInfo.mQuestStatus == ESM::DialInfo::QuestStatus::QS_Name)
                       {
-                          return sol::optional<std::string_view>(mwDialogueInfo.mResponse);
+                          return sol::optional<std::string_view>(ESM::getDialInfoText(mwDialogueInfo));
                       }
                   }
                   return sol::nullopt;
@@ -149,8 +150,8 @@ namespace
             = [](const ESM::DialInfo& rec) { return "ESM3_Dialogue_Info[" + rec.mId.toDebugString() + "]"; };
         recordInfoBindingsClass["id"]
             = sol::readonly_property([](const ESM::DialInfo& rec) { return rec.mId.serializeText(); });
-        recordInfoBindingsClass["text"]
-            = sol::readonly_property([](const ESM::DialInfo& rec) -> std::string_view { return rec.mResponse; });
+        recordInfoBindingsClass["text"] = sol::readonly_property(
+            [](const ESM::DialInfo& rec) -> std::string_view { return ESM::getDialInfoText(rec); });
         recordInfoBindingsClass["questStage"]
             = sol::readonly_property([](const ESM::DialInfo& rec) -> sol::optional<int> {
                   if (rec.mData.mType != ESM::Dialogue::Type::Journal)

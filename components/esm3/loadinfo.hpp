@@ -75,6 +75,13 @@ namespace ESM
         // selected
         std::string mResultScript;
 
+#ifdef __vita__
+        // Lazy response: text left on disk, fetched on demand.
+        int16_t mResponseFile = -1;
+        uint32_t mResponseOffset = 0;
+        uint32_t mResponseSize = 0;
+#endif
+
         // ONLY include this item the NPC is not part of any faction.
         bool mFactionLess;
 
@@ -109,6 +116,16 @@ namespace ESM
         void blank();
         ///< Set record to default state (does not touch the ID).
     };
+
+    /// Response text; on Vita may read lazily from disk.
+#ifdef __vita__
+    const std::string& getDialInfoText(const DialInfo& info);
+#else
+    inline const std::string& getDialInfoText(const DialInfo& info)
+    {
+        return info.mResponse;
+    }
+#endif
 
 }
 #endif
