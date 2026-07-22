@@ -1087,8 +1087,7 @@ void OMW::Engine::prepareEngine()
             asyncListener.update();
         dataLoading.get();
     }
-    // Loader stays on through world init and initUI; off before main loop.
-    listener->setLabel("Initializing...", true);
+    listener->loadingOff();
     // Coalesce freed slurp buffers before initUI's allocation storm.
     malloc_trim(0);
     Files::saveScanCache(
@@ -1203,7 +1202,6 @@ void OMW::Engine::prepareEngine()
     mLuaWorker = std::make_unique<MWLua::Worker>(*mLuaManager);
 #ifdef __vita__
     Vita::logMemoryStatus("Post-LuaInit");
-    listener->loadingOff();
 #endif
     VITA_CRUMB("prepareEngine() done");
 }

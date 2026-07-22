@@ -65,6 +65,10 @@ namespace MWRender
         osg::Matrix mProjectionMatrix;
         osg::Matrix mViewMatrix;
         bool mActive;
+#ifdef __vita__
+        // Pipelined cull can miss a strict one-shot; stay live a few frames.
+        int mFramesLeft = 4;
+#endif
     };
 
     class CameraLocalUpdateCallback
@@ -635,6 +639,20 @@ namespace MWRender
             return;
         }
 
+        // Raw payload (Vita saves): fixed size, no PNG signature.
+        const size_t rawSize = size_t(sFogOfWarResolution) * sFogOfWarResolution * 4;
+        const bool isPng = data.size() > 8 && static_cast<unsigned char>(data[0]) == 0x89 && data[1] == 'P';
+        if (!isPng && data.size() == rawSize)
+        {
+            mFogOfWarImage = new osg::Image;
+            mFogOfWarImage->allocateImage(sFogOfWarResolution, sFogOfWarResolution, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+            std::memcpy(mFogOfWarImage->data(), data.data(), rawSize);
+            mFogOfWarImage->dirty();
+            createFogOfWarTexture();
+            mHasFogState = true;
+            return;
+        }
+
         osgDB::ReaderWriter* readerwriter = osgDB::Registry::instance()->getReaderWriterForExtension("png");
         if (!readerwriter)
         {
@@ -665,9 +683,11 @@ namespace MWRender
             return;
 
 #ifdef __vita__
-        // libpng's internal mallocs intermittently abort under heap pressure;
-        // OSG's writer crashes inside the encoder. Skip persistence — fog
-        // regenerates as the player explores on next session.
+        // Raw RGBA instead of libpng (its mallocs abort under heap pressure).
+        // loadFogOfWar detects raw payloads by size and missing PNG magic.
+        const size_t rawSize = size_t(sFogOfWarResolution) * sFogOfWarResolution * 4;
+        fog.mImageData.resize(rawSize);
+        std::memcpy(fog.mImageData.data(), mFogOfWarImage->data(), rawSize);
         return;
 #endif
 
@@ -712,7 +732,12 @@ namespace MWRender
         mViewMatrix.makeLookAt(osg::Vec3d(x, y, zmax + 5), osg::Vec3d(x, y, zmin), upVector);
 
         setUpdateCallback(new CameraLocalUpdateCallback);
+#ifdef __vita__
+        // GL_RGB is not a renderable GXM target; RGBA keeps the FBO complete.
+        setColorBufferInternalFormat(GL_RGBA);
+#else
         setDepthBufferInternalFormat(GL_DEPTH24_STENCIL8);
+#endif
     }
 
     void LocalMapRenderToTexture::setDefaults(osg::Camera* camera)
@@ -729,11 +754,17 @@ namespace MWRender
         // PIXEL_BUFFER_RTT requires GLX/WGL pbuffers — not available on Vita.
         // FBO-only avoids OSG silently falling through to the broken backend.
         camera->setRenderTargetImplementation(osg::Camera::FRAME_BUFFER_OBJECT);
+        // Color-only attachment; vitaGL supplies a hidden depth buffer.
+        // Same recipe as CharacterPreview (the known-good Vita RTT).
+        camera->setImplicitBufferAttachmentMask(
+            osg::Camera::IMPLICIT_COLOR_BUFFER_ATTACHMENT, osg::Camera::IMPLICIT_COLOR_BUFFER_ATTACHMENT);
+        camera->setClearColor(osg::Vec4(0.f, 0.f, 0.f, 1.f));
+        camera->setClearMask(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 #else
         camera->setRenderTargetImplementation(osg::Camera::FRAME_BUFFER_OBJECT, osg::Camera::PIXEL_BUFFER_RTT);
-#endif
         camera->setClearColor(osg::Vec4(0.f, 0.f, 0.f, 1.f));
         camera->setClearMask(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+#endif
         camera->setRenderOrder(osg::Camera::PRE_RENDER);
 
         camera->setCullMask(Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static);
@@ -771,6 +802,15 @@ namespace MWRender
             new osg::Uniform("u_fogStart", 10000000.0f), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
         stateset->addUniform(
             new osg::Uniform("u_fogEnd", 10000000.0f), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+        // VitaLit ignores the osg::Light override below and lights with the
+        // live scene sun — snapshots taken at night bake dark. Force a fixed
+        // bright top-down light matching upstream's map light.
+        stateset->addUniform(
+            new osg::Uniform("u_sunDirView", osg::Vec3f(0.f, 0.f, 1.f)), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+        stateset->addUniform(
+            new osg::Uniform("u_sunColor", osg::Vec3f(0.9f, 0.9f, 0.9f)), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+        stateset->addUniform(
+            new osg::Uniform("u_ambient", osg::Vec3f(0.35f, 0.35f, 0.35f)), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 #endif
 
         osg::ref_ptr<osg::LightModel> lightmodel = new osg::LightModel;
@@ -803,10 +843,18 @@ namespace MWRender
 
     void CameraLocalUpdateCallback::operator()(LocalMapRenderToTexture* node, osg::NodeVisitor* nv)
     {
+#ifdef __vita__
+        if (--node->mFramesLeft <= 0)
+        {
+            node->setNodeMask(0);
+            node->mActive = false;
+        }
+#else
         if (!node->mActive)
             node->setNodeMask(0);
 
         node->mActive = false;
+#endif
 
         // Rtt-nodes do not forward update traversal to their cameras so we can traverse safely.
         // Traverse in case there are nested callbacks.

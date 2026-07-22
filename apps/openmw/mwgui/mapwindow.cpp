@@ -244,6 +244,11 @@ namespace MWGui
             {
                 entry.mFogWidget->setImageTexture({});
                 entry.mFogTexture.reset();
+#ifdef __vita__
+                // Vita GUI renders untextured quads as solid vertex colour
+                // (black); hide instead of relying on empty texture.
+                entry.mFogWidget->setVisible(false);
+#endif
             }
         }
 
@@ -452,7 +457,12 @@ namespace MWGui
 
         constexpr auto resetEntry = [](MapEntry& entry, bool visible, const MyGUI::IntPoint* position) {
             entry.mMapWidget->setVisible(visible);
+#ifdef __vita__
+            // Re-shown when a fog texture is wired; see applyFogOfWar note.
+            entry.mFogWidget->setVisible(false);
+#else
             entry.mFogWidget->setVisible(visible);
+#endif
             if (position)
             {
                 entry.mMapWidget->setPosition(*position);
@@ -643,6 +653,9 @@ namespace MWGui
                     entry.mFogTexture = std::make_unique<MyGUIPlatform::OSGTexture>(tex);
                     entry.mFogWidget->setRenderItemTexture(entry.mFogTexture.get());
                     entry.mFogWidget->getSubWidgetMain()->_setUVSet(MyGUI::FloatRect(0.f, 1.f, 1.f, 0.f));
+#ifdef __vita__
+                    entry.mFogWidget->setVisible(true);
+#endif
                 }
                 else
                 {
@@ -1336,16 +1349,7 @@ namespace MWGui
         {
             osg::ref_ptr<osg::Texture2D> baseTex = mGlobalMapRender->getBaseTexture();
             if (!baseTex)
-            {
-#ifdef __vita__
-                // Lazy render on first map open — deferred from initUI to save ~5MB during gameplay
-                mGlobalMapRender->render();
-                resizeGlobalMap();
-                baseTex = mGlobalMapRender->getBaseTexture();
-                if (!baseTex)
-#endif
-                    return;
-            }
+                return;
 
             mGlobalMapTexture = std::make_unique<MyGUIPlatform::OSGTexture>(baseTex);
             mGlobalMapImage->setRenderItemTexture(mGlobalMapTexture.get());
