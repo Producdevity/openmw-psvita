@@ -8,6 +8,9 @@
 
 #include "../mwbase/environment.hpp"
 #include "../mwbase/world.hpp"
+#ifdef __vita__
+#include "../vita/VitaSimWorker.h"
+#endif
 
 #include "postprocessor.hpp"
 
@@ -79,8 +82,26 @@ namespace MWRender
             int width = screenW - leftPadding * 2;
             int height = screenH - topPadding * 2;
 
+#ifdef __vita__
+            // GXM framebuffers are RGBA and the queue is deep: sync, read
+            // RGBA, then repack to the RGB the jpg writer expects.
+            glFinish();
+            osg::ref_ptr<osg::Image> rgba = new osg::Image;
+            rgba->readPixels(leftPadding, topPadding, width, height, GL_RGBA, GL_UNSIGNED_BYTE);
+            rgba->scaleImage(mWidth, mHeight, 1);
+            mImage->allocateImage(mWidth, mHeight, 1, GL_RGB, GL_UNSIGNED_BYTE);
+            const unsigned char* src = rgba->data();
+            unsigned char* dst = mImage->data();
+            for (int i = 0; i < mWidth * mHeight; ++i, src += 4, dst += 3)
+            {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+            }
+#else
             mImage->readPixels(leftPadding, topPadding, width, height, GL_RGB, GL_UNSIGNED_BYTE);
             mImage->scaleImage(mWidth, mHeight, 1);
+#endif
         }
 
     private:
@@ -100,6 +121,7 @@ namespace MWRender
     void ScreenshotManager::screenshot(osg::Image* image, int w, int h)
     {
 #ifdef __vita__
+        Vita::drainPendingDraw(); // nested renders next; consume queued cull
         osg::Camera* camera = mViewer->getCamera();
 #else
         osg::Camera* camera = MWBase::Environment::get().getWorld()->getPostProcessor()->getHUDCamera();
