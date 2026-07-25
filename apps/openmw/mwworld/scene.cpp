@@ -1539,7 +1539,7 @@ namespace MWWorld
             if (Settings::general().mVitaCellFlatten)
                 VitaMerge::flattenCell(cell, cellRoot);
 
-            if (!cell.isExterior() && Settings::general().mVitaCellMerge)
+            if (Settings::general().mVitaCellMerge)
                 VitaMerge::mergeCell(cell, cellRoot);
 
             BatchCensusVisitor postCensus;
