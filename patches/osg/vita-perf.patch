@@ -94,7 +94,15 @@
      if (_dynamic)
 --- a/src/osg/State.cpp
 +++ b/src/osg/State.cpp
-@@ -37,6 +37,26 @@
+@@ -23,6 +23,7 @@
+ 
+ #include <sstream>
+ #include <algorithm>
++#include <cstdint>
+ 
+ #ifndef GL_MAX_TEXTURE_COORDS
+ #define GL_MAX_TEXTURE_COORDS 0x8871
+@@ -37,6 +38,26 @@
  #endif
  
  using namespace std;
@@ -121,7 +129,7 @@
  using namespace osg;
  
  static ApplicationUsageProxy State_e0(ApplicationUsage::ENVIRONMENTAL_VARIABLE,"OSG_GL_ERROR_CHECKING <type>","ONCE_PER_ATTRIBUTE | ON | on enables fine grained checking,  ONCE_PER_FRAME enables coarse grained checking");
-@@ -501,6 +521,7 @@
+@@ -501,6 +522,7 @@
  
  void State::pushStateSet(const StateSet* dstate)
  {
@@ -129,7 +137,7 @@
  
      _stateStateStack.push_back(dstate);
      if (dstate)
-@@ -547,6 +568,7 @@
+@@ -547,6 +569,7 @@
  
  void State::popStateSet()
  {
@@ -137,7 +145,7 @@
      // OSG_NOTICE<<"State::popStateSet()"<<_stateStateStack.size()<<std::endl;
  
      if (_stateStateStack.empty()) return;
-@@ -680,6 +702,9 @@
+@@ -680,6 +703,9 @@
  
      if (dstate)
      {
@@ -147,17 +155,58 @@
          // push the stateset on the stack so it can be querried from within StateAttribute
          _stateStateStack.push_back(dstate);
  
-@@ -702,6 +727,9 @@
+@@ -690,6 +716,39 @@
+         const StateSet::TextureAttributeList& ds_textureAttributeList = dstate->getTextureAttributeList();
+ 
+         unsigned int unit;
++#ifdef __vita__
++        // Flat last-bound cache instead of per-unit map merge-walks; modes and
++        // non-Texture attributes are no-ops under the FFP-replacement shaders.
++        const StateAttribute* const kVitaTexUnknown = reinterpret_cast<const StateAttribute*>(~uintptr_t(0));
++        unsigned int unitMax = maximum(static_cast<unsigned int>(ds_textureAttributeList.size()),
++            static_cast<unsigned int>(_vitaLastTexture.size()));
++        for(unit=0;unit<unitMax;++unit)
++        {
++            const StateAttribute* tex = 0;
++            if (unit<ds_textureAttributeList.size())
++            {
++                const StateSet::AttributeList& al = ds_textureAttributeList[unit];
++                for(StateSet::AttributeList::const_iterator itr=al.begin(); itr!=al.end(); ++itr)
++                {
++                    if (itr->first.first==StateAttribute::TEXTURE)
++                    {
++                        tex = itr->second.first.get();
++                        break;
++                    }
++                }
++            }
++            const StateAttribute* last = unit<_vitaLastTexture.size() ? _vitaLastTexture[unit] : kVitaTexUnknown;
++            if (tex!=last)
++            {
++                setActiveTextureUnit(unit);
++                if (tex)
++                    tex->apply(*this);
++                else if (last!=kVitaTexUnknown && last!=0)
++                    glBindTexture(GL_TEXTURE_2D, 0);
++                vitaNoteTexture(unit, tex);
++            }
++        }
++#else
+         unsigned int unitMax = maximum(static_cast<unsigned int>(ds_textureModeList.size()),static_cast<unsigned int>(ds_textureAttributeList.size()));
+         unitMax = maximum(static_cast<unsigned int>(unitMax),static_cast<unsigned int>(_textureModeMapList.size()));
+         unitMax = maximum(static_cast<unsigned int>(unitMax),static_cast<unsigned int>(_textureAttributeMapList.size()));
+@@ -701,6 +760,10 @@
+             if (unit<ds_textureAttributeList.size()) applyAttributeListOnTexUnit(unit,getOrCreateTextureAttributeMap(unit),ds_textureAttributeList[unit]);
              else if (unit<_textureAttributeMapList.size()) applyAttributeMapOnTexUnit(unit,_textureAttributeMapList[unit]);
          }
- 
++#endif
++
 +        uint32_t ap1 = OSGAP_T();
 +        OSGAP_ADD(osgapply_tex_us, ap0, ap1)
-+
+ 
          const Program::PerContextProgram* previousLastAppliedProgramObject = _lastAppliedProgramObject;
  
-         applyModeList(_modeMap,dstate->getModeList());
-@@ -711,6 +739,9 @@
+@@ -711,6 +774,9 @@
          applyDefineList(_defineMap, dstate->getDefineList());
  #endif
  
@@ -167,7 +216,7 @@
          applyAttributeList(_attributeMap,dstate->getAttributeList());
  
          // Checking if there is no program on the stack or the program is not applied from the AttributeStack (StateSet core mechanism)
-@@ -728,6 +759,9 @@
+@@ -728,6 +794,9 @@
              _lastAppliedProgramObject->getProgram()->apply(*this);
          }
  
@@ -177,7 +226,7 @@
          if (dstate->getUniformList().empty())
          {
              if (_currentShaderCompositionUniformList.empty()) applyUniformMap(_uniformMap);
-@@ -744,6 +778,9 @@
+@@ -744,6 +813,9 @@
              }
          }
  
@@ -187,6 +236,18 @@
  #if 1
          popDefineList(_defineMap, dstate->getDefineList());
  #endif
+@@ -774,6 +846,11 @@
+         if (unit<_textureModeMapList.size()) applyModeMapOnTexUnit(unit,_textureModeMapList[unit]);
+         if (unit<_textureAttributeMapList.size()) applyAttributeMapOnTexUnit(unit,_textureAttributeMapList[unit]);
+     }
++#ifdef __vita__
++    // Bindings may have been restored behind the flat cache; force rebinds.
++    std::fill(_vitaLastTexture.begin(), _vitaLastTexture.end(),
++        reinterpret_cast<const StateAttribute*>(~uintptr_t(0)));
++#endif
+ 
+     // go through all active OpenGL modes, enabling/disable where
+     // appropriate.
 --- a/src/osg/Program.cpp
 +++ b/src/osg/Program.cpp
 @@ -929,6 +929,16 @@
@@ -411,3 +472,41 @@
              // search for the appropriate state group, return it if found.
              ChildList::iterator itr = _children.find(stateset);
              if (itr!=_children.end()) return itr->second.get();
+--- a/include/osg/State
++++ b/include/osg/State
+@@ -33,6 +33,7 @@
+ #include <osg/GraphicsCostEstimator>
+ 
+ #include <iosfwd>
++#include <cstdint>
+ #include <vector>
+ #include <map>
+ #include <set>
+@@ -468,9 +469,27 @@
+             AttributeMap& attributeMap = getOrCreateTextureAttributeMap(unit);
+             AttributeStack& as = attributeMap[attribute->getTypeMemberPair()];
+             as.changed = true;
++#ifdef __vita__
++            // Direct binds (ICO compiles, GUI) must refresh the flat cache.
++            if (attribute->getType() == StateAttribute::TEXTURE)
++                vitaNoteTexture(unit, attribute);
++#endif
+             return applyAttributeOnTexUnit(unit,attribute,as);
+         }
+ 
++#ifdef __vita__
++        // Vita fast path: texture-unit state is just the bound texture
++        // (TexEnv/TexGen/modes are ignored by the FFP-replacement shaders).
++        // Sentinel (const StateAttribute*)-1 = unknown, forces an apply.
++        mutable std::vector<const StateAttribute*> _vitaLastTexture;
++        inline void vitaNoteTexture(unsigned int unit, const StateAttribute* attribute) const
++        {
++            if (_vitaLastTexture.size() <= unit)
++                _vitaLastTexture.resize(unit + 1, reinterpret_cast<const StateAttribute*>(~uintptr_t(0)));
++            _vitaLastTexture[unit] = attribute;
++        }
++#endif
++
+         /** Mode has been set externally, update state to reflect this setting.*/
+         void haveAppliedMode(StateAttribute::GLMode mode,StateAttribute::GLModeValue value);
+ 

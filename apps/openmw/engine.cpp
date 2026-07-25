@@ -208,11 +208,24 @@ void OMW::Engine::executeLocalScripts()
     }
 }
 
+#ifdef __vita__
+// Worker/main frame instrumentation; reported by VitaMemAudit.
+extern "C"
+{
+    uint32_t simprof_script_us = 0, simprof_mech_us = 0, simprof_phys_us = 0, simprof_batches = 0;
+    uint32_t mainprof_draw_us = 0, mainprof_swap_us = 0, mainprof_swap_max_us = 0;
+    uint32_t mainprof_fence_us = 0, mainprof_frames = 0;
+}
+#endif
+
 void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, float frametime, bool paused)
 {
     const osg::Timer* const timer = osg::Timer::instance();
     osg::Stats* const stats = mViewer->getViewerStats();
 
+#ifdef __vita__
+        const uint64_t simT0 = sceKernelGetProcessTimeWide();
+#endif
         {
             ScopedProfile<UserStatsType::Script> profile(frameStart, frameNumber, *timer, *stats);
 
@@ -254,6 +267,10 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
             }
         }
 
+#ifdef __vita__
+        const uint64_t simT1 = sceKernelGetProcessTimeWide();
+        simprof_script_us += (uint32_t)(simT1 - simT0);
+#endif
         // update mechanics
         {
             ScopedProfile<UserStatsType::Mechanics> profile(frameStart, frameNumber, *timer, *stats);
@@ -271,6 +288,10 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
             }
         }
 
+#ifdef __vita__
+        const uint64_t simT2 = sceKernelGetProcessTimeWide();
+        simprof_mech_us += (uint32_t)(simT2 - simT1);
+#endif
         // update physics
         {
             ScopedProfile<UserStatsType::Physics> profile(frameStart, frameNumber, *timer, *stats);
@@ -291,6 +312,10 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
             }
         }
 
+#ifdef __vita__
+        simprof_phys_us += (uint32_t)(sceKernelGetProcessTimeWide() - simT2);
+        ++simprof_batches;
+#endif
 }
 
 bool OMW::Engine::frame(unsigned frameNumber, float frametime)
@@ -306,7 +331,11 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 #ifdef __vita__
         // Finish overlapped sim before touching game state.
         if (mSimWorker && mSimOverlap && mSimPrimed)
+        {
+            const uint64_t f0 = sceKernelGetProcessTimeWide();
             mSimWorker->finish();
+            mainprof_fence_us += (uint32_t)(sceKernelGetProcessTimeWide() - f0);
+        }
 #endif
         // update input
         {
@@ -462,8 +491,17 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         mCullPrimed = true;
         if (havePrev)
         {
+            const uint64_t t0 = sceKernelGetProcessTimeWide();
             renderer->draw();
+            const uint64_t t1 = sceKernelGetProcessTimeWide();
             mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+            const uint64_t t2 = sceKernelGetProcessTimeWide();
+            mainprof_draw_us += (uint32_t)(t1 - t0);
+            const uint32_t swapUs = (uint32_t)(t2 - t1);
+            mainprof_swap_us += swapUs;
+            if (swapUs > mainprof_swap_max_us)
+                mainprof_swap_max_us = swapUs;
+            ++mainprof_frames;
         }
         Vita::setDrawInFlight(false);
     }
@@ -484,8 +522,19 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             runSimPhases(frameStart, nextFrame, nextDt, nextPaused);
         });
         mSimPrimed = true;
-        renderer->draw();
-        mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+        {
+            const uint64_t t0 = sceKernelGetProcessTimeWide();
+            renderer->draw();
+            const uint64_t t1 = sceKernelGetProcessTimeWide();
+            mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+            const uint64_t t2 = sceKernelGetProcessTimeWide();
+            mainprof_draw_us += (uint32_t)(t1 - t0);
+            const uint32_t swapUs = (uint32_t)(t2 - t1);
+            mainprof_swap_us += swapUs;
+            if (swapUs > mainprof_swap_max_us)
+                mainprof_swap_max_us = swapUs;
+            ++mainprof_frames;
+        }
         Vita::setDrawInFlight(false);
     }
     else
@@ -1367,7 +1416,11 @@ void OMW::Engine::go()
 #ifdef __vita__
         // Cull overlap: worker reads the frame stamp; idle it before advance.
         if (mSimWorker && mCullOverlap && mSimPrimed)
+        {
+            const uint64_t f0 = sceKernelGetProcessTimeWide();
             mSimWorker->finish();
+            mainprof_fence_us += (uint32_t)(sceKernelGetProcessTimeWide() - f0);
+        }
 #endif
         mViewer->advance(timeManager.getRenderingSimulationTime());
 

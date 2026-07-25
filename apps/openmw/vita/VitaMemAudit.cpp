@@ -18,6 +18,8 @@ extern "C"
     extern uint32_t osgprof_mat_us, osgprof_state_us, osgprof_unif_us, osgprof_draw_us, osgprof_leaves;
     extern unsigned int cullprof_node, cullprof_group, cullprof_transform, cullprof_geode, cullprof_drawable,
         cullprof_dcull, cullprof_leaves, cullprof_sg;
+    extern uint32_t simprof_script_us, simprof_mech_us, simprof_phys_us, simprof_batches;
+    extern uint32_t mainprof_draw_us, mainprof_swap_us, mainprof_swap_max_us, mainprof_fence_us, mainprof_frames;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
     extern uint32_t osgapply_push, osgapply_pop;
 }
@@ -362,6 +364,25 @@ namespace Vita
             auditLog(buf);
         }
         osgprof_mat_us = osgprof_state_us = osgprof_unif_us = osgprof_draw_us = osgprof_leaves = 0;
+
+        // Worker sim phases + main draw/swap/fence split.
+        if (simprof_batches > 0)
+        {
+            snprintf(buf, sizeof(buf), "[SimProf] script=%.1f mech=%.1f phys=%.1f ms/batch (n=%u)",
+                simprof_script_us / 1000.0 / simprof_batches, simprof_mech_us / 1000.0 / simprof_batches,
+                simprof_phys_us / 1000.0 / simprof_batches, simprof_batches);
+            auditLog(buf);
+        }
+        simprof_script_us = simprof_mech_us = simprof_phys_us = simprof_batches = 0;
+
+        if (mainprof_frames > 0)
+        {
+            snprintf(buf, sizeof(buf), "[MainProf] draw=%.1f swap=%.1f (max %.1f) fence=%.1f ms/frame (n=%u)",
+                mainprof_draw_us / 1000.0 / mainprof_frames, mainprof_swap_us / 1000.0 / mainprof_frames,
+                mainprof_swap_max_us / 1000.0, mainprof_fence_us / 1000.0 / mainprof_frames, mainprof_frames);
+            auditLog(buf);
+        }
+        mainprof_draw_us = mainprof_swap_us = mainprof_swap_max_us = mainprof_fence_us = mainprof_frames = 0;
 
         // Cull traversal shape: visits per frame by node kind.
         if (cullprof_drawable > 0)

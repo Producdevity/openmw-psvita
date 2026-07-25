@@ -1151,8 +1151,10 @@ namespace MWWorld
             {
                 const auto& item = items[i].mItem;
                 const osg::Vec3f c = item.mGeom->getBoundingBox().center() * item.mWorld;
-                BatchKey key{ item.mChain, item.mSig, (int)std::floor(c.x() / 2048.f),
-                    (int)std::floor(c.y() / 2048.f), (int)std::floor(c.z() / 2048.f) };
+                // 1024 buckets: cullable batches now that draw CPU, not GPU
+                // vertex load, is the bound (2026-07-24 instrumentation).
+                BatchKey key{ item.mChain, item.mSig, (int)std::floor(c.x() / 1024.f),
+                    (int)std::floor(c.y() / 1024.f), (int)std::floor(c.z() / 1024.f) };
                 groups[key].push_back(i);
             }
 
