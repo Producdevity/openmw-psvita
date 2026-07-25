@@ -215,6 +215,9 @@ extern "C"
     uint32_t simprof_script_us = 0, simprof_mech_us = 0, simprof_phys_us = 0, simprof_batches = 0;
     uint32_t mainprof_draw_us = 0, mainprof_swap_us = 0, mainprof_swap_max_us = 0;
     uint32_t mainprof_fence_us = 0, mainprof_frames = 0;
+    // The ~8ms untimed main tail found by the unlocked-fps run (2026-07-24).
+    uint32_t tailprof_early_us = 0, tailprof_world_us = 0, tailprof_gui_us = 0;
+    uint32_t tailprof_trav_us = 0, tailprof_lua_us = 0, tailprof_frames = 0;
 }
 #endif
 
@@ -326,6 +329,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     mEnvironment.setFrameDuration(frametime);
 
+#ifdef __vita__
+    uint64_t tail0 = 0, tail1 = 0, tail2 = 0;
+#endif
     try
     {
 #ifdef __vita__
@@ -336,6 +342,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             mSimWorker->finish();
             mainprof_fence_us += (uint32_t)(sceKernelGetProcessTimeWide() - f0);
         }
+#endif
+#ifdef __vita__
+        tail0 = sceKernelGetProcessTimeWide();
 #endif
         // update input
         {
@@ -400,6 +409,10 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         runSimPhases(frameStart, frameNumber, frametime, paused);
 #endif
 
+#ifdef __vita__
+        tail1 = sceKernelGetProcessTimeWide();
+        tailprof_early_us += (uint32_t)(tail1 - tail0);
+#endif
         // update world
         {
             ScopedProfile<UserStatsType::World> profile(frameStart, frameNumber, *timer, *stats);
@@ -410,11 +423,18 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             }
         }
 
+#ifdef __vita__
+        tail2 = sceKernelGetProcessTimeWide();
+        tailprof_world_us += (uint32_t)(tail2 - tail1);
+#endif
         // update GUI
         {
             ScopedProfile<UserStatsType::Gui> profile(frameStart, frameNumber, *timer, *stats);
             mWindowManager->update(frametime);
         }
+#ifdef __vita__
+        tailprof_gui_us += (uint32_t)(sceKernelGetProcessTimeWide() - tail2);
+#endif
     }
     catch (const std::exception& e)
     {
@@ -446,6 +466,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     mStereoManager->updateSettings(Settings::camera().mNearClip, Settings::camera().mViewingDistance);
 
+#ifdef __vita__
+    const uint64_t tail3 = sceKernelGetProcessTimeWide();
+#endif
     mViewer->eventTraversal();
     mViewer->updateTraversal();
 
@@ -467,7 +490,38 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     }
 
     // if there is a separate Lua thread, it starts the update now
+#ifdef __vita__
+    const uint64_t tail4 = sceKernelGetProcessTimeWide();
+    tailprof_trav_us += (uint32_t)(tail4 - tail3);
+#endif
     mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
+#ifdef __vita__
+    tailprof_lua_us += (uint32_t)(sceKernelGetProcessTimeWide() - tail4);
+    ++tailprof_frames;
+    // Slow-frame forensics: name the culprit at the moment of the drop.
+    {
+        static uint64_t s_lastFrameEnd = 0;
+        static uint64_t s_lastReport = 0;
+        const uint64_t nowUs = sceKernelGetProcessTimeWide();
+        if (s_lastFrameEnd != 0)
+        {
+            const uint32_t frameUs = (uint32_t)(nowUs - s_lastFrameEnd);
+            if (frameUs > 40000 && nowUs - s_lastReport > 1000000)
+            {
+                s_lastReport = nowUs;
+                char buf[192];
+                snprintf(buf, sizeof(buf),
+                    "[Slow] frame=%ums early=%.1f world=%.1f gui=%.1f trav=%.1f lua=%.1f draw=%.1f fence=%.1f",
+                    frameUs / 1000, (tail1 - tail0) / 1000.0, (tail2 - tail1) / 1000.0,
+                    (tail3 - tail2) / 1000.0, (tail4 - tail3) / 1000.0, (nowUs - tail4) / 1000.0,
+                    mainprof_draw_us / 1000.0 / (mainprof_frames ? mainprof_frames : 1),
+                    mainprof_fence_us / 1000.0 / (mainprof_frames ? mainprof_frames : 1));
+                Vita::breadcrumb(buf);
+            }
+        }
+        s_lastFrameEnd = nowUs;
+    }
+#endif
 
 #ifdef __vita__
     const uint64_t renderStartUs = sceKernelGetProcessTimeWide();

@@ -20,6 +20,8 @@ extern "C"
         cullprof_dcull, cullprof_leaves, cullprof_sg;
     extern uint32_t simprof_script_us, simprof_mech_us, simprof_phys_us, simprof_batches;
     extern uint32_t mainprof_draw_us, mainprof_swap_us, mainprof_swap_max_us, mainprof_fence_us, mainprof_frames;
+    extern uint32_t tailprof_early_us, tailprof_world_us, tailprof_gui_us, tailprof_trav_us, tailprof_lua_us,
+        tailprof_frames;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
     extern uint32_t osgapply_push, osgapply_pop;
 }
@@ -383,6 +385,17 @@ namespace Vita
             auditLog(buf);
         }
         mainprof_draw_us = mainprof_swap_us = mainprof_swap_max_us = mainprof_fence_us = mainprof_frames = 0;
+
+        if (tailprof_frames > 0)
+        {
+            snprintf(buf, sizeof(buf), "[TailProf] early=%.1f world=%.1f gui=%.1f trav=%.1f lua=%.1f ms/frame",
+                tailprof_early_us / 1000.0 / tailprof_frames, tailprof_world_us / 1000.0 / tailprof_frames,
+                tailprof_gui_us / 1000.0 / tailprof_frames, tailprof_trav_us / 1000.0 / tailprof_frames,
+                tailprof_lua_us / 1000.0 / tailprof_frames);
+            auditLog(buf);
+        }
+        tailprof_early_us = tailprof_world_us = tailprof_gui_us = tailprof_trav_us = tailprof_lua_us = 0;
+        tailprof_frames = 0;
 
         // Cull traversal shape: visits per frame by node kind.
         if (cullprof_drawable > 0)

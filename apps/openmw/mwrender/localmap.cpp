@@ -767,9 +767,12 @@ namespace MWRender
 #endif
         camera->setRenderOrder(osg::Camera::PRE_RENDER);
 
-        camera->setCullMask(Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static);
-        camera->setCullMaskLeft(Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static);
-        camera->setCullMaskRight(Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static);
+        camera->setCullMask(
+            Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static | Mask_MergedGeometry);
+        camera->setCullMaskLeft(
+            Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static | Mask_MergedGeometry);
+        camera->setCullMaskRight(
+            Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static | Mask_MergedGeometry);
         camera->setNodeMask(Mask_RenderToTexture);
         camera->setProjectionMatrix(mProjectionMatrix);
         camera->setViewMatrix(mViewMatrix);

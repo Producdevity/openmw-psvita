@@ -1307,10 +1307,10 @@ namespace Vita
         // supplies 640x368 as the default (matches the vglInit backbuffer
         // 1:1), and the Vita Settings tab exposes 480x272 / 512x288 /
         // 640x368. See vglInitWithCustomSizes in initialize() for why
-        // higher widths aren't offered. Antialiasing and framerate cap
-        // stay forced.
+        // higher widths aren't offered. Antialiasing stays forced; the
+        // framerate cap comes from settings.cfg (default 30) so users can
+        // unlock — 2026-07-24 rebalance left headroom past 30 in most scenes.
         Settings::video().mAntialiasing.set(0);
-        Settings::video().mFramerateLimit.set(30.0f);
 
         // --- Shaders: FFP only (vitaGL cannot compile OpenMW GLSL shaders) ---
         Settings::shaders().mLightingMethod.set(SceneUtil::LightingMethod::FFP);

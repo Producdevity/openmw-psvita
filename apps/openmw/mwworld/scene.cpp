@@ -712,6 +712,21 @@ namespace MWWorld
         };
         std::map<const MWWorld::CellStore*, CellState> sCells;
 
+        // Statics plus inert world clutter. Pickup and Disable both route
+        // through removeObjectFromScene -> un-merge closure; scripted refs
+        // stay live because SetPos bypasses that hook.
+        bool mergeableRef(const MWWorld::Ptr& ptr)
+        {
+            const unsigned int t = ptr.getType();
+            const bool inert = t == ESM::REC_STAT || t == ESM::REC_STAT4;
+            const bool item = t == ESM::REC_MISC || t == ESM::REC_BOOK || t == ESM::REC_INGR || t == ESM::REC_ALCH;
+            if (!inert && !item)
+                return false;
+            if (item && !ptr.getClass().getScript(ptr).empty())
+                return false;
+            return true;
+        }
+
         uint64_t refKey(const ESM::RefNum& rn)
         {
             return (uint64_t(uint32_t(rn.mContentFile)) << 32) | rn.mIndex;
@@ -879,6 +894,8 @@ namespace MWWorld
         // Restore originals for a batch and every batch sharing an object.
         void unmergeClosure(CellState& state, size_t firstBatch)
         {
+            const uint64_t t0 = sceKernelGetProcessTimeWide();
+            int nBatches = 0, nObjs = 0;
             std::vector<size_t> work{ firstBatch };
             std::set<size_t> visited;
             while (!work.empty())
@@ -891,6 +908,7 @@ namespace MWWorld
                 if (!batch.mActive)
                     continue;
                 batch.mActive = false;
+                ++nBatches;
                 if (state.mGroup && batch.mMerged)
                     state.mGroup->removeChild(batch.mMerged);
                 for (uint64_t ref : batch.mRefs)
@@ -899,11 +917,18 @@ namespace MWWorld
                     if (it == state.mObjects.end())
                         continue;
                     if (it->second.mNode)
+                    {
                         it->second.mNode->setNodeMask(it->second.mOldMask);
+                        ++nObjs;
+                    }
                     for (size_t other : it->second.mBatches)
                         work.push_back(other);
                 }
             }
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[Unmerge] batches=%d objs=%d us=%u", nBatches, nObjs,
+                (unsigned)(sceKernelGetProcessTimeWide() - t0));
+            Vita::breadcrumb(buf);
         }
 
         void onObjectRemoved(const MWWorld::Ptr& ptr)
@@ -1006,10 +1031,7 @@ namespace MWWorld
                 if (!udc || udc->getNumUserObjects() == 0)
                     continue;
                 auto* ptrHolder = dynamic_cast<MWRender::PtrHolder*>(udc->getUserObject(0));
-                if (!ptrHolder)
-                    continue;
-                unsigned int t = ptrHolder->mPtr.getType();
-                if (t != ESM::REC_STAT && t != ESM::REC_STAT4)
+                if (!ptrHolder || !mergeableRef(ptrHolder->mPtr))
                     continue;
                 osg::Group* pat = child->asGroup();
                 if (!pat)
@@ -1120,10 +1142,7 @@ namespace MWWorld
                 if (!udc || udc->getNumUserObjects() == 0)
                     continue;
                 auto* holder = dynamic_cast<MWRender::PtrHolder*>(udc->getUserObject(0));
-                if (!holder)
-                    continue;
-                unsigned int t = holder->mPtr.getType();
-                if (t != ESM::REC_STAT && t != ESM::REC_STAT4)
+                if (!holder || !mergeableRef(holder->mPtr))
                     continue;
                 if (!holder->mPtr.getCellRef().getRefNum().isSet())
                     continue;
@@ -1168,7 +1187,7 @@ namespace MWWorld
             CellState& state = sCells[&cell];
             state.mGroup = new osg::Group;
             state.mGroup->setName("VitaMergedStatics");
-            state.mGroup->setNodeMask(MWRender::Mask_Static);
+            state.mGroup->setNodeMask(MWRender::Mask_MergedGeometry);
             state.mGroup->setDataVariance(osg::Object::STATIC);
             cellRoot->addChild(state.mGroup);
 
@@ -1312,7 +1331,9 @@ namespace MWWorld
                 ObjInfo& info = state.mObjects[objs[o].mRef];
                 info.mNode = objs[o].mNode;
                 info.mOldMask = objs[o].mNode->getNodeMask();
-                objs[o].mNode->setNodeMask(0);
+                // Pick-only: render cameras skip it, intersection rays hit it
+                // (pickup/tooltip targeting is a scene raycast, not physics).
+                objs[o].mNode->setNodeMask(MWRender::Mask_PickOnly);
                 ++hidden;
             }
 

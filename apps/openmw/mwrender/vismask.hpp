@@ -56,6 +56,14 @@ namespace MWRender
         Mask_Lighting = (1 << 19),
 
         Mask_Groundcover = (1 << 20),
+
+        // Vita: merged-away originals — hidden from render cameras but kept
+        // visible to intersection rays so pickup/tooltip targeting works.
+        Mask_PickOnly = (1 << 21),
+
+        // Vita: merged batch geometry — rendered, but ray-transparent so the
+        // coplanar pick-only originals win every intersection test.
+        Mask_MergedGeometry = (1 << 22),
     };
 
     // Defines masks to remove when using ToggleWorld command
