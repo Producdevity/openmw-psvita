@@ -249,11 +249,17 @@ namespace Vita
             s_minHeapFree = heapFree;
 
         char buf[192];
-        snprintf(buf, sizeof(buf), "[VitaMem] %s | used: %uKB | free: %uKB | min: %uKB",
+        // arena = total dlmalloc extent; headroom = growth room to the
+        // configured cap. Answers where the REAL wall is (thresholds were
+        // tuned by dead reckoning against a stale 272MB figure).
+        const unsigned arenaMB = static_cast<unsigned>(mi.arena / (1024 * 1024));
+        const int heapCapMB = 312;
+        snprintf(buf, sizeof(buf), "[VitaMem] %s | used: %uKB | free: %uKB | min: %uKB | arena: %uMB (+%dMB room)",
             label,
             static_cast<unsigned>(mi.uordblks / 1024),
             static_cast<unsigned>(heapFree / 1024),
-            static_cast<unsigned>(s_minHeapFree / 1024));
+            static_cast<unsigned>(s_minHeapFree / 1024),
+            arenaMB, heapCapMB - static_cast<int>(arenaMB));
         breadcrumb(buf);
         Log(Debug::Info) << buf;
     }
@@ -1209,7 +1215,11 @@ namespace Vita
         // vertex/fragment/VDM rings 2× each. Param buffer left at default 16 MB.
         vglSetParamBufferSize(16 * 1024 * 1024);
         vglSetVDMBufferSize(256 * 1024);                  // 128 KB → 256 KB
-        vglSetVertexBufferSize(8 * 1024 * 1024);          //  2 MB → 8 MB (4 MB still crashed; bumped further)
+        // 8 MB dated from the client-arrays streaming era; the "4 MB still
+        // crashed" note predates both the VBO switch for static geometry and
+        // the reserve guards in the vitaGL fork that fixed the real crash.
+        // 4 MB returns 4 MB of CDRAM to textures (vram floor was 1/88 MB).
+        vglSetVertexBufferSize(4 * 1024 * 1024);
         vglSetFragmentBufferSize(2 * 1024 * 1024);        // 512 KB → 2 MB
         vglUseTripleBuffering(GL_TRUE);
         vglWaitVblankStart(GL_FALSE);

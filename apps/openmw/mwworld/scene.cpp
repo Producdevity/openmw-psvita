@@ -70,7 +70,6 @@ static void countDrawables(const osg::Node* node, unsigned int& drawableCount, u
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/lightmanager.hpp>
-#include <components/sceneutil/optimizer.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/settings/values.hpp>
 #include <components/terrain/terraingrid.hpp>
@@ -1447,99 +1446,16 @@ namespace MWWorld
 
     void Scene::vitaBatchCell(CellStore& cell)
     {
-        // Merge sub-geometries within each NIF to reduce draw calls.
-        // Uses a safety callback to skip animated/tracked nodes.
+        // Flatten + merge do the real batching. The SceneUtil::Optimizer
+        // pass that used to run here was census-proven a no-op (pre==post
+        // on every cell) and cost several graph traversals per cell load —
+        // removed 2026-07-24 to cut cell-boundary stalls.
         if (osg::Group* cellRoot = mRendering.getObjects().getCellRoot(&cell))
         {
-            // Pre-pass: each per-object PAT under the cell root carries a
-            // PtrHolder via osg::UserDataContainer. The optimizer's
-            // FLATTEN_STATIC_TRANSFORMS bails on any node with a userdata
-            // container, so it leaves every static under its own PAT — and
-            // MergeGeometry only merges siblings of the SAME group, so it
-            // can never combine across two PATs. Net result: vitaBatchCell
-            // was a near-no-op for cross-object batching.
-            //
-            // Strip the container from STAT-only PATs so flatten + merge can
-            // collapse them into shared-StateSet supergeometries. Doors and
-            // activators (interactive — script can disable/move them) keep
-            // their PtrHolder so they remain individually addressable.
-            std::vector<std::pair<osg::Node*, osg::ref_ptr<osg::UserDataContainer>>> stripped;
-            for (unsigned int i = 0; i < cellRoot->getNumChildren(); ++i)
-            {
-                osg::Node* child = cellRoot->getChild(i);
-                osg::UserDataContainer* udc = child->getUserDataContainer();
-                if (!udc || udc->getNumUserObjects() == 0)
-                    continue;
-                auto* holder = dynamic_cast<MWRender::PtrHolder*>(udc->getUserObject(0));
-                if (!holder)
-                    continue;
-                unsigned int t = holder->mPtr.getType();
-                // Only liberate truly static refs. Doors and activators stay
-                // pinned because gameplay needs to find them by Ptr.
-                if (t == ESM::REC_STAT || t == ESM::REC_STAT4)
-                {
-                    stripped.emplace_back(child, udc);
-                    child->setUserDataContainer(nullptr);
-                }
-            }
-
-            struct VitaCanOptimize : public SceneUtil::Optimizer::IsOperationPermissibleForObjectCallback
-            {
-                const osg::Group* mCellRoot;
-                explicit VitaCanOptimize(const osg::Group* cr) : mCellRoot(cr) {}
-
-                bool isOperationPermissibleForObjectImplementation(
-                    const SceneUtil::Optimizer*, const osg::Drawable*, unsigned int) const override
-                {
-                    return true;
-                }
-                bool isOperationPermissibleForObjectImplementation(
-                    const SceneUtil::Optimizer*, const osg::Node* node, unsigned int opt) const override
-                {
-                    if (node == mCellRoot)
-                        return false;
-                    if (node->getDataVariance() == osg::Object::DYNAMIC)
-                        return false;
-                    // Doors/activators still carry the PtrHolder; respect that.
-                    if (node->getUserDataContainer())
-                        return false;
-                    if (node->getUpdateCallback())
-                        return false;
-                    if ((opt & SceneUtil::Optimizer::REMOVE_REDUNDANT_NODES)
-                        && node->getNodeMask() != 0xffffffff)
-                        return false;
-                    return true;
-                }
-            };
-
-            SceneUtil::Optimizer optimizer;
-            optimizer.setIsOperationPermissibleForObjectCallback(new VitaCanOptimize(cellRoot));
-            // VERTEX_POSTTRANSFORM (Tipsify-style triangle reorder for vertex-cache
-            // locality) is dropped on Vita: SGX543 is a tile-based deferred renderer
-            // whose vertex throughput is dominated by tile-binning bandwidth, not
-            // post-transform cache locality. The reorder pass is O(triangles) per
-            // geometry — measurable cost for a benefit the hardware barely sees.
-            optimizer.optimize(cellRoot,
-                SceneUtil::Optimizer::FLATTEN_STATIC_TRANSFORMS
-                    | SceneUtil::Optimizer::REMOVE_REDUNDANT_NODES
-                    | SceneUtil::Optimizer::SHARE_DUPLICATE_STATE
-                    | SceneUtil::Optimizer::MERGE_GEOMETRY);
-
-            // Best-effort restore: if a stripped PAT survived flattening (e.g.
-            // because it carried a non-flattenable transform), reattach its
-            // userdata so any still-valid Ptr lookup keeps working. PATs that
-            // got flattened away are no longer in the graph; the ref_ptr to
-            // their old userdata simply releases.
-            for (auto& [node, udc] : stripped)
-            {
-                if (node->getNumParents() > 0)
-                    node->setUserDataContainer(udc);
-            }
-
             if (Settings::general().mVitaCellFlatten)
                 VitaMerge::flattenCell(cell, cellRoot);
 
-            if (!cell.isExterior() && Settings::general().mVitaCellMerge)
+            if (Settings::general().mVitaCellMerge)
                 VitaMerge::mergeCell(cell, cellRoot);
 
             BatchCensusVisitor postCensus;
@@ -2079,11 +1995,6 @@ namespace MWWorld
     {
         if (mPendingDemotions.empty())
             return;
-        // Don't demote while we're already paying for ring-cell streaming
-        // — they share the main thread budget.
-        if (!mPendingCellLoads.empty())
-            return;
-
         // NOTE: do NOT bail under memory pressure here. Demotion FREES
         // memory (removes non-static objects from old cells); pausing it
         // when pressure is high was the bug that let heap grow unbounded
@@ -2091,6 +2002,13 @@ namespace MWWorld
         // still correctly bail under pressure — see processPendingPromotions
         // and processPendingCellLoads.
         const bool pressure = Vita::isMemoryPressure(getVitaCellBudgetMB());
+
+        // Loads share the frame budget, so normally let them finish first —
+        // but under pressure demotion frees exactly what loads will need.
+        // Async boundary walks starved demotions behind continuous loads
+        // (heap floor 289KB, 2026-07-24) until this override.
+        if (!mPendingCellLoads.empty() && !pressure)
+            return;
 
         PendingDemotion& pd = mPendingDemotions.front();
         if (pd.cell == nullptr)
@@ -2944,21 +2862,22 @@ namespace MWWorld
 #endif
 
 #ifdef __vita__
-        // Sync-drain pending demote/promote work before the loading screen
-        // closes. Async streaming during gameplay was leaving the player
-        // "stuck" — main thread budget consumed by the queues for ~1-2s
-        // after the loading screen ended. Cleaner UX: longer load screen
-        // (which already animates progress), then immediate playable state.
-        // The loadingListener is still active here (ScopedLoad in scope above).
-        while (!mPendingPromotions.empty())
+        // Sync-drain vs async streaming: the sync gulp was a low-headroom
+        // era workaround (async left the player budget-starved ~1-2s after
+        // the load screen). Frames now carry 15-20ms of slack, so async
+        // draining over a few frames should be invisible. Toggle for A/B.
+        if (Settings::general().mVitaSyncCellDrain)
         {
-            flushPendingPromotion(mPendingPromotions.front().cell);
-            loadingListener->increaseProgress(1);
-        }
-        while (!mPendingDemotions.empty())
-        {
-            flushPendingDemotion(mPendingDemotions.front().cell);
-            loadingListener->increaseProgress(1);
+            while (!mPendingPromotions.empty())
+            {
+                flushPendingPromotion(mPendingPromotions.front().cell);
+                loadingListener->increaseProgress(1);
+            }
+            while (!mPendingDemotions.empty())
+            {
+                flushPendingDemotion(mPendingDemotions.front().cell);
+                loadingListener->increaseProgress(1);
+            }
         }
 
         // Eviction is pressure-only; evicting here re-scans ESM from disk.
