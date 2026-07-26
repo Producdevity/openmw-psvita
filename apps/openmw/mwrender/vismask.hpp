@@ -64,9 +64,6 @@ namespace MWRender
         // Vita: merged batch geometry — rendered, but ray-transparent so the
         // coplanar pick-only originals win every intersection test.
         Mask_MergedGeometry = (1 << 22),
-
-        // Vita: drawable-free bone subtrees — updated but skipped by cull.
-        Mask_BoneOnly = (1 << 23),
     };
 
     // Defines masks to remove when using ToggleWorld command

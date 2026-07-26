@@ -78,9 +78,6 @@ namespace SceneUtil
 
         unsigned int mLastFrameNumber;
         unsigned int mLastCullFrameNumber;
-#ifdef __vita__
-        unsigned int mVitaMaskFrame = 0;
-#endif
     };
 
 }

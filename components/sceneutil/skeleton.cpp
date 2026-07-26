@@ -4,44 +4,11 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/misc/strings/lower.hpp>
-#ifdef __vita__
-#include <components/sceneutil/lightmanager.hpp>
-#endif
 
 #include <algorithm>
 
 #ifdef __vita__
 extern "C" int cullprof_in_skeleton;
-
-namespace
-{
-    // Mask drawable-free bone branches out of cull (bit mirrors
-    // MWRender::Mask_BoneOnly; cull cameras exclude it, update visitors
-    // and the skeleton's own bone update are unaffected). Chains leading
-    // to attachments (weapons, torches, VFX) stay fully visible.
-    constexpr unsigned int kBoneOnlyMask = 1u << 23;
-
-    bool vitaMarkBoneSubtree(osg::Node* node)
-    {
-        if (node->asDrawable())
-            return true;
-        if (dynamic_cast<SceneUtil::LightSource*>(node))
-            return true;
-        bool renderable = false;
-        osg::Group* group = node->asGroup();
-        if (group)
-        {
-            for (unsigned int i = 0; i < group->getNumChildren(); ++i)
-                if (vitaMarkBoneSubtree(group->getChild(i)))
-                    renderable = true;
-        }
-        else
-            renderable = true; // unknown leaf type: keep visible
-        if (node->asTransform())
-            node->setNodeMask(renderable ? ~0u : kBoneOnlyMask);
-        return renderable;
-    }
-}
 #endif
 
 namespace SceneUtil
@@ -178,15 +145,6 @@ namespace SceneUtil
         {
             mLastCullFrameNumber = nv.getTraversalNumber();
 #ifdef __vita__
-            // Refresh bone cull masks ~4x/s: attachments (equip, VFX,
-            // torches) appear within a beat; skipped branches drop out
-            // of the cull walk entirely.
-            if (mVitaMaskFrame == 0 || mLastCullFrameNumber - mVitaMaskFrame >= 8)
-            {
-                mVitaMaskFrame = mLastCullFrameNumber;
-                for (unsigned int i = 0; i < getNumChildren(); ++i)
-                    vitaMarkBoneSubtree(getChild(i));
-            }
             // Census: how much of the cull transform count is bones.
             ++cullprof_in_skeleton;
             osg::Group::traverse(nv);
