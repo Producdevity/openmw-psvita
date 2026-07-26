@@ -26,6 +26,7 @@
 #include "vita/VitaSimWorker.h"
 #include <components/vita/VitaDialogueText.h>
 #include <components/vita/VitaEsmPrefetch.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
@@ -743,6 +744,18 @@ OMW::Engine::~Engine()
     SDL_Quit();
 
     Log(Debug::Info) << "Quitting peacefully.";
+#ifdef __vita__
+    // Clean-exit marker: absent at next boot = the session crashed, and
+    // VitaInit archives its log to crashlogs/ before rotation.
+    {
+        SceUID fd = sceIoOpen("ux0:data/openmw/clean_exit", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+        if (fd >= 0)
+        {
+            sceIoWrite(fd, "ok", 2);
+            sceIoClose(fd);
+        }
+    }
+#endif
 }
 
 // Set data dir

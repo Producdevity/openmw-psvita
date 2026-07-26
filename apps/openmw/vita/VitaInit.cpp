@@ -1160,6 +1160,27 @@ namespace Vita
 
         ensureDataDirectories();
 
+        // Crash forensics: if the last session never wrote its clean-exit
+        // marker, archive its log before rotation destroys the evidence.
+        // Three archive slots, oldest overwritten.
+        {
+            SceUID fd = sceIoOpen("ux0:data/openmw/clean_exit", SCE_O_RDONLY, 0);
+            if (fd >= 0)
+            {
+                sceIoClose(fd);
+                sceIoRemove("ux0:data/openmw/clean_exit");
+            }
+            else
+            {
+                sceIoMkdir("ux0:data/openmw/crashlogs", 0777);
+                // Rotate slot files 2->3, 1->2, then archive as 1.
+                sceIoRemove("ux0:data/openmw/crashlogs/crash3.log");
+                sceIoRename("ux0:data/openmw/crashlogs/crash2.log", "ux0:data/openmw/crashlogs/crash3.log");
+                sceIoRename("ux0:data/openmw/crashlogs/crash1.log", "ux0:data/openmw/crashlogs/crash2.log");
+                sceIoRename("ux0:data/openmw/boot.log", "ux0:data/openmw/crashlogs/crash1.log");
+            }
+        }
+
         // Rotate logs
         sceIoRemove("ux0:data/openmw/boot.log.prev");
         sceIoRename("ux0:data/openmw/boot.log", "ux0:data/openmw/boot.log.prev");
