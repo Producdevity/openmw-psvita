@@ -19,6 +19,7 @@ extern "C"
     extern uint32_t osgprof_replayable, osgprof_replayed, osgprof_streplayed;
     extern unsigned int cullprof_node, cullprof_group, cullprof_transform, cullprof_geode, cullprof_drawable,
         cullprof_dcull, cullprof_leaves, cullprof_sg;
+    extern unsigned int cullprof_xf_bone;
     extern uint32_t simprof_script_us, simprof_mech_us, simprof_phys_us, simprof_batches;
     extern uint32_t mainprof_draw_us, mainprof_swap_us, mainprof_swap_max_us, mainprof_fence_us, mainprof_frames;
     extern uint32_t tailprof_early_us, tailprof_world_us, tailprof_gui_us, tailprof_trav_us, tailprof_lua_us,
@@ -407,15 +408,17 @@ namespace Vita
         if (cullprof_drawable > 0)
         {
             snprintf(buf, sizeof(buf),
-                "[CullProf] node=%u grp=%u xf=%u geode=%u drw=%u dcull=%u leaves=%u sg=%u /frame",
+                "[CullProf] node=%u grp=%u xf=%u(bone=%u) geode=%u drw=%u dcull=%u leaves=%u sg=%u /frame",
                 cullprof_node / kReportEveryFrames, cullprof_group / kReportEveryFrames,
-                cullprof_transform / kReportEveryFrames, cullprof_geode / kReportEveryFrames,
-                cullprof_drawable / kReportEveryFrames, cullprof_dcull / kReportEveryFrames,
-                cullprof_leaves / kReportEveryFrames, cullprof_sg / kReportEveryFrames);
+                cullprof_transform / kReportEveryFrames, cullprof_xf_bone / kReportEveryFrames,
+                cullprof_geode / kReportEveryFrames, cullprof_drawable / kReportEveryFrames,
+                cullprof_dcull / kReportEveryFrames, cullprof_leaves / kReportEveryFrames,
+                cullprof_sg / kReportEveryFrames);
             auditLog(buf);
         }
         cullprof_node = cullprof_group = cullprof_transform = cullprof_geode = 0;
         cullprof_drawable = cullprof_dcull = cullprof_leaves = cullprof_sg = 0;
+        cullprof_xf_bone = 0;
 
         // Inside State::apply: which section eats the state bucket.
         if (osgapply_calls > 0)

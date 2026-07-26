@@ -33,86 +33,6 @@
          /** Set the internal data array for a osg::Uniform */
          bool setArray( FloatArray* array );
          bool setArray( DoubleArray* array );
---- a/src/osgUtil/CullVisitor.cpp
-+++ b/src/osgUtil/CullVisitor.cpp
-@@ -38,6 +38,16 @@
- using namespace osg;
- using namespace osgUtil;
- 
-+#ifdef __vita__
-+extern "C" {
-+    unsigned int cullprof_node = 0, cullprof_group = 0, cullprof_transform = 0, cullprof_geode = 0,
-+        cullprof_drawable = 0, cullprof_dcull = 0, cullprof_leaves = 0, cullprof_sg = 0;
-+}
-+#define CULLPROF_INC(x) (++x)
-+#else
-+#define CULLPROF_INC(x) ((void)0)
-+#endif
-+
- inline float MAX_F(float a, float b)
-     { return a>b?a:b; }
- inline int EQUAL_F(float a, float b)
-@@ -861,6 +871,7 @@
- 
- void CullVisitor::apply(Node& node)
- {
-+    CULLPROF_INC(cullprof_node);
-     if (isCulled(node)) return;
- 
-     // push the culling mode.
-@@ -882,6 +893,7 @@
- 
- void CullVisitor::apply(Geode& node)
- {
-+    CULLPROF_INC(cullprof_geode);
-     if (isCulled(node)) return;
- 
-     // push the culling mode.
-@@ -902,6 +914,7 @@
- 
- void CullVisitor::apply(osg::Drawable& drawable)
- {
-+    CULLPROF_INC(cullprof_drawable);
-     RefMatrix& matrix = *getModelViewMatrix();
- 
-     const BoundingBox &bb =drawable.getBoundingBox();
-@@ -919,7 +932,11 @@
-         }
-     }
- 
--    if (drawable.isCullingActive() && isCulled(bb)) return;
-+    if (drawable.isCullingActive() && isCulled(bb))
-+    {
-+        CULLPROF_INC(cullprof_dcull);
-+        return;
-+    }
- 
- 
-     if (_computeNearFar && bb.valid())
-@@ -969,6 +986,7 @@
-     }
-     else
-     {
-+        CULLPROF_INC(cullprof_leaves);
-         addDrawableAndDepth(&drawable,&matrix,depth);
-     }
- 
-@@ -1136,6 +1154,7 @@
- 
- void CullVisitor::apply(Group& node)
- {
-+    CULLPROF_INC(cullprof_group);
-     if (isCulled(node)) return;
- 
-     // push the culling mode.
-@@ -1156,6 +1175,7 @@
- 
- void CullVisitor::apply(Transform& node)
- {
-+    CULLPROF_INC(cullprof_transform);
-     if (isCulled(node)) return;
- 
-     // push the culling mode.
 --- a/src/osg/Geometry.cpp
 +++ b/src/osg/Geometry.cpp
 @@ -1913,3 +1913,143 @@
@@ -1212,3 +1132,90 @@
                  mutable LastAppliedUniformList _lastAppliedUniformList;
  
                  typedef std::vector< ref_ptr<Shader> > ShaderList;
+--- a/src/osgUtil/CullVisitor.cpp
++++ b/src/osgUtil/CullVisitor.cpp
+@@ -38,6 +38,19 @@
+ using namespace osg;
+ using namespace osgUtil;
+ 
++#ifdef __vita__
++extern "C" {
++    unsigned int cullprof_node = 0, cullprof_group = 0, cullprof_transform = 0, cullprof_geode = 0,
++        cullprof_drawable = 0, cullprof_dcull = 0, cullprof_leaves = 0, cullprof_sg = 0;
++    // Set by SceneUtil::Skeleton around its cull traverse; counts bone visits.
++    int cullprof_in_skeleton = 0;
++    unsigned int cullprof_xf_bone = 0;
++}
++#define CULLPROF_INC(x) (++x)
++#else
++#define CULLPROF_INC(x) ((void)0)
++#endif
++
+ inline float MAX_F(float a, float b)
+     { return a>b?a:b; }
+ inline int EQUAL_F(float a, float b)
+@@ -861,6 +874,7 @@
+ 
+ void CullVisitor::apply(Node& node)
+ {
++    CULLPROF_INC(cullprof_node);
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
+@@ -882,6 +896,7 @@
+ 
+ void CullVisitor::apply(Geode& node)
+ {
++    CULLPROF_INC(cullprof_geode);
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
+@@ -902,6 +917,7 @@
+ 
+ void CullVisitor::apply(osg::Drawable& drawable)
+ {
++    CULLPROF_INC(cullprof_drawable);
+     RefMatrix& matrix = *getModelViewMatrix();
+ 
+     const BoundingBox &bb =drawable.getBoundingBox();
+@@ -919,7 +935,11 @@
+         }
+     }
+ 
+-    if (drawable.isCullingActive() && isCulled(bb)) return;
++    if (drawable.isCullingActive() && isCulled(bb))
++    {
++        CULLPROF_INC(cullprof_dcull);
++        return;
++    }
+ 
+ 
+     if (_computeNearFar && bb.valid())
+@@ -969,6 +989,7 @@
+     }
+     else
+     {
++        CULLPROF_INC(cullprof_leaves);
+         addDrawableAndDepth(&drawable,&matrix,depth);
+     }
+ 
+@@ -1136,6 +1157,7 @@
+ 
+ void CullVisitor::apply(Group& node)
+ {
++    CULLPROF_INC(cullprof_group);
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
+@@ -1156,6 +1178,11 @@
+ 
+ void CullVisitor::apply(Transform& node)
+ {
++    CULLPROF_INC(cullprof_transform);
++#ifdef __vita__
++    if (cullprof_in_skeleton)
++        ++cullprof_xf_bone;
++#endif
+     if (isCulled(node)) return;
+ 
+     // push the culling mode.
