@@ -16,6 +16,7 @@
 extern "C"
 {
     extern uint32_t osgprof_mat_us, osgprof_state_us, osgprof_unif_us, osgprof_draw_us, osgprof_leaves;
+    extern uint32_t osgprof_replayable, osgprof_replayed, osgprof_streplayed;
     extern unsigned int cullprof_node, cullprof_group, cullprof_transform, cullprof_geode, cullprof_drawable,
         cullprof_dcull, cullprof_leaves, cullprof_sg;
     extern uint32_t simprof_script_us, simprof_mech_us, simprof_phys_us, simprof_batches;
@@ -360,12 +361,16 @@ namespace Vita
         // Per-leaf OSG draw-dispatch cost (probes in RenderLeaf.cpp).
         if (osgprof_leaves > 0)
         {
-            snprintf(buf, sizeof(buf), "[OsgProf] leaves=%u mat=%.1f state=%.1f unif=%.1f draw=%.1f us/leaf",
-                osgprof_leaves, (double)osgprof_mat_us / osgprof_leaves, (double)osgprof_state_us / osgprof_leaves,
-                (double)osgprof_unif_us / osgprof_leaves, (double)osgprof_draw_us / osgprof_leaves);
+            snprintf(buf, sizeof(buf), "[OsgProf] leaves=%u repl=%u rep=%u srep=%u mat=%.1f state=%.1f unif=%.1f draw=%.1f us/leaf",
+                osgprof_leaves, osgprof_replayable, osgprof_replayed, osgprof_streplayed, (double)osgprof_mat_us / osgprof_leaves,
+                (double)osgprof_state_us / osgprof_leaves, (double)osgprof_unif_us / osgprof_leaves,
+                (double)osgprof_draw_us / osgprof_leaves);
             auditLog(buf);
         }
         osgprof_mat_us = osgprof_state_us = osgprof_unif_us = osgprof_draw_us = osgprof_leaves = 0;
+        osgprof_replayable = 0;
+        osgprof_replayed = 0;
+        osgprof_streplayed = 0;
 
         // Worker sim phases + main draw/swap/fence split.
         if (simprof_batches > 0)

@@ -219,6 +219,9 @@ extern "C"
     uint32_t mainprof_lastdraw_us = 0, mainprof_lastswap_us = 0, mainprof_lastfence_us = 0;
     uint32_t vitastat_early_in_us = 0, vitastat_early_snd_us = 0;
     uint32_t vitastat_early_lsync_us = 0, vitastat_early_state_us = 0;
+    // Defined in fetched-OSG RenderLeaf.cpp.
+    extern int vita_draw_replay;
+    extern int vita_state_replay;
     // Defined in mwinput/inputmanagerimp.cpp.
     extern uint32_t vitastat_input_cap_us;
     extern uint32_t vitastat_input_bind_us;
@@ -1391,6 +1394,8 @@ void OMW::Engine::go()
     else
         osgUtil::RenderBin::setDefaultRenderBinSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
     // vitaGL is single-threaded; sim moves to a worker instead.
+    vita_draw_replay = Settings::general().mVitaDrawReplay ? 1 : 0;
+    vita_state_replay = Settings::general().mVitaStateReplay ? 1 : 0;
     if (Settings::general().mVitaSimThread)
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();
