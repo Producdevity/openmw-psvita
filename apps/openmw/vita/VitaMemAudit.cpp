@@ -24,6 +24,7 @@ extern "C"
     extern uint32_t tailprof_early_us, tailprof_world_us, tailprof_gui_us, tailprof_trav_us, tailprof_lua_us,
         tailprof_frames;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
+    extern uint32_t osgapply_unif_n, osgapply_unif_up;
     extern uint32_t osgapply_push, osgapply_pop;
 }
 
@@ -420,13 +421,14 @@ namespace Vita
         if (osgapply_calls > 0)
         {
             snprintf(buf, sizeof(buf),
-                "[OsgApply] calls=%u tex=%.1f mode=%.1f attr=%.1f unif=%.1f us/call push=%u pop=%u",
+                "[OsgApply] calls=%u tex=%.1f mode=%.1f attr=%.1f unif=%.1f us/call un=%u up=%u push=%u pop=%u",
                 osgapply_calls, (double)osgapply_tex_us / osgapply_calls, (double)osgapply_mode_us / osgapply_calls,
-                (double)osgapply_attr_us / osgapply_calls, (double)osgapply_unif_us / osgapply_calls, osgapply_push,
-                osgapply_pop);
+                (double)osgapply_attr_us / osgapply_calls, (double)osgapply_unif_us / osgapply_calls,
+                osgapply_unif_n, osgapply_unif_up, osgapply_push, osgapply_pop);
             auditLog(buf);
         }
         osgapply_calls = osgapply_tex_us = osgapply_mode_us = osgapply_attr_us = osgapply_unif_us = 0;
+        osgapply_unif_n = osgapply_unif_up = 0;
         osgapply_push = osgapply_pop = 0;
     }
 

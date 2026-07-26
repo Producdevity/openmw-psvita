@@ -17,92 +17,6 @@
      // print atomic counter
  
      if (_extensions->isShaderAtomicCountersSupported && !atomicCounterMap.empty())
---- a/include/osg/Program
-+++ b/include/osg/Program
-@@ -234,6 +234,7 @@
-             GLint _location;
-             GLenum _type;
-             GLint _size;
-+            unsigned int _denseIndex{ 0 };
-         };
-         typedef std::map< unsigned int, ActiveVarInfo > ActiveUniformMap;
-         typedef std::map< std::string, ActiveVarInfo > ActiveVarInfoMap;
-@@ -296,11 +297,56 @@
-                 void resetAppliedUniforms() const
-                 {
-                     _lastAppliedUniformList.clear();
-+#ifdef __vita__
-+                    for (LastAppliedUniformVec::iterator itr = _lastAppliedUniformVec.begin();
-+                         itr != _lastAppliedUniformVec.end(); ++itr)
-+                    {
-+                        itr->first = 0;
-+                        itr->second = 0;
-+                    }
-+#endif
-                 }
- 
- 
-                 inline void apply(const Uniform& uniform) const
-                 {
-+#ifdef __vita__
-+                    // O(1) path: location + dense slot cached on the Uniform.
-+                    GLint location;
-+                    unsigned int idx;
-+                    if (uniform._vitaLocPCP == this)
-+                    {
-+                        location = uniform._vitaLoc;
-+                        idx = uniform._vitaIdx;
-+                    }
-+                    else
-+                    {
-+                        ActiveUniformMap::const_iterator itr = _uniformInfoMap.find(uniform.getNameID());
-+                        if (itr != _uniformInfoMap.end())
-+                        {
-+                            location = itr->second._location;
-+                            idx = itr->second._denseIndex;
-+                        }
-+                        else
-+                        {
-+                            location = -1;
-+                            idx = 0;
-+                        }
-+                        uniform._vitaLocPCP = this;
-+                        uniform._vitaLoc = location;
-+                        uniform._vitaIdx = idx;
-+                    }
-+                    if (location >= 0 && idx < _lastAppliedUniformVec.size())
-+                    {
-+                        UniformModifiedCountPair& slot = _lastAppliedUniformVec[idx];
-+                        if (slot.first.get() != &uniform || slot.second != uniform.getModifiedCount())
-+                        {
-+                            uniform.apply(_extensions.get(), location);
-+                            slot.first = &uniform;
-+                            slot.second = uniform.getModifiedCount();
-+                        }
-+                    }
-+#else
-                     GLint location = getUniformLocation(uniform.getNameID());
-                     if (location>=0)
-                     {
-@@ -320,6 +366,7 @@
-                             _lastAppliedUniformList[location].second = uniform.getModifiedCount();
-                         }
-                     }
-+#endif
-                 }
- 
-                 const ActiveUniformMap& getActiveUniforms() const {return _uniformInfoMap;}
-@@ -382,6 +429,10 @@
- 
-                 typedef std::pair<osg::ref_ptr<const osg::Uniform>, unsigned int> UniformModifiedCountPair;
-                 typedef std::map<unsigned int, UniformModifiedCountPair> LastAppliedUniformList;
-+#ifdef __vita__
-+                typedef std::vector<UniformModifiedCountPair> LastAppliedUniformVec;
-+                mutable LastAppliedUniformVec _lastAppliedUniformVec;
-+#endif
-                 mutable LastAppliedUniformList _lastAppliedUniformList;
- 
-                 typedef std::vector< ref_ptr<Shader> > ShaderList;
 --- a/include/osg/Uniform
 +++ b/include/osg/Uniform
 @@ -874,6 +874,13 @@
@@ -769,6 +683,42 @@
      }
  
      if (_dynamic)
+--- a/include/osgUtil/StateGraph
++++ b/include/osgUtil/StateGraph
+@@ -26,6 +26,10 @@
+ #include <vector>
+ #include <algorithm>
+ 
++#ifdef __vita__
++extern "C" unsigned int cullprof_sg;
++#endif
++
+ namespace osgUtil {
+ 
+ struct LessDepthSortFunctor
+@@ -65,6 +69,12 @@
+ 
+         bool                                _dynamic;
+ 
++#ifdef __vita__
++        // Flat-state replay cache for this node's stateset chain
++        // (osg::State::VitaFlatState, built lazily in RenderLeaf.cpp).
++        osg::ref_ptr<osg::Referenced>       _vitaFlat;
++#endif
++
+         StateGraph():
+             _parent(NULL),
+             _stateset(NULL),
+@@ -214,6 +224,9 @@
+ 
+         inline StateGraph* find_or_insert(const osg::StateSet* stateset)
+         {
++#ifdef __vita__
++            ++cullprof_sg;
++#endif
+             // search for the appropriate state group, return it if found.
+             ChildList::iterator itr = _children.find(stateset);
+             if (itr!=_children.end()) return itr->second.get();
 --- a/src/osg/State.cpp
 +++ b/src/osg/State.cpp
 @@ -23,6 +23,7 @@
@@ -779,7 +729,7 @@
  
  #ifndef GL_MAX_TEXTURE_COORDS
  #define GL_MAX_TEXTURE_COORDS 0x8871
-@@ -37,6 +38,26 @@
+@@ -37,6 +38,28 @@
  #endif
  
  using namespace std;
@@ -792,6 +742,8 @@
 +uint32_t osgapply_mode_us = 0;
 +uint32_t osgapply_attr_us = 0;
 +uint32_t osgapply_unif_us = 0;
++uint32_t osgapply_unif_n = 0;
++uint32_t osgapply_unif_up = 0;
 +uint32_t osgapply_push = 0;
 +uint32_t osgapply_pop = 0;
 +}
@@ -806,7 +758,7 @@
  using namespace osg;
  
  static ApplicationUsageProxy State_e0(ApplicationUsage::ENVIRONMENTAL_VARIABLE,"OSG_GL_ERROR_CHECKING <type>","ONCE_PER_ATTRIBUTE | ON | on enables fine grained checking,  ONCE_PER_FRAME enables coarse grained checking");
-@@ -501,6 +522,7 @@
+@@ -501,6 +524,7 @@
  
  void State::pushStateSet(const StateSet* dstate)
  {
@@ -814,7 +766,7 @@
  
      _stateStateStack.push_back(dstate);
      if (dstate)
-@@ -547,6 +569,7 @@
+@@ -547,6 +571,7 @@
  
  void State::popStateSet()
  {
@@ -822,7 +774,7 @@
      // OSG_NOTICE<<"State::popStateSet()"<<_stateStateStack.size()<<std::endl;
  
      if (_stateStateStack.empty()) return;
-@@ -680,6 +703,9 @@
+@@ -680,6 +705,9 @@
  
      if (dstate)
      {
@@ -832,7 +784,7 @@
          // push the stateset on the stack so it can be querried from within StateAttribute
          _stateStateStack.push_back(dstate);
  
-@@ -690,6 +716,39 @@
+@@ -690,6 +718,39 @@
          const StateSet::TextureAttributeList& ds_textureAttributeList = dstate->getTextureAttributeList();
  
          unsigned int unit;
@@ -872,7 +824,7 @@
          unsigned int unitMax = maximum(static_cast<unsigned int>(ds_textureModeList.size()),static_cast<unsigned int>(ds_textureAttributeList.size()));
          unitMax = maximum(static_cast<unsigned int>(unitMax),static_cast<unsigned int>(_textureModeMapList.size()));
          unitMax = maximum(static_cast<unsigned int>(unitMax),static_cast<unsigned int>(_textureAttributeMapList.size()));
-@@ -701,6 +760,10 @@
+@@ -701,6 +762,10 @@
              if (unit<ds_textureAttributeList.size()) applyAttributeListOnTexUnit(unit,getOrCreateTextureAttributeMap(unit),ds_textureAttributeList[unit]);
              else if (unit<_textureAttributeMapList.size()) applyAttributeMapOnTexUnit(unit,_textureAttributeMapList[unit]);
          }
@@ -883,7 +835,7 @@
  
          const Program::PerContextProgram* previousLastAppliedProgramObject = _lastAppliedProgramObject;
  
-@@ -711,6 +774,9 @@
+@@ -711,6 +776,9 @@
          applyDefineList(_defineMap, dstate->getDefineList());
  #endif
  
@@ -893,27 +845,65 @@
          applyAttributeList(_attributeMap,dstate->getAttributeList());
  
          // Checking if there is no program on the stack or the program is not applied from the AttributeStack (StateSet core mechanism)
-@@ -728,6 +794,9 @@
+@@ -728,6 +796,46 @@
              _lastAppliedProgramObject->getProgram()->apply(*this);
          }
  
 +        uint32_t ap3 = OSGAP_T();
 +        OSGAP_ADD(osgapply_attr_us, ap2, ap3)
 +
++#ifdef __vita__
++        // Scene-stack uniforms are already resident in this program if the
++        // program, uniform stacks and frame are unchanged (values update
++        // once per frame): only the leaf list needs applying then.
++        const unsigned int vitaFrame = getFrameStamp() ? (unsigned int)getFrameStamp()->getFrameNumber() : 0u;
++        if (_lastAppliedProgramObject && _lastAppliedProgramObject == _vitaUnifFullPCP
++            && vitaFrame == _vitaUnifFullFrame && _vitaUniformStackGen == _vitaUnifFullStackGen
++            && _currentShaderCompositionUniformList.empty())
++        {
++            const StateSet::UniformList& ul = dstate->getUniformList();
++            for (StateSet::UniformList::const_iterator it = ul.begin(); it != ul.end(); ++it)
++                _lastAppliedProgramObject->apply(*it->second.first);
++        }
++        else
++        {
++            if (dstate->getUniformList().empty())
++            {
++                if (_currentShaderCompositionUniformList.empty()) applyUniformMap(_uniformMap);
++                else applyUniformList(_uniformMap, _currentShaderCompositionUniformList);
++            }
++            else
++            {
++                if (_currentShaderCompositionUniformList.empty()) applyUniformList(_uniformMap, dstate->getUniformList());
++                else
++                {
++                    _currentShaderCompositionUniformList.insert(dstate->getUniformList().begin(), dstate->getUniformList().end());
++                    applyUniformList(_uniformMap, _currentShaderCompositionUniformList);
++                }
++            }
++            if (_lastAppliedProgramObject)
++            {
++                _vitaUnifFullPCP = _lastAppliedProgramObject;
++                _vitaUnifFullFrame = vitaFrame;
++                _vitaUnifFullStackGen = _vitaUniformStackGen;
++            }
++        }
++#else
          if (dstate->getUniformList().empty())
          {
              if (_currentShaderCompositionUniformList.empty()) applyUniformMap(_uniformMap);
-@@ -744,6 +813,9 @@
+@@ -743,6 +851,10 @@
+                 applyUniformList(_uniformMap, _currentShaderCompositionUniformList);
              }
          }
- 
++#endif
++
 +        uint32_t ap4 = OSGAP_T();
 +        OSGAP_ADD(osgapply_unif_us, ap3, ap4)
-+
+ 
  #if 1
          popDefineList(_defineMap, dstate->getDefineList());
- #endif
-@@ -774,6 +846,11 @@
+@@ -774,6 +886,11 @@
          if (unit<_textureModeMapList.size()) applyModeMapOnTexUnit(unit,_textureModeMapList[unit]);
          if (unit<_textureAttributeMapList.size()) applyAttributeMapOnTexUnit(unit,_textureAttributeMapList[unit]);
      }
@@ -925,7 +915,7 @@
  
      // go through all active OpenGL modes, enabling/disable where
      // appropriate.
-@@ -1796,3 +1873,103 @@
+@@ -1796,3 +1913,103 @@
      const StateSet::DefineList& currentDefines = _defineMap.currentDefines;
      return (currentDefines.find(shaderRequirement)!=currentDefines.end());
  }
@@ -1039,7 +1029,7 @@
  #include <vector>
  #include <map>
  #include <set>
-@@ -468,9 +469,52 @@
+@@ -468,9 +469,60 @@
              AttributeMap& attributeMap = getOrCreateTextureAttributeMap(unit);
              AttributeStack& as = attributeMap[attribute->getTypeMemberPair()];
              as.changed = true;
@@ -1087,44 +1077,138 @@
 +        std::map<StateAttribute::TypeMemberPair, unsigned int> _vitaBaseAttrDepth;
 +        std::map<StateAttribute::GLMode, unsigned int> _vitaBaseModeDepth;
 +        void vitaSnapshotBase();
++
++        // Scene-stack uniforms need a full re-apply only when the program,
++        // the uniform stacks, or the frame changes; otherwise each state
++        // change only applies the leaf stateset's own uniform list.
++        mutable const void* _vitaUnifFullPCP = 0;
++        mutable unsigned int _vitaUnifFullFrame = ~0u;
++        mutable unsigned int _vitaUnifFullStackGen = ~0u;
++        mutable unsigned int _vitaUniformStackGen = 0;
 +#endif
 +
          /** Mode has been set externally, update state to reflect this setting.*/
          void haveAppliedMode(StateAttribute::GLMode mode,StateAttribute::GLModeValue value);
  
---- a/include/osgUtil/StateGraph
-+++ b/include/osgUtil/StateGraph
-@@ -26,6 +26,10 @@
- #include <vector>
- #include <algorithm>
+@@ -1471,6 +1523,9 @@
+ 
+ inline void State::pushUniformList(UniformMap& uniformMap,const StateSet::UniformList& uniformList)
+ {
++#ifdef __vita__
++    ++_vitaUniformStackGen;
++#endif
+     for(StateSet::UniformList::const_iterator aitr=uniformList.begin();
+         aitr!=uniformList.end();
+         ++aitr)
+@@ -1569,6 +1624,9 @@
+ 
+ inline void State::popUniformList(UniformMap& uniformMap,const StateSet::UniformList& uniformList)
+ {
++#ifdef __vita__
++    ++_vitaUniformStackGen;
++#endif
+     for(StateSet::UniformList::const_iterator aitr=uniformList.begin();
+         aitr!=uniformList.end();
+         ++aitr)
+--- a/include/osg/Program
++++ b/include/osg/Program
+@@ -31,6 +31,13 @@
+ #include <osg/Shader>
+ #include <osg/StateAttribute>
  
 +#ifdef __vita__
-+extern "C" unsigned int cullprof_sg;
++extern "C" {
++extern unsigned int osgapply_unif_n;
++extern unsigned int osgapply_unif_up;
++}
 +#endif
 +
- namespace osgUtil {
+ namespace osg {
  
- struct LessDepthSortFunctor
-@@ -65,6 +69,12 @@
- 
-         bool                                _dynamic;
- 
+ class State;
+@@ -234,6 +241,7 @@
+             GLint _location;
+             GLenum _type;
+             GLint _size;
++            unsigned int _denseIndex{ 0 };
+         };
+         typedef std::map< unsigned int, ActiveVarInfo > ActiveUniformMap;
+         typedef std::map< std::string, ActiveVarInfo > ActiveVarInfoMap;
+@@ -296,11 +304,58 @@
+                 void resetAppliedUniforms() const
+                 {
+                     _lastAppliedUniformList.clear();
 +#ifdef __vita__
-+        // Flat-state replay cache for this node's stateset chain
-+        // (osg::State::VitaFlatState, built lazily in RenderLeaf.cpp).
-+        osg::ref_ptr<osg::Referenced>       _vitaFlat;
++                    for (LastAppliedUniformVec::iterator itr = _lastAppliedUniformVec.begin();
++                         itr != _lastAppliedUniformVec.end(); ++itr)
++                    {
++                        itr->first = 0;
++                        itr->second = 0;
++                    }
 +#endif
-+
-         StateGraph():
-             _parent(NULL),
-             _stateset(NULL),
-@@ -214,6 +224,9 @@
+                 }
  
-         inline StateGraph* find_or_insert(const osg::StateSet* stateset)
-         {
+ 
+                 inline void apply(const Uniform& uniform) const
+                 {
 +#ifdef __vita__
-+            ++cullprof_sg;
++                    // O(1) path: location + dense slot cached on the Uniform.
++                    GLint location;
++                    unsigned int idx;
++                    if (uniform._vitaLocPCP == this)
++                    {
++                        location = uniform._vitaLoc;
++                        idx = uniform._vitaIdx;
++                    }
++                    else
++                    {
++                        ActiveUniformMap::const_iterator itr = _uniformInfoMap.find(uniform.getNameID());
++                        if (itr != _uniformInfoMap.end())
++                        {
++                            location = itr->second._location;
++                            idx = itr->second._denseIndex;
++                        }
++                        else
++                        {
++                            location = -1;
++                            idx = 0;
++                        }
++                        uniform._vitaLocPCP = this;
++                        uniform._vitaLoc = location;
++                        uniform._vitaIdx = idx;
++                    }
++                    if (location >= 0 && idx < _lastAppliedUniformVec.size())
++                    {
++                        ++osgapply_unif_n;
++                        UniformModifiedCountPair& slot = _lastAppliedUniformVec[idx];
++                        if (slot.first.get() != &uniform || slot.second != uniform.getModifiedCount())
++                        {
++                            ++osgapply_unif_up;
++                            uniform.apply(_extensions.get(), location);
++                            slot.first = &uniform;
++                            slot.second = uniform.getModifiedCount();
++                        }
++                    }
++#else
+                     GLint location = getUniformLocation(uniform.getNameID());
+                     if (location>=0)
+                     {
+@@ -320,6 +375,7 @@
+                             _lastAppliedUniformList[location].second = uniform.getModifiedCount();
+                         }
+                     }
 +#endif
-             // search for the appropriate state group, return it if found.
-             ChildList::iterator itr = _children.find(stateset);
-             if (itr!=_children.end()) return itr->second.get();
+                 }
+ 
+                 const ActiveUniformMap& getActiveUniforms() const {return _uniformInfoMap;}
+@@ -382,6 +438,10 @@
+ 
+                 typedef std::pair<osg::ref_ptr<const osg::Uniform>, unsigned int> UniformModifiedCountPair;
+                 typedef std::map<unsigned int, UniformModifiedCountPair> LastAppliedUniformList;
++#ifdef __vita__
++                typedef std::vector<UniformModifiedCountPair> LastAppliedUniformVec;
++                mutable LastAppliedUniformVec _lastAppliedUniformVec;
++#endif
+                 mutable LastAppliedUniformList _lastAppliedUniformList;
+ 
+                 typedef std::vector< ref_ptr<Shader> > ShaderList;
