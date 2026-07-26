@@ -231,6 +231,7 @@ extern "C"
     extern uint32_t vitastat_input_mgr_us;
     // Defined in scene.cpp / statemanagerimp.cpp.
     extern uint32_t vitastat_stream_us;
+    extern uint32_t vitastat_stream_load_us, vitastat_stream_demo_us, vitastat_stream_promo_us;
     extern uint32_t vitastat_save_flag;
     // The ~8ms untimed main tail found by the unlocked-fps run (2026-07-24).
     uint32_t tailprof_early_us = 0, tailprof_world_us = 0, tailprof_gui_us = 0;
@@ -549,18 +550,21 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
                 char buf[256];
                 snprintf(buf, sizeof(buf),
                     "[Slow] frame=%ums early=%.1f(in=%.1f[c=%.1f b=%.1f m=%.1f] snd=%.1f lsync=%.1f st=%.1f) "
-                    "world=%.1f gui=%.1f trav=%.1f lua=%.1f draw=%.1f swap=%.1f fence=%.1f stream=%.1f save=%u",
+                    "world=%.1f gui=%.1f trav=%.1f lua=%.1f draw=%.1f swap=%.1f fence=%.1f "
+                    "stream=%.1f(l=%.1f d=%.1f p=%.1f) save=%u",
                     frameUs / 1000, (tail1 - tail0) / 1000.0, vitastat_early_in_us / 1000.0,
                     vitastat_input_cap_us / 1000.0, vitastat_input_bind_us / 1000.0, vitastat_input_mgr_us / 1000.0,
                     vitastat_early_snd_us / 1000.0, vitastat_early_lsync_us / 1000.0,
                     vitastat_early_state_us / 1000.0, (tail2 - tail1) / 1000.0, (tail3 - tail2) / 1000.0,
                     (tail4 - tail3) / 1000.0, (nowUs - tail4) / 1000.0, mainprof_lastdraw_us / 1000.0,
                     mainprof_lastswap_us / 1000.0, mainprof_lastfence_us / 1000.0, vitastat_stream_us / 1000.0,
-                    vitastat_save_flag);
+                    vitastat_stream_load_us / 1000.0, vitastat_stream_demo_us / 1000.0,
+                    vitastat_stream_promo_us / 1000.0, vitastat_save_flag);
                 Vita::breadcrumb(buf);
             }
         }
         vitastat_stream_us = 0;
+        vitastat_stream_load_us = vitastat_stream_demo_us = vitastat_stream_promo_us = 0;
         vitastat_save_flag = 0;
         s_lastFrameEnd = nowUs;
     }

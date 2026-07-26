@@ -53,6 +53,10 @@ namespace MWWorld
         /// Ask a background thread to preload rendering meshes and collision shapes for objects in this cell.
         /// @note The cell itself must be in State_Loaded or State_Preloaded.
         void preload(MWWorld::CellStore& cell, double timestamp, bool urgent = false);
+#ifdef __vita__
+        // True once the background warm-up for this cell has completed.
+        bool isCellPreloadDone(const MWWorld::CellStore* cell) const;
+#endif
 
 #ifdef __vita__
         void setPlayerContext(const osg::Vec3f& pos, const osg::Vec3f& forwardDir);

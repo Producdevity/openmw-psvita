@@ -108,6 +108,8 @@ extern "C" unsigned int _newlib_heap_size_user;
 // Streaming time this frame; read+reset by the [Slow] crumb in engine.cpp.
 extern "C" uint32_t vitastat_stream_us;
 uint32_t vitastat_stream_us = 0;
+extern "C" uint32_t vitastat_stream_load_us, vitastat_stream_demo_us, vitastat_stream_promo_us;
+uint32_t vitastat_stream_load_us = 0, vitastat_stream_demo_us = 0, vitastat_stream_promo_us = 0;
 #endif
 
 namespace
@@ -578,17 +580,23 @@ namespace MWWorld
 
         // Incrementally load deferred ring cells
         processPendingCellLoads();
+        const uint64_t streamT1 = sceKernelGetProcessTimeWide();
 
         // Drain queued cell demotions (cells deferred from interior entry).
         // Gated on no pending loads inside processPendingDemotions itself.
         processPendingDemotions();
+        const uint64_t streamT2 = sceKernelGetProcessTimeWide();
 
         // Drain queued cell promotions (cells streaming up Lite→Full when
         // exiting an interior). Promotion priority is NPCs/creatures first
         // so the player sees them as soon as possible.
         processPendingPromotions();
+        const uint64_t streamT3 = sceKernelGetProcessTimeWide();
 
-        vitastat_stream_us += (uint32_t)(sceKernelGetProcessTimeWide() - streamStart);
+        vitastat_stream_us += (uint32_t)(streamT3 - streamStart);
+        vitastat_stream_load_us += (uint32_t)(streamT1 - streamStart);
+        vitastat_stream_demo_us += (uint32_t)(streamT2 - streamT1);
+        vitastat_stream_promo_us += (uint32_t)(streamT3 - streamT2);
 
         // Memory-pressure watchdog: flush caches when heap is high.
         // Only acts once per threshold crossing to avoid spamming clearCache
@@ -1744,6 +1752,8 @@ namespace MWWorld
             mPhysics->disableWater();
 
         mPreloader->notifyLoaded(&cell);
+        // Start the background warm-up now; inserts wait on it.
+        mPreloader->preload(cell, mRendering.getReferenceTime(), /*urgent*/ true);
 
         // Queue for incremental object insertion
         PendingCellLoad pending;
@@ -1777,6 +1787,16 @@ namespace MWWorld
             {
                 Vita::breadcrumb("[DeferredLoad] Paused: memory pressure");
                 break;
+            }
+
+            // Insert only after the background warm-up: cold items (bullet
+            // shapes, big meshes) blow the frame envelope by 30-380ms each;
+            // warm inserts are cache hits and pace correctly.
+            if (!mPreloader->isCellPreloadDone(pending.cell))
+            {
+                mPreloader->preload(cell, mRendering.getReferenceTime(), /*urgent*/ true);
+                ++it;
+                continue;
             }
 
             // Step 1: Collect the object list once
@@ -2661,6 +2681,7 @@ namespace MWWorld
         };
 
         mNavigator.updateBounds(playerCellIndex.mWorldspace, cellGridBounds, pos, navigatorUpdateGuard.get());
+        Vita::breadcrumb("changeCellGrid: navigator bounds done");
 
         mHalfGridSize = halfGridSize;
         mCurrentGridCenter = osg::Vec2i(playerCellX, playerCellY);
@@ -2675,6 +2696,7 @@ namespace MWWorld
             mPreloader->abortTerrainPreloadExcept(nullptr);
         if (!mPreloader->isTerrainLoaded(PositionCellGrid{ pos, newGrid }, mRendering.getReferenceTime()))
             preloadTerrain(pos, playerCellIndex.mWorldspace, true);
+        Vita::breadcrumb("changeCellGrid: terrain done");
         mPagedRefs.clear();
         mRendering.getPagedRefnums(newGrid, mPagedRefs);
 
@@ -2745,6 +2767,7 @@ namespace MWWorld
                 }
             }
         }
+        Vita::breadcrumb("changeCellGrid: tier transitions done");
 #endif
 
         std::size_t refsToLoad = 0;
@@ -2788,13 +2811,12 @@ namespace MWWorld
                 }
                 else
                 {
-                    loadCellLite(cell, loadingListener, pos, navigatorUpdateGuard.get());
-                    {
-                        char buf[128];
-                        snprintf(buf, sizeof(buf), "Loaded cell (%d,%d) LITE sync: heap %dMB",
-                            x, y, Vita::getHeapUsedMB());
-                        Vita::breadcrumb(buf);
-                    }
+                    // Deferred: shell now (heightfield/water/pathgrid),
+                    // objects stream via the per-frame envelope. Removes the
+                    // per-ring-cell sync hitch at boundary crossings; new
+                    // cells are a full cell-width out, so the brief object
+                    // pop-in is distant and fog-obscured.
+                    prepareCellForDeferredLoad(cell, pos, navigatorUpdateGuard.get());
                 }
 #else
                 loadCell(cell, loadingListener, changeEvent, pos, navigatorUpdateGuard.get());

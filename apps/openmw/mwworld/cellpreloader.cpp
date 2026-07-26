@@ -448,6 +448,14 @@ namespace MWWorld
         }
     }
 
+#ifdef __vita__
+    bool CellPreloader::isCellPreloadDone(const MWWorld::CellStore* cell) const
+    {
+        PreloadMap::const_iterator found = mPreloadCells.find(const_cast<MWWorld::CellStore*>(cell));
+        return found != mPreloadCells.end() && found->second.mWorkItem && found->second.mWorkItem->isDone();
+    }
+#endif
+
     bool CellPreloader::isTerrainLoaded(const PositionCellGrid& position, double referenceTime) const
     {
         return mLoadedTerrainTimestamp + mResourceSystem->getSceneManager()->getExpiryDelay() > referenceTime
