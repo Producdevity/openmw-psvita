@@ -43,6 +43,8 @@ namespace Settings
         SettingValue<bool> mVitaCullOverlap{ mIndex, "General", "vita cull overlap", false };
         SettingValue<bool> mVitaDrawReplay{ mIndex, "General", "vita draw replay", false };
         SettingValue<bool> mVitaStateReplay{ mIndex, "General", "vita state replay", false };
+        // Vita: static VBOs in RAM, sparing CDRAM for textures.
+        SettingValue<bool> mVitaVboInRam{ mIndex, "General", "vita vbo in ram", false };
         SettingValue<bool> mVitaSyncCellDrain{ mIndex, "General", "vita sync cell drain", true };
         // Vita: heap MB held back from the watchdog budget. Raise to test eviction.
         SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 40,

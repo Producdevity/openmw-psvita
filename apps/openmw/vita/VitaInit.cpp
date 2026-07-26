@@ -48,9 +48,9 @@ extern "C" {
 // previously affected 312 are mitigated by malloc_trim coalescing and
 // dynamic texture tier-down (imagemanager.cpp), so 312 today gives
 // meaningfully more usable working set than 312 originally did.
-// 304 (was 312): app budget got tight after the av_tx float tables
-// (+4MB static); video thread creation hit EAGAIN. Arena peaks ~198MB.
-unsigned int _newlib_heap_size_user = 304 * 1024 * 1024;
+// 280 (was 304): 24MB moved to the vitaGL RAM pool for static VBOs.
+// Arena peaks ~205MB; EAGAIN lesson: heap+static+pools ≈ whole budget.
+unsigned int _newlib_heap_size_user = 280 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 
 // Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.
@@ -255,7 +255,7 @@ namespace Vita
         // configured cap. Answers where the REAL wall is (thresholds were
         // tuned by dead reckoning against a stale 272MB figure).
         const unsigned arenaMB = static_cast<unsigned>(mi.arena / (1024 * 1024));
-        const int heapCapMB = 312;
+        const int heapCapMB = static_cast<int>(_newlib_heap_size_user / (1024 * 1024));
         snprintf(buf, sizeof(buf), "[VitaMem] %s | used: %uKB | free: %uKB | min: %uKB | arena: %uMB (+%dMB room)",
             label,
             static_cast<unsigned>(mi.uordblks / 1024),
@@ -1231,8 +1231,10 @@ namespace Vita
         // 768x432 was tried and produced a black screen — keep the
         // proven-good 640x368 and cap the Render Resolution combo on
         // the Vita Settings tab at 640x368 (no 720/768 presets).
+        // RAM pool 40MB (was 16): static VBOs route here (vita vbo in ram),
+        // freeing CDRAM for textures. Paid for by the heap trim below.
         vglInitWithCustomSizes(0x100000, 640, 368,
-            16 * 1024 * 1024,
+            40 * 1024 * 1024,
             88 * 1024 * 1024,
             0,
             0,

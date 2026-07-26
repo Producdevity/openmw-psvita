@@ -222,6 +222,8 @@ extern "C"
     // Defined in fetched-OSG RenderLeaf.cpp.
     extern int vita_draw_replay;
     extern int vita_state_replay;
+    // vitaGL: route STATIC_DRAW buffers to RAM.
+    void vglSetStaticVboRam(unsigned char enable);
     // Defined in mwinput/inputmanagerimp.cpp.
     extern uint32_t vitastat_input_cap_us;
     extern uint32_t vitastat_input_bind_us;
@@ -1396,6 +1398,7 @@ void OMW::Engine::go()
     // vitaGL is single-threaded; sim moves to a worker instead.
     vita_draw_replay = Settings::general().mVitaDrawReplay ? 1 : 0;
     vita_state_replay = Settings::general().mVitaStateReplay ? 1 : 0;
+    vglSetStaticVboRam(Settings::general().mVitaVboInRam ? 1 : 0);
     if (Settings::general().mVitaSimThread)
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();
