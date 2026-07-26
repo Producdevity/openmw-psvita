@@ -215,6 +215,17 @@ extern "C"
     uint32_t simprof_script_us = 0, simprof_mech_us = 0, simprof_phys_us = 0, simprof_batches = 0;
     uint32_t mainprof_draw_us = 0, mainprof_swap_us = 0, mainprof_swap_max_us = 0;
     uint32_t mainprof_fence_us = 0, mainprof_frames = 0;
+    // This-frame values for [Slow] attribution (averages hide spikes).
+    uint32_t mainprof_lastdraw_us = 0, mainprof_lastswap_us = 0, mainprof_lastfence_us = 0;
+    uint32_t vitastat_early_in_us = 0, vitastat_early_snd_us = 0;
+    uint32_t vitastat_early_lsync_us = 0, vitastat_early_state_us = 0;
+    // Defined in mwinput/inputmanagerimp.cpp.
+    extern uint32_t vitastat_input_cap_us;
+    extern uint32_t vitastat_input_bind_us;
+    extern uint32_t vitastat_input_mgr_us;
+    // Defined in scene.cpp / statemanagerimp.cpp.
+    extern uint32_t vitastat_stream_us;
+    extern uint32_t vitastat_save_flag;
     // The ~8ms untimed main tail found by the unlocked-fps run (2026-07-24).
     uint32_t tailprof_early_us = 0, tailprof_world_us = 0, tailprof_gui_us = 0;
     uint32_t tailprof_trav_us = 0, tailprof_lua_us = 0, tailprof_frames = 0;
@@ -340,7 +351,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         {
             const uint64_t f0 = sceKernelGetProcessTimeWide();
             mSimWorker->finish();
-            mainprof_fence_us += (uint32_t)(sceKernelGetProcessTimeWide() - f0);
+            const uint32_t fenceUs = (uint32_t)(sceKernelGetProcessTimeWide() - f0);
+            mainprof_fence_us += fenceUs;
+            mainprof_lastfence_us = fenceUs;
         }
 #endif
 #ifdef __vita__
@@ -351,6 +364,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             ScopedProfile<UserStatsType::Input> profile(frameStart, frameNumber, *timer, *stats);
             mInputManager->update(frametime, false);
         }
+#ifdef __vita__
+        const uint64_t earlyIn = sceKernelGetProcessTimeWide();
+#endif
 
         // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
         // If we are not currently rendering, then RenderItems will not be reused resulting in a memory leak upon
@@ -371,6 +387,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             if (mUseSound)
                 mSoundManager->update(frametime);
         }
+#ifdef __vita__
+        const uint64_t earlySnd = sceKernelGetProcessTimeWide();
+#endif
 
         {
             ScopedProfile<UserStatsType::LuaSyncUpdate> profile(frameStart, frameNumber, *timer, *stats);
@@ -378,12 +397,22 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             // It applies to the game world queued changes from the previous frame.
             mLuaManager->synchronizedUpdate();
         }
+#ifdef __vita__
+        const uint64_t earlyLua = sceKernelGetProcessTimeWide();
+#endif
 
         // update game state
         {
             ScopedProfile<UserStatsType::State> profile(frameStart, frameNumber, *timer, *stats);
             mStateManager->update(frametime);
         }
+#ifdef __vita__
+        // Early-segment split for [Slow]; sim bootstrap below is the remainder.
+        vitastat_early_in_us = (uint32_t)(earlyIn - tail0);
+        vitastat_early_snd_us = (uint32_t)(earlySnd - earlyIn);
+        vitastat_early_lsync_us = (uint32_t)(earlyLua - earlySnd);
+        vitastat_early_state_us = (uint32_t)(sceKernelGetProcessTimeWide() - earlyLua);
+#endif
 
         bool paused = mWorld->getTimeManager()->isPaused();
 
@@ -499,6 +528,8 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     tailprof_lua_us += (uint32_t)(sceKernelGetProcessTimeWide() - tail4);
     ++tailprof_frames;
     // Slow-frame forensics: name the culprit at the moment of the drop.
+    // draw/swap/fence are THIS frame's values; stream = streaming work this
+    // frame (scene.cpp); save flags a savegame write this frame.
     {
         static uint64_t s_lastFrameEnd = 0;
         static uint64_t s_lastReport = 0;
@@ -509,16 +540,22 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             if (frameUs > 40000 && nowUs - s_lastReport > 1000000)
             {
                 s_lastReport = nowUs;
-                char buf[192];
+                char buf[256];
                 snprintf(buf, sizeof(buf),
-                    "[Slow] frame=%ums early=%.1f world=%.1f gui=%.1f trav=%.1f lua=%.1f draw=%.1f fence=%.1f",
-                    frameUs / 1000, (tail1 - tail0) / 1000.0, (tail2 - tail1) / 1000.0,
-                    (tail3 - tail2) / 1000.0, (tail4 - tail3) / 1000.0, (nowUs - tail4) / 1000.0,
-                    mainprof_draw_us / 1000.0 / (mainprof_frames ? mainprof_frames : 1),
-                    mainprof_fence_us / 1000.0 / (mainprof_frames ? mainprof_frames : 1));
+                    "[Slow] frame=%ums early=%.1f(in=%.1f[c=%.1f b=%.1f m=%.1f] snd=%.1f lsync=%.1f st=%.1f) "
+                    "world=%.1f gui=%.1f trav=%.1f lua=%.1f draw=%.1f swap=%.1f fence=%.1f stream=%.1f save=%u",
+                    frameUs / 1000, (tail1 - tail0) / 1000.0, vitastat_early_in_us / 1000.0,
+                    vitastat_input_cap_us / 1000.0, vitastat_input_bind_us / 1000.0, vitastat_input_mgr_us / 1000.0,
+                    vitastat_early_snd_us / 1000.0, vitastat_early_lsync_us / 1000.0,
+                    vitastat_early_state_us / 1000.0, (tail2 - tail1) / 1000.0, (tail3 - tail2) / 1000.0,
+                    (tail4 - tail3) / 1000.0, (nowUs - tail4) / 1000.0, mainprof_lastdraw_us / 1000.0,
+                    mainprof_lastswap_us / 1000.0, mainprof_lastfence_us / 1000.0, vitastat_stream_us / 1000.0,
+                    vitastat_save_flag);
                 Vita::breadcrumb(buf);
             }
         }
+        vitastat_stream_us = 0;
+        vitastat_save_flag = 0;
         s_lastFrameEnd = nowUs;
     }
 #endif
@@ -551,7 +588,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             mViewer->getCamera()->getGraphicsContext()->swapBuffers();
             const uint64_t t2 = sceKernelGetProcessTimeWide();
             mainprof_draw_us += (uint32_t)(t1 - t0);
+            mainprof_lastdraw_us = (uint32_t)(t1 - t0);
             const uint32_t swapUs = (uint32_t)(t2 - t1);
+            mainprof_lastswap_us = swapUs;
             mainprof_swap_us += swapUs;
             if (swapUs > mainprof_swap_max_us)
                 mainprof_swap_max_us = swapUs;
@@ -583,7 +622,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             mViewer->getCamera()->getGraphicsContext()->swapBuffers();
             const uint64_t t2 = sceKernelGetProcessTimeWide();
             mainprof_draw_us += (uint32_t)(t1 - t0);
+            mainprof_lastdraw_us = (uint32_t)(t1 - t0);
             const uint32_t swapUs = (uint32_t)(t2 - t1);
+            mainprof_lastswap_us = swapUs;
             mainprof_swap_us += swapUs;
             if (swapUs > mainprof_swap_max_us)
                 mainprof_swap_max_us = swapUs;
@@ -633,8 +674,14 @@ OMW::Engine::Engine(Files::ConfigurationManager& configurationManager)
 #endif
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0"); // We use only gamepads
 
+#ifdef __vita__
+    // No SDL_INIT_SENSOR: sceMotion polling inside SDL_PumpEvents costs
+    // intermittent 8-13ms spikes, and the port doesn't use gyro aiming.
+    Uint32 flags = SDL_INIT_VIDEO | SDL_INIT_NOPARACHUTE | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK;
+#else
     Uint32 flags
         = SDL_INIT_VIDEO | SDL_INIT_NOPARACHUTE | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_SENSOR;
+#endif
     if (SDL_WasInit(flags) == 0)
     {
         SDL_SetMainReady();
@@ -1473,7 +1520,9 @@ void OMW::Engine::go()
         {
             const uint64_t f0 = sceKernelGetProcessTimeWide();
             mSimWorker->finish();
-            mainprof_fence_us += (uint32_t)(sceKernelGetProcessTimeWide() - f0);
+            const uint32_t fenceUs = (uint32_t)(sceKernelGetProcessTimeWide() - f0);
+            mainprof_fence_us += fenceUs;
+            mainprof_lastfence_us = fenceUs;
         }
 #endif
         mViewer->advance(timeManager.getRenderingSimulationTime());

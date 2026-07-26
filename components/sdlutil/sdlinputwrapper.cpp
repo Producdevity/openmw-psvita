@@ -2,7 +2,15 @@
 
 #ifdef __vita__
 #include <cstdio>
+#include <psp2/kernel/processmgr.h>
 extern "C" void vitaBreadcrumb(const char* msg); // apps/openmw/vita/VitaInit.cpp
+namespace
+{
+    // Axis dispatch cost tracking, reported by the 1Hz [Input] crumb.
+    unsigned s_dispatchN = 0;
+    unsigned s_dispatchUs = 0;
+    unsigned s_dispatchMaxUs = 0;
+}
 #endif
 
 #include <components/debug/debuglog.hpp>
@@ -78,15 +86,28 @@ namespace SDLUtil
                     ++s_padEvents;
             if ((++s_calls & 31) == 0)
             {
-                char buf[128];
-                snprintf(buf, sizeof(buf), "[Input] calls=%u pending=%d pad=%u focus=%d", s_calls, pending,
-                    s_padEvents, mWindowHasFocus ? 1 : 0);
+                char buf[160];
+                snprintf(buf, sizeof(buf), "[Input] calls=%u pending=%d pad=%u focus=%d disp=%u avg=%uus max=%uus",
+                    s_calls, pending, s_padEvents, mWindowHasFocus ? 1 : 0, s_dispatchN,
+                    s_dispatchN ? s_dispatchUs / s_dispatchN : 0, s_dispatchMaxUs);
                 vitaBreadcrumb(buf);
+                s_dispatchN = 0;
+                s_dispatchUs = 0;
+                s_dispatchMaxUs = 0;
             }
         }
 #endif
 
         SDL_Event evt;
+
+#ifdef __vita__
+        // Coalesce axis motion: a held stick emits dozens of events per
+        // frame at ~1-2ms dispatch each (channel/action chain). Axis
+        // events carry absolute state, so only the last value per axis
+        // matters; batch and dispatch once after the drain loop.
+        SDL_ControllerAxisEvent vitaPendingAxis[SDL_CONTROLLER_AXIS_MAX];
+        bool vitaHaveAxis[SDL_CONTROLLER_AXIS_MAX] = {};
+#endif
 
         if (windowEventsOnly)
         {
@@ -204,6 +225,14 @@ namespace SDLUtil
                         mConListener->buttonReleased(1, evt.cbutton);
                     break;
                 case SDL_CONTROLLERAXISMOTION:
+#ifdef __vita__
+                    if (evt.caxis.axis < SDL_CONTROLLER_AXIS_MAX)
+                    {
+                        vitaPendingAxis[evt.caxis.axis] = evt.caxis;
+                        vitaHaveAxis[evt.caxis.axis] = true;
+                        break;
+                    }
+#endif
                     if (mConListener)
                         mConListener->axisMoved(1, evt.caxis);
                     break;
@@ -393,6 +422,23 @@ namespace SDLUtil
                     break;
             }
         }
+
+#ifdef __vita__
+        if (mConListener)
+        {
+            for (int a = 0; a < SDL_CONTROLLER_AXIS_MAX; ++a)
+                if (vitaHaveAxis[a])
+                {
+                    const unsigned long long d0 = sceKernelGetProcessTimeWide();
+                    mConListener->axisMoved(1, vitaPendingAxis[a]);
+                    const uint32_t dUs = (uint32_t)(sceKernelGetProcessTimeWide() - d0);
+                    ++s_dispatchN;
+                    s_dispatchUs += dUs;
+                    if (dUs > s_dispatchMaxUs)
+                        s_dispatchMaxUs = dUs;
+                }
+        }
+#endif
     }
 
     void InputWrapper::handleWindowEvent(const SDL_Event& evt)

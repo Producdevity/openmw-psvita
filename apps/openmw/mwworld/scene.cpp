@@ -105,6 +105,9 @@ static void countDrawables(const osg::Node* node, unsigned int& drawableCount, u
 
 #ifdef __vita__
 extern "C" unsigned int _newlib_heap_size_user;
+// Streaming time this frame; read+reset by the [Slow] crumb in engine.cpp.
+extern "C" uint32_t vitastat_stream_us;
+uint32_t vitastat_stream_us = 0;
 #endif
 
 namespace
@@ -569,6 +572,10 @@ namespace MWWorld
         preloadCells(duration);
 
 #ifdef __vita__
+        // One time envelope shared by all streaming below (frame pacing).
+        const uint64_t streamStart = sceKernelGetProcessTimeWide();
+        mStreamDeadline = streamStart + kStreamBudgetUs;
+
         // Incrementally load deferred ring cells
         processPendingCellLoads();
 
@@ -580,6 +587,8 @@ namespace MWWorld
         // exiting an interior). Promotion priority is NPCs/creatures first
         // so the player sees them as soon as possible.
         processPendingPromotions();
+
+        vitastat_stream_us += (uint32_t)(sceKernelGetProcessTimeWide() - streamStart);
 
         // Memory-pressure watchdog: flush caches when heap is high.
         // Only acts once per threshold crossing to avoid spamming clearCache
@@ -1754,10 +1763,11 @@ namespace MWWorld
         if (mPendingCellLoads.empty())
             return;
 
-        int budget = kObjectsPerFrame;
+        int budget = 64; // generous cap; the time deadline paces now
         auto it = mPendingCellLoads.begin();
 
-        while (it != mPendingCellLoads.end() && budget > 0)
+        while (it != mPendingCellLoads.end() && budget > 0
+            && sceKernelGetProcessTimeWide() < mStreamDeadline)
         {
             PendingCellLoad& pending = *it;
             CellStore& cell = *pending.cell;
@@ -1783,7 +1793,8 @@ namespace MWWorld
             // Step 2: Insert objects (rendering pass) incrementally
             if (!pending.renderingDone)
             {
-                while (pending.nextObject < (int)pending.objectsToInsert.size() && budget > 0)
+                while (pending.nextObject < (int)pending.objectsToInsert.size() && budget > 0
+                    && sceKernelGetProcessTimeWide() < mStreamDeadline)
                 {
                     // Per-object recheck: bursts can blow the per-frame budget.
                     if (Vita::isMemoryPressure(getVitaCellBudgetMB()))
@@ -2181,12 +2192,13 @@ namespace MWWorld
             return;
         }
 
-        int budget = kPromotionsPerFrame;
+        int budget = 64; // generous cap; the time deadline paces now
 
         // Step 4: rendering pass — chunked
         if (pp.nextRender < static_cast<int>(pp.toInsert.size()))
         {
-            while (pp.nextRender < static_cast<int>(pp.toInsert.size()) && budget > 0)
+            while (pp.nextRender < static_cast<int>(pp.toInsert.size()) && budget > 0
+                && sceKernelGetProcessTimeWide() < mStreamDeadline)
             {
                 if (Vita::isMemoryPressure(getVitaCellBudgetMB()))
                 {
@@ -2217,7 +2229,8 @@ namespace MWWorld
         {
             const bool isInterior = !cell.isExterior();
             auto navigatorUpdateGuard = mNavigator.makeUpdateGuard();
-            while (pp.nextPhysics < static_cast<int>(pp.toInsert.size()) && budget > 0)
+            while (pp.nextPhysics < static_cast<int>(pp.toInsert.size()) && budget > 0
+                && sceKernelGetProcessTimeWide() < mStreamDeadline)
             {
                 MWWorld::Ptr& ptr = pp.toInsert[pp.nextPhysics++];
                 if (!ptr.mRef->isDeleted() && ptr.getRefData().isEnabled()
@@ -2628,6 +2641,9 @@ namespace MWWorld
         mRendering.flushUnrefQueueImmediate();
         mRendering.flushUnrefQueueImmediate();
         mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());
+        // Timestamped crumb: log-delta from "enter" = unload+flush share of
+        // the transition (sizes the deferred-unload lever).
+        Vita::breadcrumb("changeCellGrid: unload+flush done");
         // Coalesce free chunks left behind by the bulk unref. See the
         // matching malloc_trim() in the MemWatchdog block for rationale.
         malloc_trim(0);

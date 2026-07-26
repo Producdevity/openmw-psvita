@@ -182,6 +182,13 @@ namespace MWGui
         }
 
         MWBase::Environment::get().getWindowManager()->pushGuiMode(mShowWallpaper ? GM_LoadingWallpaper : GM_Loading);
+
+#ifdef __vita__
+        // Show the screen NOW. The first draw otherwise waits for the first
+        // progress callback — the caller's synchronous prologue (cell unload
+        // etc.) runs before that, freezing on the last gameplay frame.
+        draw();
+#endif
     }
 
     void LoadingScreen::loadingOff()

@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include <psp2/sysmodule.h>
+#include <psp2/ctrl.h>
 #include <psp2/ime_dialog.h>
 #include <psp2/kernel/threadmgr.h>
 #include <vitaGL.h>
@@ -129,6 +130,23 @@ namespace Vita
         param.initialText = initialUtf16;
         param.inputTextBuffer = resultUtf16;
 
+        // Wait for all buttons to release first. The IME dialog reads the
+        // pad directly: a press still held from the click that opened this
+        // dialog (e.g. picking "fill out papers" in dialogue) leaks into
+        // the IME and instantly confirms/closes it.
+        {
+            SceCtrlData pad;
+            int guard = 0;
+            while (guard++ < 100)
+            {
+                pad.buttons = 0;
+                sceCtrlPeekBufferPositive(0, &pad, 1);
+                if (pad.buttons == 0)
+                    break;
+                sceKernelDelayThread(10000);
+            }
+        }
+
         breadcrumb("[VitaIME] Calling sceImeDialogInit...");
         int ret = sceImeDialogInit(&param);
         if (ret < 0)
@@ -136,6 +154,9 @@ namespace Vita
             char buf[128];
             snprintf(buf, sizeof(buf), "[VitaIME] sceImeDialogInit failed: 0x%08X", ret);
             breadcrumb(buf);
+            // A stale instance (e.g. torn down mid-open) keeps every later
+            // init failing busy; try to clear it so the next attempt works.
+            sceImeDialogTerm();
             return {};
         }
 

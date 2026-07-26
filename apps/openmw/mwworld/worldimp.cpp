@@ -8,6 +8,7 @@
 #include "../vita/VitaInit.h"
 #include "../vita/VitaMemAudit.h"
 #include <components/vita/VitaEsmPrefetch.h>
+#include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
 #define VITA_CRUMB(msg)
@@ -42,6 +43,8 @@
 #include <components/misc/constants.hpp>
 #include <components/misc/convert.hpp>
 #include <components/misc/mathutil.hpp>
+#include <fstream>
+
 #include <components/misc/pathhelpers.hpp>
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/rng.hpp>
@@ -283,6 +286,138 @@ namespace MWWorld
     {
     }
 
+#ifdef __vita__
+    namespace
+    {
+        // Boot cache for the cell-ref scan inside validateRecords (was 4.3s
+        // of re-parsing every cell). Keyed on content file names + sizes.
+        constexpr uint32_t kRefCacheMagic = 0x32435256; // 'VRC2' (added ref->cell index)
+
+        uint64_t refCacheKey(const Files::Collections& fileCollections, const std::vector<std::string>& content)
+        {
+            uint64_t h = 1469598103934665603ull;
+            auto mix = [&h](const void* data, size_t n) {
+                const unsigned char* p = static_cast<const unsigned char*>(data);
+                for (size_t i = 0; i < n; ++i)
+                {
+                    h ^= p[i];
+                    h *= 1099511628211ull;
+                }
+            };
+            for (const std::string& file : content)
+            {
+                mix(file.data(), file.size());
+                const Files::MultiDirCollection& col = fileCollections.getCollection(Misc::getFileExtension(file));
+                if (col.doesExist(file))
+                {
+                    std::error_code ec;
+                    const uint64_t size = std::filesystem::file_size(col.getPath(file), ec);
+                    mix(&size, sizeof(size));
+                }
+            }
+            return h;
+        }
+
+        bool tryLoadRefCache(const std::filesystem::path& path, uint64_t key, MWWorld::ESMStore& store)
+        {
+            std::ifstream in(path, std::ios::binary);
+            if (!in)
+                return false;
+            uint32_t magic = 0;
+            uint64_t fileKey = 0;
+            in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            in.read(reinterpret_cast<char*>(&fileKey), sizeof(fileKey));
+            if (!in || magic != kRefCacheMagic || fileKey != key)
+                return false;
+            auto readString = [&in]() {
+                uint16_t len = 0;
+                in.read(reinterpret_cast<char*>(&len), sizeof(len));
+                std::string sdata(len, '\0');
+                in.read(sdata.data(), len);
+                return sdata;
+            };
+            uint32_t nCounts = 0;
+            in.read(reinterpret_cast<char*>(&nCounts), sizeof(nCounts));
+            if (!in || nCounts > 2000000)
+                return false;
+            std::unordered_map<ESM::RefId, int> counts;
+            counts.reserve(nCounts);
+            for (uint32_t i = 0; i < nCounts; ++i)
+            {
+                std::string id = readString();
+                int32_t count = 0;
+                in.read(reinterpret_cast<char*>(&count), sizeof(count));
+                if (!in)
+                    return false;
+                counts[ESM::RefId::deserializeText(id)] = count;
+            }
+            uint32_t nKeys = 0;
+            in.read(reinterpret_cast<char*>(&nKeys), sizeof(nKeys));
+            if (!in || nKeys > 100000)
+                return false;
+            std::vector<ESM::RefId> keyIds;
+            keyIds.reserve(nKeys);
+            for (uint32_t i = 0; i < nKeys; ++i)
+                keyIds.push_back(ESM::RefId::deserializeText(readString()));
+            if (!in)
+                return false;
+            uint32_t nIndex = 0;
+            in.read(reinterpret_cast<char*>(&nIndex), sizeof(nIndex));
+            if (!in || nIndex > 2000000)
+                return false;
+            std::unordered_map<ESM::RefId, ESM::RefId> refCellIndex;
+            refCellIndex.reserve(nIndex);
+            for (uint32_t i = 0; i < nIndex; ++i)
+            {
+                std::string id = readString();
+                std::string cellId = readString();
+                if (!in)
+                    return false;
+                refCellIndex[ESM::RefId::deserializeText(id)] = ESM::RefId::deserializeText(cellId);
+            }
+            store.vitaSeedRefCounts(std::move(counts), keyIds);
+            store.vitaSeedRefCellIndex(std::move(refCellIndex));
+            return true;
+        }
+
+        void saveRefCache(const std::filesystem::path& path, uint64_t key, const MWWorld::ESMStore& store)
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out)
+                return;
+            out.write(reinterpret_cast<const char*>(&kRefCacheMagic), sizeof(kRefCacheMagic));
+            out.write(reinterpret_cast<const char*>(&key), sizeof(key));
+            auto writeString = [&out](const std::string& sdata) {
+                const uint16_t len = static_cast<uint16_t>(std::min<size_t>(sdata.size(), 65535));
+                out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+                out.write(sdata.data(), len);
+            };
+            const auto& counts = store.vitaGetRefCounts();
+            const uint32_t nCounts = static_cast<uint32_t>(counts.size());
+            out.write(reinterpret_cast<const char*>(&nCounts), sizeof(nCounts));
+            for (const auto& [id, count] : counts)
+            {
+                writeString(id.serializeText());
+                const int32_t c = count;
+                out.write(reinterpret_cast<const char*>(&c), sizeof(c));
+            }
+            const auto keyIds = store.vitaGetKeyIds();
+            const uint32_t nKeys = static_cast<uint32_t>(keyIds.size());
+            out.write(reinterpret_cast<const char*>(&nKeys), sizeof(nKeys));
+            for (const auto& id : keyIds)
+                writeString(id.serializeText());
+            const auto& refCellIndex = store.vitaGetRefCellIndex();
+            const uint32_t nIndex = static_cast<uint32_t>(refCellIndex.size());
+            out.write(reinterpret_cast<const char*>(&nIndex), sizeof(nIndex));
+            for (const auto& [id, cellId] : refCellIndex)
+            {
+                writeString(id.serializeText());
+                writeString(cellId.serializeText());
+            }
+        }
+    }
+#endif
+
     void World::loadData(const Files::Collections& fileCollections, const std::vector<std::string>& contentFiles,
         const std::vector<std::string>& groundcoverFiles, ToUTF8::Utf8Encoder* encoder, Loading::Listener* listener)
     {
@@ -306,8 +441,20 @@ namespace MWWorld
         mStore.setUp();
 #ifdef __vita__
         VITA_CRUMB("loadData: validateRecords");
+        const std::filesystem::path refCachePath = mUserDataPath / "config" / "refcount_cache.bin";
+        const uint64_t refCacheKey_ = refCacheKey(fileCollections, contentFiles);
+        const bool refCacheHit = tryLoadRefCache(refCachePath, refCacheKey_, mStore);
+        if (refCacheHit)
+            VITA_CRUMB("loadData: ref cache HIT (scan skipped)");
 #endif
         mStore.validateRecords(mReaders);
+#ifdef __vita__
+        if (!refCacheHit)
+            saveRefCache(refCachePath, refCacheKey_, mStore);
+#endif
+#ifdef __vita__
+        VITA_CRUMB("loadData: validate done");
+#endif
         mStore.movePlayerRecord();
 #ifdef __vita__
         // Release the boot-time in-RAM ESM buffers (esmloader slurp).
@@ -317,7 +464,8 @@ namespace MWWorld
         // malloc_trim moved to Engine after the load join: trimming here
         // ran concurrently with main-thread GUI allocation.
         vitaMemBreadcrumb("[VitaAudit] after ESMStore setUp");
-        Vita::auditDialogueStore(mStore);
+        // auditDialogueStore removed from the boot path 2026-07-25: the
+        // diagnostic walked every INFO twice per boot (data long collected).
 #endif
 
         mSwimHeightScale = mStore.get<ESM::GameSetting>().find("fSwimHeightScale")->mValue.getFloat();
@@ -410,7 +558,20 @@ namespace MWWorld
         {
             VITA_CRUMB("startNewGame() running startup scripts");
             for (int i = 0; i < 5; ++i)
+            {
+#ifdef __vita__
+                const unsigned long long passStart = sceKernelGetProcessTimeWide();
+#endif
                 MWBase::Environment::get().getScriptManager()->getGlobalScripts().run();
+#ifdef __vita__
+                {
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "startNewGame() script pass %d: %llums", i,
+                        (sceKernelGetProcessTimeWide() - passStart) / 1000);
+                    Vita::breadcrumb(buf);
+                }
+#endif
+            }
             VITA_CRUMB("startNewGame() scripts done, checking player cell");
             if (!getPlayerPtr().isInCell())
             {

@@ -3,6 +3,7 @@
 #ifdef __vita__
 #include "../vita/VitaInit.h"
 #include "../vita/VitaSimWorker.h"
+#include <psp2/kernel/processmgr.h>
 #endif
 
 #include <algorithm>
@@ -341,11 +342,17 @@ namespace MWGui
         mGuiModeStates[GM_MainMenu] = GuiModeState(menu.get());
         mWindows.push_back(std::move(menu));
 
+#ifdef __vita__
+        Vita::breadcrumb("initUI: menus done, map next");
+#endif
         mLocalMapRender = std::make_unique<MWRender::LocalMap>(mViewer->getSceneData()->asGroup());
         auto map = std::make_unique<MapWindow>(mCustomMarkers, mDragAndDrop.get(), mLocalMapRender.get(), mWorkQueue);
         mMap = map.get();
         mWindows.push_back(std::move(map));
         mMap->renderGlobalMap();
+#ifdef __vita__
+        Vita::breadcrumb("initUI: global map rendered");
+#endif
         trackWindow(mMap, makeMapWindowSettingValues());
 
         auto statsWindow = std::make_unique<StatsWindow>(mDragAndDrop.get());
@@ -358,6 +365,9 @@ namespace MWGui
         mInventoryWindow = inventoryWindow.get();
         mWindows.push_back(std::move(inventoryWindow));
 
+#ifdef __vita__
+        Vita::breadcrumb("initUI: inventory window done");
+#endif
         auto spellWindow = std::make_unique<SpellWindow>(mDragAndDrop.get());
         mSpellWindow = spellWindow.get();
         mWindows.push_back(std::move(spellWindow));

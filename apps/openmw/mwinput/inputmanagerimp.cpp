@@ -13,6 +13,17 @@
 
 #include "../mwworld/esmstore.hpp"
 
+#ifdef __vita__
+#include <psp2/kernel/processmgr.h>
+// Read by the [Slow] crumb in engine.cpp.
+extern "C" uint32_t vitastat_input_cap_us;
+extern "C" uint32_t vitastat_input_bind_us;
+extern "C" uint32_t vitastat_input_mgr_us;
+uint32_t vitastat_input_cap_us = 0;
+uint32_t vitastat_input_bind_us = 0;
+uint32_t vitastat_input_mgr_us = 0;
+#endif
+
 #include "actionmanager.hpp"
 #include "bindingsmanager.hpp"
 #include "controllermanager.hpp"
@@ -65,7 +76,13 @@ namespace MWInput
         mControlsDisabled = disableControls;
 
         mInputWrapper->setMouseVisible(MWBase::Environment::get().getWindowManager()->getCursorVisible());
+#ifdef __vita__
+        const unsigned long long t0 = sceKernelGetProcessTimeWide();
+#endif
         mInputWrapper->capture(disableEvents);
+#ifdef __vita__
+        const unsigned long long t1 = sceKernelGetProcessTimeWide();
+#endif
 
         if (disableControls)
         {
@@ -74,6 +91,9 @@ namespace MWInput
         }
 
         mBindingsManager->update(dt);
+#ifdef __vita__
+        const unsigned long long t2 = sceKernelGetProcessTimeWide();
+#endif
 
         mMouseManager->updateCursorMode();
 
@@ -81,6 +101,11 @@ namespace MWInput
         mMouseManager->update(dt);
         mSensorManager->update(dt);
         mActionManager->update(dt);
+#ifdef __vita__
+        vitastat_input_cap_us = (uint32_t)(t1 - t0);
+        vitastat_input_bind_us = (uint32_t)(t2 - t1);
+        vitastat_input_mgr_us = (uint32_t)(sceKernelGetProcessTimeWide() - t2);
+#endif
 
         if (Settings::input().mEnableGyroscope)
         {

@@ -1,38 +1,20 @@
 /*
- * Stub av_tx_init / av_tx_uninit to prevent 12MB of unused FFT tables
- * from being linked into the Vita executable.
+ * Keep ffmpeg's real av_tx (Bink cinematic audio needs the float
+ * RDFT/DCT codelets) while excluding the unused double/int32 codelet
+ * objects and their ~12.6MB of BSS tables. Defining their codelet
+ * lists here (empty) satisfies tx.o's references so tx_double.o and
+ * tx_int32.o are never pulled from libavutil.a; tx_float.o (~4MB BSS)
+ * links normally.
+ *
+ * History: this file used to stub av_tx_init itself to always fail —
+ * that silently broke every av_tx-based decoder (binkaudio = silent
+ * cinematics; aac/vorbis would have been silent too).
  */
 #ifdef __vita__
 
-#include <stddef.h>
-#include <stdint.h>
+typedef struct FFTXCodelet FFTXCodelet;
 
-typedef struct AVTXContext AVTXContext;
-
-int av_tx_init(AVTXContext** ctx, void** tx, int type, int inv, int len, const void* scale, uint64_t flags)
-{
-    (void)ctx; (void)tx; (void)type; (void)inv; (void)len; (void)scale; (void)flags;
-    if (ctx)
-        *ctx = NULL;
-    return -1;
-}
-
-void av_tx_uninit(AVTXContext** ctx)
-{
-    (void)ctx;
-}
-
-/*
- * Stub ff_tx_init_subtx to break the dependency chain from tx.o into
- * tx_float.o / tx_double.o / tx_int32.o which contain the 16MB FFT tables.
- */
-typedef int FFTXCodeletOptions;
-
-int ff_tx_init_subtx(AVTXContext* s, int type, uint64_t flags,
-                     FFTXCodeletOptions* opts, int len, int inv, const void* scale)
-{
-    (void)s; (void)type; (void)flags; (void)opts; (void)len; (void)inv; (void)scale;
-    return -1;
-}
+const FFTXCodelet* const ff_tx_codelet_list_double_c[] = { 0 };
+const FFTXCodelet* const ff_tx_codelet_list_int32_c[] = { 0 };
 
 #endif /* __vita__ */

@@ -48,7 +48,9 @@ extern "C" {
 // previously affected 312 are mitigated by malloc_trim coalescing and
 // dynamic texture tier-down (imagemanager.cpp), so 312 today gives
 // meaningfully more usable working set than 312 originally did.
-unsigned int _newlib_heap_size_user = 312 * 1024 * 1024;
+// 304 (was 312): app budget got tight after the av_tx float tables
+// (+4MB static); video thread creation hit EAGAIN. Arena peaks ~198MB.
+unsigned int _newlib_heap_size_user = 304 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 
 // Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.

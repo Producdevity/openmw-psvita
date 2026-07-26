@@ -16,6 +16,12 @@
 
 #include "interpretercontext.hpp"
 
+#ifdef __vita__
+#include <cstdio>
+#include <psp2/kernel/processmgr.h>
+extern "C" void vitaBreadcrumb(const char*);
+#endif
+
 namespace
 {
     struct ScriptCreatingVisitor
@@ -177,9 +183,22 @@ namespace MWScript
         {
             if (script.second->mRunning)
             {
+#ifdef __vita__
+                const unsigned long long t0 = sceKernelGetProcessTimeWide();
+#endif
                 MWScript::InterpreterContext context(script.second);
                 if (!MWBase::Environment::get().getScriptManager()->run(script.first, context))
                     script.second->mRunning = false;
+#ifdef __vita__
+                const unsigned long long ms = (sceKernelGetProcessTimeWide() - t0) / 1000;
+                if (ms > 50)
+                {
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "[GlobalScript] %s: %llums",
+                        script.first.getRefIdString().c_str(), ms);
+                    vitaBreadcrumb(buf);
+                }
+#endif
             }
         }
     }

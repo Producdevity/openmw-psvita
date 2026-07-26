@@ -163,6 +163,12 @@ namespace MWWorld
         // 3 keeps worst-case at ~9 ms (≈30% of a 30 fps budget) instead of
         // the 24 ms burst that 8 produced. Slower load tail, smoother frames.
         static constexpr int kObjectsPerFrame = 3;
+        // Streaming time envelope: loads/demotions/promotions share this many
+        // microseconds per frame, checked between objects. Replaces pure
+        // count budgets (3 NPCs = 60-180ms; 3 barrels = 5ms — counts pace
+        // nothing). Guarantees >=1 object progress per processor per frame.
+        static constexpr unsigned int kStreamBudgetUs = 6000;
+        uint64_t mStreamDeadline = 0;
 
         // Async demote: a cell that needs to drop Full→Lite (typically the
         // came-from exterior cells when player enters an interior) is queued

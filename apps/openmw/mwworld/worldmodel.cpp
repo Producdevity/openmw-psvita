@@ -378,6 +378,24 @@ MWWorld::Ptr MWWorld::WorldModel::getPtrByRefId(const ESM::RefId& name)
             return ptr;
     }
 
+#ifdef __vita__
+    // Ref->cell index (built with the boot refcount cache): ids known to
+    // live in exactly one cell skip the full-world sweep below (16s cold
+    // on new game from Bloodmoon startup Disables). Miss -> sweep.
+    {
+        const ESM::RefId indexedCell = mStore.vitaFindRefCell(name);
+        if (!indexedCell.empty())
+        {
+            if (CellStore* cellStore = findCell(indexedCell, false))
+            {
+                Ptr ptr = getPtrAndCache(name, *cellStore);
+                if (!ptr.isEmpty())
+                    return ptr;
+            }
+        }
+    }
+#endif
+
     // Then check cells that are already listed
     // Search in reverse, this is a workaround for an ambiguous chargen_plank reference in the vanilla game.
     // there is one at -22,16 and one at -2,-9, the latter should be used.

@@ -1218,6 +1218,8 @@ namespace MWGui
         int height = static_cast<int>(mGlobalMapRender->getHeight() * mGlobalMapZoom);
         mGlobalMap->setCanvasSize(width, height);
         mGlobalMapImage->setSize(width, height);
+        // Overlay must track the base image or explored patches misalign.
+        mGlobalMapOverlay->setSize(width, height);
     }
 
     void MapWindow::worldPosToGlobalMapImageSpace(float x, float y, float& imageX, float& imageY) const
