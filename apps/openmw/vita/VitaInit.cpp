@@ -48,9 +48,10 @@ extern "C" {
 // previously affected 312 are mitigated by malloc_trim coalescing and
 // dynamic texture tier-down (imagemanager.cpp), so 312 today gives
 // meaningfully more usable working set than 312 originally did.
-// 280 (was 304): 24MB moved to the vitaGL RAM pool for static VBOs.
-// Arena peaks ~205MB; EAGAIN lesson: heap+static+pools ≈ whole budget.
-unsigned int _newlib_heap_size_user = 280 * 1024 * 1024;
+// 288: static VBOs measured only ~5-8MB, so the RAM pool gives 8MB back.
+// Long-session heap plateaus ~210-220MB; EAGAIN lesson: heap+static+pools
+// ≈ whole budget.
+unsigned int _newlib_heap_size_user = 288 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 
 // Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.
@@ -1252,10 +1253,10 @@ namespace Vita
         // 768x432 was tried and produced a black screen — keep the
         // proven-good 640x368 and cap the Render Resolution combo on
         // the Vita Settings tab at 640x368 (no 720/768 presets).
-        // RAM pool 40MB (was 16): static VBOs route here (vita vbo in ram),
+        // RAM pool 32MB (was 16): static VBOs route here (vita vbo in ram),
         // freeing CDRAM for textures. Paid for by the heap trim below.
         vglInitWithCustomSizes(0x100000, 640, 368,
-            40 * 1024 * 1024,
+            32 * 1024 * 1024,
             88 * 1024 * 1024,
             0,
             0,
@@ -1390,7 +1391,9 @@ namespace Vita
         //     for Vita stability. Cache size / expiry / framerate target are
         //     left to bundled defaults so they're user-tunable.
         Settings::cells().mPreloadEnabled.set(true);
-        Settings::cells().mPreloadNumThreads.set(1);
+        // 2 workers: warm-gated streaming (cell loads + promotions) queues
+        // behind these; one thread serialized every crossing's warm-up.
+        Settings::cells().mPreloadNumThreads.set(2);
         Settings::cells().mPreloadExteriorGrid.set(true);
         Settings::cells().mPreloadFastTravel.set(false);
         Settings::cells().mPreloadDoors.set(false);

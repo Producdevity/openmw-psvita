@@ -47,11 +47,11 @@ namespace Settings
         SettingValue<bool> mVitaVboInRam{ mIndex, "General", "vita vbo in ram", false };
         SettingValue<bool> mVitaSyncCellDrain{ mIndex, "General", "vita sync cell drain", true };
         // Vita: heap MB held back from the watchdog budget. Raise to test eviction.
-        SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 40,
+        SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 30,
             makeClampSanitizerInt(20, 150) };
         // Vita: full cache clear at grid change only above this heap usage.
-        SettingValue<int> mVitaFlushThresholdMb{ mIndex, "General", "vita flush threshold mb", 225,
-            makeClampSanitizerInt(0, 272) };
+        SettingValue<int> mVitaFlushThresholdMb{ mIndex, "General", "vita flush threshold mb", 240,
+            makeClampSanitizerInt(0, 280) };
         // Vita: sort render bins by state (fewer GL state changes per draw).
         SettingValue<bool> mVitaStateSortedBins{ mIndex, "General", "vita state sorted bins", false };
         // Vita: run scripts/mechanics/physics on a worker thread.

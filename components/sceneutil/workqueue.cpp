@@ -4,6 +4,11 @@
 
 #include <numeric>
 
+#ifdef __vita__
+#include <cstdio>
+extern "C" void vitaBreadcrumb(const char*);
+#endif
+
 namespace SceneUtil
 {
 
@@ -131,7 +136,22 @@ namespace SceneUtil
             if (!item)
                 return;
             mActive = true;
+#ifdef __vita__
+            // A worker exception must not kill the process: log and move on.
+            // The item still signals done so waiters never hang.
+            try
+            {
+                item->doWork();
+            }
+            catch (const std::exception& e)
+            {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "[WorkQueue] item failed: %s", e.what());
+                vitaBreadcrumb(buf);
+            }
+#else
             item->doWork();
+#endif
             item->signalDone();
             mActive = false;
         }

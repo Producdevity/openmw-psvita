@@ -336,7 +336,6 @@ namespace Vita
 
         const unsigned vramFreeMB = static_cast<unsigned>(vglMemFree(VGL_MEM_VRAM) >> 20);
         const unsigned vramTotalMB = static_cast<unsigned>(vglMemTotal(VGL_MEM_VRAM) >> 20);
-
         char buf[256];
         snprintf(buf, sizeof(buf),
             "[Frame] avg=%.1fms render=%.1f (cull=%.1f draw=%.1f) update=%.1f | mech=%.1f phys=%.1f world=%.1f "

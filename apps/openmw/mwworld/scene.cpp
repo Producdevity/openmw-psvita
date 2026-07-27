@@ -2189,6 +2189,14 @@ namespace MWWorld
             return;
         }
 
+        // Warm-gate: cold actor builds (keyframes/meshes off SD) are 0.4-1.6s
+        // indivisible bites; wait for the background warm-up like cell loads do.
+        if (!mPreloader->isCellPreloadDone(pp.cell))
+        {
+            mPreloader->preload(cell, mRendering.getReferenceTime(), /*urgent*/ true);
+            return;
+        }
+
         // Step 3: collect non-lite refs once, sorted by priority
         if (!pp.collected)
         {
