@@ -6,6 +6,7 @@
 
 #ifdef __vita__
 #include <cstdio>
+#include <psp2/kernel/threadmgr.h>
 extern "C" void vitaBreadcrumb(const char*);
 #endif
 
@@ -130,6 +131,11 @@ namespace SceneUtil
 
     void WorkThread::run()
     {
+#ifdef __vita__
+        // Below main/sim priority: warm-ups take idle core time only and
+        // can't starve the frame (strict-priority scheduler).
+        sceKernelChangeThreadPriority(sceKernelGetThreadId(), 180);
+#endif
         while (true)
         {
             osg::ref_ptr<WorkItem> item = mWorkQueue->removeWorkItem();

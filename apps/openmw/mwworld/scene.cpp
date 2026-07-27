@@ -575,8 +575,20 @@ namespace MWWorld
 
 #ifdef __vita__
         // One time envelope shared by all streaming below (frame pacing).
+        // Adaptive: heavy frames get a trickle so streaming still converges,
+        // healthy frames get the full budget — streaming never pushes an
+        // already-slow frame into the teens.
         const uint64_t streamStart = sceKernelGetProcessTimeWide();
-        mStreamDeadline = streamStart + kStreamBudgetUs;
+        uint32_t streamBudgetUs = kStreamBudgetUs;
+        if (duration > 0.040f)
+            streamBudgetUs = 1000;
+        else if (duration > 0.034f)
+            streamBudgetUs = 3000;
+        mStreamDeadline = streamStart + streamBudgetUs;
+
+        // One shell prepare per healthy frame (heightfield build ~20-50ms
+        // is indivisible; skip when the frame is already strained).
+        processPendingPrepares(duration);
 
         // Incrementally load deferred ring cells
         processPendingCellLoads();
@@ -1768,6 +1780,23 @@ namespace MWWorld
         }
     }
 
+    void Scene::processPendingPrepares(float duration)
+    {
+        if (mPendingPrepares.empty())
+            return;
+        if (duration > 0.036f)
+            return; // frame already strained; the shell can wait a beat
+        if (Vita::isMemoryPressure(getVitaCellBudgetMB()))
+            return;
+        CellStore* cell = mPendingPrepares.front();
+        mPendingPrepares.erase(mPendingPrepares.begin());
+        if (mActiveCells.find(cell) != mActiveCells.end())
+            return; // became active some other way; nothing to do
+        auto navigatorUpdateGuard = mNavigator.makeUpdateGuard();
+        const osg::Vec3f playerPos = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
+        prepareCellForDeferredLoad(*cell, playerPos, navigatorUpdateGuard.get());
+    }
+
     void Scene::processPendingCellLoads()
     {
         if (mPendingCellLoads.empty())
@@ -2711,6 +2740,9 @@ namespace MWWorld
         addPostponedPhysicsObjects();
 
 #ifdef __vita__
+        // Cancel all pending deferred prepares/loads — grid has changed; cells
+        // still in the new grid get re-queued by the load loop below.
+        mPendingPrepares.clear();
         // Cancel all pending deferred loads — grid has changed, old pending cells
         // may no longer be in the grid or may have changed role.
         // Cells that were already added to mActiveCells but have no objects yet
@@ -2819,12 +2851,13 @@ namespace MWWorld
                 }
                 else
                 {
-                    // Deferred: shell now (heightfield/water/pathgrid),
-                    // objects stream via the per-frame envelope. Removes the
-                    // per-ring-cell sync hitch at boundary crossings; new
-                    // cells are a full cell-width out, so the brief object
-                    // pop-in is distant and fog-obscured.
-                    prepareCellForDeferredLoad(cell, pos, navigatorUpdateGuard.get());
+                    // Fully deferred: even the shell (heightfield/water/
+                    // pathgrid) runs later, one per healthy frame. New cells
+                    // are a full cell-width out, so the brief object pop-in
+                    // is distant and fog-obscured. Warm-up starts NOW so the
+                    // caches are hot by the time the shell and inserts run.
+                    mPendingPrepares.push_back(&cell);
+                    mPreloader->preload(cell, mRendering.getReferenceTime(), /*urgent*/ true);
                 }
 #else
                 loadCell(cell, loadingListener, changeEvent, pos, navigatorUpdateGuard.get());

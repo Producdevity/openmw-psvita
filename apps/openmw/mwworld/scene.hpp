@@ -159,6 +159,10 @@ namespace MWWorld
             bool batchingDone = false;
         };
         std::vector<PendingCellLoad> mPendingCellLoads;
+        // Ring cells awaiting their shell prepare (heightfield/water/
+        // pathgrid); one per healthy frame, then they join mPendingCellLoads.
+        std::vector<CellStore*> mPendingPrepares;
+        void processPendingPrepares(float duration);
         // Per-frame deferred-load budget. Each addObject call costs 0.4-3 ms;
         // 3 keeps worst-case at ~9 ms (≈30% of a 30 fps budget) instead of
         // the 24 ms burst that 8 produced. Slower load tail, smoother frames.
