@@ -153,6 +153,9 @@ namespace OMW
         bool mSimOverlap = false;
         bool mSimPrimed = false;
         bool mCullOverlap = false;
+        bool mUpdateOverlap = false;
+        bool mVitaWorkerUpdatePending = false;
+        unsigned int mVitaWorkerUpdateMask = ~0u;
         bool mCullPrimed = false;
 #endif
         std::unique_ptr<L10n::Manager> mL10nManager;

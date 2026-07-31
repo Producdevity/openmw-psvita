@@ -12,6 +12,7 @@
 #include <osgDB/ReaderWriter>
 #include <osgDB/Registry>
 #include <osgUtil/RenderBin>
+#include <osgUtil/UpdateVisitor>
 #include <osgViewer/Renderer>
 #include <osgViewer/ViewerEventHandlers>
 
@@ -27,6 +28,7 @@
 #include <components/vita/VitaDialogueText.h>
 #include <components/vita/VitaEsmPrefetch.h>
 #include <psp2/io/fcntl.h>
+#include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
@@ -421,7 +423,25 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     mStereoManager->updateSettings(Settings::camera().mNearClip, Settings::camera().mViewingDistance);
 
     mViewer->eventTraversal();
+#ifdef __vita__
+    if (mUpdateOverlap && mSimWorker && mSimOverlap && mCullOverlap && mViewer->getSceneData())
+    {
+        // Hazard classes update on main; the rest on the worker pre-cull.
+        constexpr unsigned int kHazardMask = MWRender::Mask_Effect | MWRender::Mask_WeatherParticles
+            | MWRender::Mask_ParticleSystem | MWRender::Mask_Water | MWRender::Mask_SimpleWater | MWRender::Mask_Sky;
+        osgUtil::UpdateVisitor* uv = mViewer->getUpdateVisitor();
+        const unsigned int fullMask = uv->getTraversalMask();
+        uv->setTraversalMask(kHazardMask);
+        mViewer->updateTraversal();
+        uv->setTraversalMask(fullMask & ~kHazardMask);
+        mVitaWorkerUpdateMask = fullMask;
+        mVitaWorkerUpdatePending = true;
+    }
+    else
+        mViewer->updateTraversal();
+#else
     mViewer->updateTraversal();
+#endif
 
     // update focus object for GUI
     {
@@ -458,6 +478,14 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         const bool havePrev = mCullPrimed;
         Vita::setDrawInFlight(true);
         mSimWorker->run([this, renderer, frameStart, nextFrame, nextDt, nextPaused] {
+            if (mVitaWorkerUpdatePending)
+            {
+                // Non-hazard update callbacks; must precede cull.
+                osgUtil::UpdateVisitor* uv = mViewer->getUpdateVisitor();
+                mViewer->getSceneData()->accept(*uv);
+                uv->setTraversalMask(mVitaWorkerUpdateMask);
+                mVitaWorkerUpdatePending = false;
+            }
             renderer->cull();
             runSimPhases(frameStart, nextFrame, nextDt, nextPaused);
         });
@@ -1256,6 +1284,7 @@ void OMW::Engine::go()
     else
         osgUtil::RenderBin::setDefaultRenderBinSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
     // vitaGL is single-threaded; sim moves to a worker instead.
+    mUpdateOverlap = Settings::general().mVitaUpdateOverlap;
     if (Settings::general().mVitaSimThread)
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();
@@ -1555,7 +1584,30 @@ void OMW::Engine::go()
             }
         }
 #endif
+#ifdef __vita__
+        // Vblank-locked pacing: kernel sleeps overshoot ~8ms.
+        {
+            static unsigned int s_lastVcount = 0;
+            const float fpsLimit = mEnvironment.getFrameRateLimit();
+            if (fpsLimit > 0.f)
+            {
+                const unsigned int vblanksPerFrame
+                    = std::max(1u, (unsigned int)(60.f / fpsLimit + 0.5f));
+                const unsigned int vc = sceDisplayGetVcount();
+                if (s_lastVcount == 0 || vc >= s_lastVcount + vblanksPerFrame)
+                    s_lastVcount = vc;
+                else
+                {
+                    while (sceDisplayGetVcount() < s_lastVcount + vblanksPerFrame)
+                        sceDisplayWaitVblankStart();
+                    s_lastVcount += vblanksPerFrame;
+                }
+            }
+        }
+        frameRateLimiter.limit(); // dt bookkeeping only
+#else
         frameRateLimiter.limit();
+#endif
     }
 
     mLuaWorker->join();
