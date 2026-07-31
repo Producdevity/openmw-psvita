@@ -16,6 +16,7 @@
 extern "C"
 {
     extern uint32_t osgprof_mat_us, osgprof_state_us, osgprof_unif_us, osgprof_draw_us, osgprof_leaves;
+    extern uint32_t osgprof_replayable, osgprof_replayed, osgprof_streplayed;
     extern unsigned int cullprof_node, cullprof_group, cullprof_transform, cullprof_geode, cullprof_drawable,
         cullprof_dcull, cullprof_leaves, cullprof_sg;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
@@ -356,12 +357,14 @@ namespace Vita
         // Per-leaf OSG draw-dispatch cost (probes in RenderLeaf.cpp).
         if (osgprof_leaves > 0)
         {
-            snprintf(buf, sizeof(buf), "[OsgProf] leaves=%u mat=%.1f state=%.1f unif=%.1f draw=%.1f us/leaf",
+            snprintf(buf, sizeof(buf), "[OsgProf] repl=%u rep=%u srep=%u leaves=%u mat=%.1f state=%.1f unif=%.1f draw=%.1f us/leaf",
+                osgprof_replayable, osgprof_replayed, osgprof_streplayed,
                 osgprof_leaves, (double)osgprof_mat_us / osgprof_leaves, (double)osgprof_state_us / osgprof_leaves,
                 (double)osgprof_unif_us / osgprof_leaves, (double)osgprof_draw_us / osgprof_leaves);
             auditLog(buf);
         }
         osgprof_mat_us = osgprof_state_us = osgprof_unif_us = osgprof_draw_us = osgprof_leaves = 0;
+        osgprof_replayable = osgprof_replayed = osgprof_streplayed = 0;
 
         // Cull traversal shape: visits per frame by node kind.
         if (cullprof_drawable > 0)

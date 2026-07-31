@@ -42,6 +42,8 @@ namespace Settings
         SettingValue<bool> mVitaCellFlatten{ mIndex, "General", "vita cell flatten", true };
         SettingValue<bool> mVitaCullOverlap{ mIndex, "General", "vita cull overlap", false };
         SettingValue<bool> mVitaUpdateOverlap{ mIndex, "General", "vita update overlap", false };
+        SettingValue<bool> mVitaDrawReplay{ mIndex, "General", "vita draw replay", false };
+        SettingValue<bool> mVitaStateReplay{ mIndex, "General", "vita state replay", false };
         // Vita: heap MB held back from the watchdog budget. Raise to test eviction.
         SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 40,
             makeClampSanitizerInt(20, 150) };

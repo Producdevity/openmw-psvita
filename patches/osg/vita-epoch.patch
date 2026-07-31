@@ -1,0 +1,85 @@
+--- a/include/osg/Geometry
++++ b/include/osg/Geometry
+@@ -220,6 +220,7 @@
+         struct VitaDrawCache
+         {
+             bool valid = false;
++            unsigned int epoch = 0; // vita_replay_epoch at capture time
+             osg::ref_ptr<osg::Referenced> vboRef; // GLBufferObject keep-alive
+             osg::ref_ptr<osg::Referenced> eboRef;
+             unsigned int vboID = 0, eboID = 0;
+--- a/src/osg/Geometry.cpp
++++ b/src/osg/Geometry.cpp
+@@ -1953,11 +1953,19 @@
+     }
+ }
+ 
++extern "C" uint32_t vita_replay_epoch; // osgUtil/RenderLeaf.cpp
++
+ bool osg::Geometry::vitaFastDraw(osg::RenderInfo& renderInfo) const
+ {
+     osg::State& state = *renderInfo.getState();
+     VitaDrawCache& dc = _vitaDrawCache;
+ 
++    // The app bumped the epoch after releasing GL objects: every cached
++    // buffer id is suspect. Drop the cache; the normal path draws (and
++    // recompiles buffers as needed) until re-capture next frame.
++    if (dc.valid && dc.epoch != vita_replay_epoch)
++        dc.valid = false;
++
+     if (!dc.valid)
+     {
+         // Qualify + capture. Failure leaves valid=false: retried next frame
+@@ -2026,6 +2034,7 @@
+         tmp.primType = primGLType;
+         tmp.primCount = ps->getNumIndices();
+         tmp.primIndices = reinterpret_cast<const unsigned char*>(0) + glebo->getOffset(ps->getBufferIndex());
++        tmp.epoch = vita_replay_epoch;
+         tmp.valid = true;
+         dc = tmp;
+     }
+--- a/src/osgUtil/RenderLeaf.cpp
++++ b/src/osgUtil/RenderLeaf.cpp
+@@ -35,6 +35,11 @@
+ uint32_t osgprof_streplayed = 0;
+ int vita_draw_replay = 0; // set from engine settings at boot
+ int vita_state_replay = 0;
++// Bumped by the app after it releases GL objects belonging to live
++// drawables (CDRAM shedding). Draw-replay caches capture raw GL buffer
++// ids; a stale id replayed after deletion is a GPU fault. Each cache
++// entry stamps the epoch at capture and re-qualifies when it changes.
++uint32_t vita_replay_epoch = 1;
+ }
+ 
+ namespace
+@@ -256,6 +261,30 @@
+         return;
+     }
+ 
++#ifdef __vita__
++    {
++        // Epoch changed (app released GL objects of live content): the
++        // buffer replay caches self-invalidate via their stamps, but
++        // osg::State's applied-attribute tracking and the frozen flat-state
++        // chains still believe old texture bindings are current — deleted
++        // texture ids get RECYCLED by new uploads, so a stale skip draws
++        // the wrong texture (tree-with-body-texture class). Dirty all
++        // state tracking once per epoch so every attribute re-applies;
++        // Texture::apply recreates released textures correctly.
++        static uint32_t s_vitaSeenEpoch = 0;
++        if (s_vitaSeenEpoch != vita_replay_epoch)
++        {
++            s_vitaSeenEpoch = vita_replay_epoch;
++            state.dirtyAllAttributes();
++            state.dirtyAllModes();
++            state.dirtyAllVertexArrays();
++            s_vitaAppliedNode = 0;
++            s_vitaChainNode = 0;
++            s_vitaFlatMode = false;
++        }
++    }
++#endif
++
+     if (previous)
+     {
+         uint32_t pt0 = OSGPROF_T();

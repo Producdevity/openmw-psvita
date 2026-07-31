@@ -31,6 +31,9 @@
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
+// Fork replay switches (fetched-OSG RenderLeaf.cpp).
+extern int vita_draw_replay;
+extern int vita_state_replay;
 #else
 #define VITA_CRUMB(msg)
 #endif
@@ -1285,6 +1288,8 @@ void OMW::Engine::go()
         osgUtil::RenderBin::setDefaultRenderBinSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
     // vitaGL is single-threaded; sim moves to a worker instead.
     mUpdateOverlap = Settings::general().mVitaUpdateOverlap;
+    vita_draw_replay = Settings::general().mVitaDrawReplay ? 1 : 0;
+    vita_state_replay = Settings::general().mVitaStateReplay ? 1 : 0;
     if (Settings::general().mVitaSimThread)
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();
