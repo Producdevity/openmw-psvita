@@ -412,6 +412,9 @@ namespace MWPhysics
 
     void PhysicsSystem::removeHeightField(int x, int y)
     {
+#ifdef __vita__
+        waitForAsyncWorkers(); // same race as remove()
+#endif
         HeightFieldMap::iterator heightfield = mHeightFields.find(std::make_pair(x, y));
         if (heightfield != mHeightFields.end())
             mHeightFields.erase(heightfield);
@@ -462,6 +465,10 @@ namespace MWPhysics
 
     void PhysicsSystem::remove(const MWWorld::Ptr& ptr)
     {
+#ifdef __vita__
+        // Fence: async sweep may hold this collision object.
+        waitForAsyncWorkers();
+#endif
         if (auto foundObject = mObjects.find(ptr.mRef); foundObject != mObjects.end())
         {
             mAnimatedObjects.erase(foundObject->second.get());
@@ -476,6 +483,9 @@ namespace MWPhysics
 
     void PhysicsSystem::removeProjectile(const int projectileId)
     {
+#ifdef __vita__
+        waitForAsyncWorkers(); // same race as remove()
+#endif
         ProjectileMap::iterator foundProjectile = mProjectiles.find(projectileId);
         if (foundProjectile != mProjectiles.end())
             mProjectiles.erase(foundProjectile);

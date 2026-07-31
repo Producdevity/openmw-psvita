@@ -26,6 +26,7 @@
 #include "vita/VitaSimWorker.h"
 #include <components/vita/VitaDialogueText.h>
 #include <components/vita/VitaEsmPrefetch.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
@@ -282,8 +283,10 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
                     mWorld->updatePhysics(frametime, paused, frameStart, frameNumber, *stats);
                 } catch (const std::exception& e) {
                     Vita::breadcrumb(("[PhysCrash] std::exception: " + std::string(e.what())).c_str());
+                    vitaLogFlushNow();
                 } catch (...) {
                     Vita::breadcrumb("[PhysCrash] non-std exception caught");
+                    vitaLogFlushNow();
                 }
 #else
                 mWorld->updatePhysics(frametime, paused, frameStart, frameNumber, *stats);
@@ -588,6 +591,18 @@ OMW::Engine::~Engine()
     SDL_Quit();
 
     Log(Debug::Info) << "Quitting peacefully.";
+#ifdef __vita__
+    // Clean-exit marker; absent at boot = crashed.
+    {
+        SceUID fd = sceIoOpen("ux0:data/openmw/clean_exit", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+        if (fd >= 0)
+        {
+            sceIoWrite(fd, "ok", 2);
+            sceIoClose(fd);
+        }
+        vitaLogFlushNow();
+    }
+#endif
 }
 
 // Set data dir

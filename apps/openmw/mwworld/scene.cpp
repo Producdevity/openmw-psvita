@@ -1151,8 +1151,9 @@ namespace MWWorld
             {
                 const auto& item = items[i].mItem;
                 const osg::Vec3f c = item.mGeom->getBoundingBox().center() * item.mWorld;
-                BatchKey key{ item.mChain, item.mSig, (int)std::floor(c.x() / 2048.f),
-                    (int)std::floor(c.y() / 2048.f), (int)std::floor(c.z() / 2048.f) };
+                // 1024 buckets: draw CPU, not vertex load, is the bound.
+                BatchKey key{ item.mChain, item.mSig, (int)std::floor(c.x() / 1024.f),
+                    (int)std::floor(c.y() / 1024.f), (int)std::floor(c.z() / 1024.f) };
                 groups[key].push_back(i);
             }
 
@@ -1537,7 +1538,7 @@ namespace MWWorld
             if (Settings::general().mVitaCellFlatten)
                 VitaMerge::flattenCell(cell, cellRoot);
 
-            if (!cell.isExterior() && Settings::general().mVitaCellMerge)
+            if (Settings::general().mVitaCellMerge)
                 VitaMerge::mergeCell(cell, cellRoot);
 
             BatchCensusVisitor postCensus;

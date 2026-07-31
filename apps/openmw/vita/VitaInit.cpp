@@ -2,7 +2,10 @@
 
 #include "VitaInit.h"
 
+#include <cxxabi.h>
 #include <pthread.h>
+#include <system_error>
+#include <typeinfo>
 
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
@@ -26,6 +29,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <cstring>
 #include <ctime>
 #include <exception>
@@ -156,30 +160,114 @@ void vitaBreadcrumb(const char* msg)
     vitaTimedBreadcrumb(msg);
 }
 
+// Ring logger: per-crumb SD writes cost 13-22ms each.
+extern "C" void vitaLogFlushNow(void);
+namespace
+{
+    constexpr size_t kLogRingSize = 256 * 1024;
+    char s_logRing[kLogRingSize];
+    size_t s_logHead = 0;
+    unsigned s_logDropped = 0;
+    std::atomic_flag s_logLock = ATOMIC_FLAG_INIT;
+    std::atomic_flag s_logIoLock = ATOMIC_FLAG_INIT;
+    std::atomic<bool> s_logThreadStarted{ false };
+    char s_logFlushBuf[kLogRingSize];
+
+    int logFlushThread(SceSize, void*)
+    {
+        for (;;)
+        {
+            sceKernelDelayThread(250 * 1000);
+            vitaLogFlushNow();
+        }
+        return 0;
+    }
+
+    void logStartFlusherOnce()
+    {
+        bool expected = false;
+        if (s_logThreadStarted.compare_exchange_strong(expected, true))
+        {
+            SceUID tid = sceKernelCreateThread("omw_logflush", logFlushThread, 191, 16 * 1024, 0, 0, nullptr);
+            if (tid >= 0)
+                sceKernelStartThread(tid, 0, nullptr);
+        }
+    }
+
+    void logAppend(const char* data, size_t len)
+    {
+        logStartFlusherOnce();
+        while (s_logLock.test_and_set(std::memory_order_acquire))
+        {
+        }
+        if (s_logHead + len <= kLogRingSize)
+        {
+            memcpy(s_logRing + s_logHead, data, len);
+            s_logHead += len;
+        }
+        else
+            ++s_logDropped;
+        s_logLock.clear(std::memory_order_release);
+    }
+}
+
+extern "C" void vitaLogFlushNow(void)
+{
+    // Copy out under data lock; SD write outside it.
+    while (s_logIoLock.test_and_set(std::memory_order_acquire))
+    {
+    }
+    size_t len;
+    unsigned dropped;
+    {
+        while (s_logLock.test_and_set(std::memory_order_acquire))
+        {
+        }
+        len = s_logHead;
+        dropped = s_logDropped;
+        if (len > 0)
+            memcpy(s_logFlushBuf, s_logRing, len);
+        s_logHead = 0;
+        s_logDropped = 0;
+        s_logLock.clear(std::memory_order_release);
+    }
+    if (len > 0)
+    {
+        SceUID fd = sceIoOpen("ux0:data/openmw/boot.log", SCE_O_WRONLY | SCE_O_APPEND | SCE_O_CREAT, 0777);
+        if (fd >= 0)
+        {
+            sceIoWrite(fd, s_logFlushBuf, len);
+            if (dropped > 0)
+            {
+                char note[64];
+                int n = snprintf(note, sizeof(note), "[Log] ring overflow: %u dropped\n", dropped);
+                if (n > 0)
+                    sceIoWrite(fd, note, (size_t)n);
+            }
+            sceIoClose(fd);
+        }
+    }
+    s_logIoLock.clear(std::memory_order_release);
+}
+
 void vitaTimedBreadcrumb(const char* msg)
 {
-    SceUID fd = sceIoOpen("ux0:data/openmw/boot.log",
-        SCE_O_WRONLY | SCE_O_APPEND | SCE_O_CREAT, 0777);
-    if (fd >= 0)
-    {
-        SceUInt64 us = sceKernelGetProcessTimeWide();
-        unsigned long ms = (unsigned long)(us / 1000ULL);
-        char buf[256];
-        int pos = 0;
-        buf[pos++] = '[';
-        char numBuf[16];
-        int numLen = 0;
-        unsigned long tmp = ms;
-        do { numBuf[numLen++] = '0' + (tmp % 10); tmp /= 10; } while (tmp > 0);
-        for (int i = numLen - 1; i >= 0; --i) buf[pos++] = numBuf[i];
-        buf[pos++] = ']';
-        buf[pos++] = ' ';
-        int msgLen = 0;
-        while (msg[msgLen] && pos < 254) buf[pos++] = msg[msgLen++];
-        buf[pos++] = '\n';
-        sceIoWrite(fd, buf, pos);
-        sceIoClose(fd);
-    }
+    SceUInt64 us = sceKernelGetProcessTimeWide();
+    unsigned long ms = (unsigned long)(us / 1000ULL);
+    char buf[640];
+    int pos = 0;
+    buf[pos++] = '[';
+    char numBuf[16];
+    int numLen = 0;
+    unsigned long tmp = ms;
+    do { numBuf[numLen++] = '0' + (tmp % 10); tmp /= 10; } while (tmp > 0);
+    for (int i = numLen - 1; i >= 0; --i) buf[pos++] = numBuf[i];
+    buf[pos++] = ']';
+    buf[pos++] = ' ';
+    int msgLen = 0;
+    while (msg[msgLen] && pos < (int)sizeof(buf) - 2) buf[pos++] = msg[msgLen++];
+    buf[pos++] = '\n';
+    logAppend(buf, pos);
 }
 
 void vitaMemBreadcrumb(const char* msg)
@@ -317,6 +405,7 @@ namespace Vita
                 sceIoWrite(fd, s_emergencyBuf, static_cast<size_t>(len));
             sceIoClose(fd);
         }
+        vitaLogFlushNow();
         sceKernelExitProcess(1);
     }
 
@@ -348,6 +437,7 @@ namespace Vita
         {
             releaseEmergencyReserve();
             breadcrumb("[OOM_RECOVERY] Released 4MB emergency reserve");
+            vitaLogFlushNow();
             // Return to let operator new retry the allocation
             return;
         }
@@ -1176,6 +1266,25 @@ namespace Vita
 
         ensureDataDirectories();
 
+        // No clean-exit marker: archive crashed session's log.
+        {
+            SceUID fd = sceIoOpen("ux0:data/openmw/clean_exit", SCE_O_RDONLY, 0);
+            if (fd >= 0)
+            {
+                sceIoClose(fd);
+                sceIoRemove("ux0:data/openmw/clean_exit");
+            }
+            else
+            {
+                sceIoMkdir("ux0:data/openmw/crashlogs", 0777);
+                // Rotate slot files 2->3, 1->2, then archive as 1.
+                sceIoRemove("ux0:data/openmw/crashlogs/crash3.log");
+                sceIoRename("ux0:data/openmw/crashlogs/crash2.log", "ux0:data/openmw/crashlogs/crash3.log");
+                sceIoRename("ux0:data/openmw/crashlogs/crash1.log", "ux0:data/openmw/crashlogs/crash2.log");
+                sceIoRename("ux0:data/openmw/boot.log", "ux0:data/openmw/crashlogs/crash1.log");
+            }
+        }
+
         // Rotate logs
         sceIoRemove("ux0:data/openmw/boot.log.prev");
         sceIoRename("ux0:data/openmw/boot.log", "ux0:data/openmw/boot.log.prev");
@@ -1190,9 +1299,21 @@ namespace Vita
         // Log what std::terminate is called with
         std::set_terminate([]() {
             breadcrumb("[TERMINATE] std::terminate called");
+            if (const std::type_info* t = abi::__cxa_current_exception_type())
+            {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "[TERMINATE] type: %s", t->name());
+                breadcrumb(buf);
+            }
             std::exception_ptr ep = std::current_exception();
             if (ep) {
                 try { std::rethrow_exception(ep); }
+                catch (const std::system_error& e) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "[TERMINATE] system_error code=%d (%s): %s", e.code().value(),
+                        e.code().category().name(), e.what());
+                    breadcrumb(buf);
+                }
                 catch (const std::exception& e) {
                     char buf[256];
                     snprintf(buf, sizeof(buf), "[TERMINATE] exception: %s", e.what());
@@ -1202,6 +1323,7 @@ namespace Vita
             } else {
                 breadcrumb("[TERMINATE] no active exception (noexcept violation?)");
             }
+            vitaLogFlushNow();
             abort();
         });
 

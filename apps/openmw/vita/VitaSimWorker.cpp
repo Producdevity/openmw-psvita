@@ -107,6 +107,7 @@ namespace Vita
                 char buf[256];
                 std::snprintf(buf, sizeof(buf), "[SimWorker] std::exception: %s", e.what());
                 breadcrumb(buf);
+                vitaLogFlushNow();
             }
             catch (...)
             {
