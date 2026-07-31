@@ -231,9 +231,18 @@ void MWState::StateManager::resumeGame()
     MWBase::Environment::get().getLuaManager()->gameLoaded();
 }
 
+#ifdef __vita__
+// Save marker for [Slow] attribution.
+extern "C" uint32_t vitastat_save_flag;
+uint32_t vitastat_save_flag = 0;
+#endif
+
 void MWState::StateManager::saveGame(std::string_view description, const Slot* slot)
 {
     MWBase::Environment::get().getLuaManager()->applyDelayedActions();
+#ifdef __vita__
+    vitastat_save_flag = 1;
+#endif
 
 #ifdef __vita__
     // libpng's internal mallocs fail under heap pressure during save thumbnail

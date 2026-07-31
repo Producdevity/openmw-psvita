@@ -48,7 +48,8 @@ extern "C" {
 // previously affected 312 are mitigated by malloc_trim coalescing and
 // dynamic texture tier-down (imagemanager.cpp), so 312 today gives
 // meaningfully more usable working set than 312 originally did.
-unsigned int _newlib_heap_size_user = 312 * 1024 * 1024;
+// 288: 312 starved thread stacks (video EAGAIN).
+unsigned int _newlib_heap_size_user = 288 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 
 // Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.
@@ -57,12 +58,35 @@ int __real_pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), v
 int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg)
 {
     if (attr)
-        return __real_pthread_create(thread, attr, fn, arg);
+    {
+        const int rc = __real_pthread_create(thread, attr, fn, arg);
+        if (rc != 0)
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[pthread] create (with attr) failed rc=%d", rc);
+            vitaBreadcrumb(buf);
+        }
+        return rc;
+    }
     pthread_attr_t big;
     pthread_attr_init(&big);
     pthread_attr_setstacksize(&big, 256 * 1024);
-    const int result = __real_pthread_create(thread, &big, fn, arg);
+    int result = __real_pthread_create(thread, &big, fn, arg);
     pthread_attr_destroy(&big);
+    if (result != 0)
+    {
+        // Log failure; retry with smaller stack.
+        char buf[96];
+        snprintf(buf, sizeof(buf), "[pthread] create failed rc=%d at 256KB stack; retrying 128KB", result);
+        vitaBreadcrumb(buf);
+        pthread_attr_t small;
+        pthread_attr_init(&small);
+        pthread_attr_setstacksize(&small, 128 * 1024);
+        result = __real_pthread_create(thread, &small, fn, arg);
+        pthread_attr_destroy(&small);
+        snprintf(buf, sizeof(buf), "[pthread] 128KB retry rc=%d", result);
+        vitaBreadcrumb(buf);
+    }
     return result;
 }
 

@@ -12,6 +12,11 @@
 
 #include "../mwsound/movieaudiofactory.hpp"
 
+#ifdef __vita__
+#include <cstdio>
+#include "../vita/VitaInit.h"
+#endif
+
 namespace MWGui
 {
 
@@ -31,11 +36,8 @@ namespace MWGui
 
     void VideoWidget::playVideo(const std::string& video)
     {
-#ifndef __vita__
-        // Vita: ffmpeg's binkaudio_rdft avcodec_open2 returns -1 for Morrowind's .bik files
-        // and gives no log output. Skip audio to let the video play silently.
+        // av_tx float restore made Bink audio work.
         mPlayer->setAudioFactory(new MWSound::MovieAudioFactory());
-#endif
 
         Files::IStreamPtr videoStream;
         try
@@ -45,6 +47,13 @@ namespace MWGui
         catch (std::exception& e)
         {
             Log(Debug::Error) << "Failed to open video: " << e.what();
+#ifdef __vita__
+            {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "[Video] vfs open failed: %s", e.what());
+                vitaBreadcrumb(buf);
+            }
+#endif
             return;
         }
 
@@ -52,7 +61,12 @@ namespace MWGui
 
         osg::ref_ptr<osg::Texture2D> texture = mPlayer->getVideoTexture();
         if (!texture)
+        {
+#ifdef __vita__
+            vitaBreadcrumb("[Video] no texture after playVideo (skipped)");
+#endif
             return;
+        }
 
         mTexture = std::make_unique<MyGUIPlatform::OSGTexture>(texture);
 

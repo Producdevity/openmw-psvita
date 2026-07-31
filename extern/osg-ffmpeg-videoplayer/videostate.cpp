@@ -28,6 +28,18 @@ extern "C"
     #pragma warning (pop)
 #endif
 
+#ifdef __vita__
+#include <cstdio>
+#include <psp2/kernel/threadmgr.h>
+extern "C" void vitaBreadcrumb(const char*);
+
+static void vitaLowerThreadPriority()
+{
+    // 191 = lowest user priority.
+    sceKernelChangeThreadPriority(sceKernelGetThreadId(), 191);
+}
+#endif
+
 static const char* flushString = "FLUSH";
 struct FlushPacket : AVPacket
 {
@@ -438,11 +450,22 @@ public:
         {
             try
             {
+#ifdef __vita__
+                // Decode below main priority; late frames skip.
+                vitaLowerThreadPriority();
+#endif
                 run();
             }
             catch(std::exception& e)
             {
                 OSG_FATAL << "An error occurred playing the video: " << e.what() << std::endl;
+#ifdef __vita__
+                {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "[Video] parse thread error: %s", e.what());
+                    vitaBreadcrumb(buf);
+                }
+#endif
             }
         })
     {
@@ -509,7 +532,12 @@ class ParseThread
 public:
     explicit ParseThread(VideoState* self)
         : mVideoState(self)
-        , mThread([this] { run(); })
+        , mThread([this] {
+#ifdef __vita__
+            vitaLowerThreadPriority(); // see VideoThread
+#endif
+            run();
+        })
     {
     }
 
@@ -684,6 +712,11 @@ int VideoState::stream_open(int stream_index, AVFormatContext *pFormatCtx)
         if (avcodec_open2(this->audio_ctx, codec, nullptr) < 0)
         {
             fprintf(stderr, "Unsupported codec!\n");
+#ifdef __vita__
+            {
+                vitaBreadcrumb("[Video] audio codec open failed");
+            }
+#endif
             // On failure also null audio_st so ParseThread doesn't queue packets into audioq.
             avcodec_free_context(&this->audio_ctx);
             this->audio_st = nullptr;
@@ -702,11 +735,25 @@ int VideoState::stream_open(int stream_index, AVFormatContext *pFormatCtx)
         if (!mAudioDecoder)
         {
             OSG_FATAL << "Failed to create audio decoder, can not play audio stream" << std::endl;
+#ifdef __vita__
+            {
+                vitaBreadcrumb("[Video] audio decoder create failed");
+            }
+#endif
             avcodec_free_context(&this->audio_ctx);
             this->audio_st = nullptr;
             return -1;
         }
         mAudioDecoder->setupFormat();
+#ifdef __vita__
+        {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "[Video] audio stream ok rate=%d ch=%d fmt=%d",
+                this->audio_ctx->sample_rate, this->audio_ctx->ch_layout.nb_channels,
+                (int)this->audio_ctx->sample_fmt);
+            vitaBreadcrumb(buf);
+        }
+#endif
         break;
 
     case AVMEDIA_TYPE_VIDEO:

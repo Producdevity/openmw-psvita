@@ -8,6 +8,11 @@
 #include "audiofactory.hpp"
 #include "videostate.hpp"
 
+#ifdef __vita__
+#include <cstdio>
+extern "C" void vitaBreadcrumb(const char*);
+#endif
+
 namespace Video
 {
 
@@ -47,6 +52,13 @@ void VideoPlayer::playVideo(std::unique_ptr<std::istream>&& inputstream, const s
     }
     catch(std::exception& e) {
         OSG_FATAL << "Failed to play video: " << e.what() << std::endl;
+#ifdef __vita__
+        {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "[Video] play failed: %s", e.what());
+            vitaBreadcrumb(buf);
+        }
+#endif
         close();
     }
 }
