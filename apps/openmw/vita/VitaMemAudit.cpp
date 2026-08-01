@@ -28,9 +28,12 @@ extern "C"
     uint32_t phase_fin_us = 0, phase_inp_us = 0, phase_unref_us = 0, phase_stats_us = 0;
     uint32_t phase_snd_us = 0, phase_lsync_us = 0, phase_state_us = 0;
     unsigned int vita_bin2_graphs = 0, vita_bin2_leaves = 0;
+    uint32_t gl_draw_us = 0, gl_swap_us = 0, gl_draw_max = 0, gl_swap_max = 0;
+    extern uint32_t osgprof_dyn_leaves, osgprof_dyn_verts;
     unsigned int cullprof_creplay = 0, cullprof_crep_drop = 0;
     uint32_t cullprof_terr_us = 0;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
+    extern uint32_t osgapply_unif_n, osgapply_unif_up;
     extern uint32_t osgapply_push, osgapply_pop;
 }
 
@@ -433,6 +436,14 @@ namespace Vita
             const uint32_t gfNow = vgl_gpu_frames;
             const unsigned gf = (gfNow - s_prevGpuFrames) ? (gfNow - s_prevGpuFrames) : 1;
             s_prevGpuFrames = gfNow;
+            snprintf(buf, sizeof(buf),
+                "[GlJob] draw=%.1f/%.1fms swap=%.1f/%.1fms dyn=%u/%uk /frame",
+                gl_draw_us / 1000.0 / kReportEveryFrames, gl_draw_max / 1000.0,
+                gl_swap_us / 1000.0 / kReportEveryFrames, gl_swap_max / 1000.0,
+                osgprof_dyn_leaves / kReportEveryFrames, osgprof_dyn_verts / kReportEveryFrames / 1000);
+            auditLog(buf);
+            gl_draw_us = gl_swap_us = gl_draw_max = gl_swap_max = 0;
+            osgprof_dyn_leaves = osgprof_dyn_verts = 0;
             snprintf(buf, sizeof(buf), "[Gpu] qd=%.2f/%u blk=%.2f/%.1fms tchunk=%u tleaf=%u /frame",
                 (double)vgl_qdepth_sum / gf, vgl_qdepth_max, (double)vgl_swap_block_us / 1000.0 / gf,
                 vgl_swap_block_max / 1000.0, terr_chunks / kReportEveryFrames, terr_pass_leaves / kReportEveryFrames);
@@ -491,13 +502,14 @@ namespace Vita
         if (osgapply_calls > 0)
         {
             snprintf(buf, sizeof(buf),
-                "[OsgApply] calls=%u tex=%.1f mode=%.1f attr=%.1f unif=%.1f us/call push=%u pop=%u",
+                "[OsgApply] calls=%u tex=%.1f mode=%.1f attr=%.1f unif=%.1f us/call push=%u pop=%u prog=%u umap=%u",
                 osgapply_calls, (double)osgapply_tex_us / osgapply_calls, (double)osgapply_mode_us / osgapply_calls,
                 (double)osgapply_attr_us / osgapply_calls, (double)osgapply_unif_us / osgapply_calls, osgapply_push,
-                osgapply_pop);
+                osgapply_pop, osgapply_unif_n, osgapply_unif_up);
             auditLog(buf);
         }
         osgapply_calls = osgapply_tex_us = osgapply_mode_us = osgapply_attr_us = osgapply_unif_us = 0;
+        osgapply_unif_n = osgapply_unif_up = 0;
         osgapply_push = osgapply_pop = 0;
     }
 

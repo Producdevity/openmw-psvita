@@ -101,6 +101,9 @@
 
 #include "../mwphysics/actor.hpp"
 #include "../mwphysics/collisiontype.hpp"
+#ifdef __vita__
+#include <osgUtil/LineSegmentIntersector>
+#endif
 #include "../mwphysics/object.hpp"
 #include "../mwphysics/physicssystem.hpp"
 
@@ -2065,18 +2068,39 @@ namespace MWWorld
         else
         {
 #ifdef __vita__
-            // Physics ray: ~0.2ms vs 7-8ms scene intersection every 3rd frame.
+            // Hybrid: physics ray for occluders/actors; masked scene ray for
+            // items (no collision objects). Nearer hit wins, so walls occlude.
             osg::Vec3f rayStart, rayEnd;
             mRendering->getCameraRay(0.5f, 0.5f, maxDistance, rayStart, rayEnd);
             std::vector<MWWorld::ConstPtr> ignore;
             if (ignorePlayer)
                 ignore.push_back(mPlayer->getPlayer());
-            const MWPhysics::RayCastingResult res = mPhysics->castRay(rayStart, rayEnd, ignore, {},
+            const MWPhysics::RayCastingResult phys = mPhysics->castRay(rayStart, rayEnd, ignore, {},
                 MWPhysics::CollisionType_Default | MWPhysics::CollisionType_VisualOnly);
-            if (res.mHit && !res.mHitObject.isEmpty())
+            const float physDist
+                = (phys.mHit && !phys.mHitObject.isEmpty()) ? (phys.mHitPos - rayStart).length() : -1.f;
+
+            const MWRender::RenderingManager::RayResult scene = mRendering->castCameraToViewportRay(
+                0.5f, 0.5f, maxDistance, ignorePlayer, MWRender::Mask_Scene | MWRender::Mask_Object);
+            float sceneDist = -1.f;
+            MWWorld::Ptr sceneObject = scene.mHitObject;
+            if (scene.mHit)
             {
-                mDistanceToFocusObject = (res.mHitPos - rayStart).length() - camDist;
-                return res.mHitObject;
+                if (sceneObject.isEmpty() && scene.mHitRefnum.isSet())
+                    sceneObject = MWBase::Environment::get().getWorldModel()->getPtr(scene.mHitRefnum);
+                if (!sceneObject.isEmpty())
+                    sceneDist = scene.mRatio * maxDistance;
+            }
+
+            if (physDist >= 0.f && (sceneDist < 0.f || physDist <= sceneDist))
+            {
+                mDistanceToFocusObject = physDist - camDist;
+                return phys.mHitObject;
+            }
+            if (sceneDist >= 0.f)
+            {
+                mDistanceToFocusObject = sceneDist - camDist;
+                return sceneObject;
             }
             mDistanceToFocusObject = -1;
             return MWWorld::Ptr();

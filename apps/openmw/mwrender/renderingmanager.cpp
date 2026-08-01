@@ -1325,6 +1325,27 @@ namespace MWRender
     }
 
     RenderingManager::RayResult RenderingManager::castCameraToViewportRay(
+        const float nX, const float nY, float maxDistance, bool ignorePlayer, unsigned int maskAnd)
+    {
+        osg::ref_ptr<osgUtil::LineSegmentIntersector> intersector(new osgUtil::LineSegmentIntersector(
+            osgUtil::LineSegmentIntersector::PROJECTION, nX * 2.f - 1.f, nY * (-2.f) + 1.f));
+
+        osg::Vec3d dist(0.f, 0.f, -maxDistance);
+        dist = dist * mViewer->getCamera()->getProjectionMatrix();
+
+        osg::Vec3d end = intersector->getEnd();
+        end.z() = dist.z();
+        intersector->setEnd(end);
+        intersector->setIntersectionLimit(osgUtil::LineSegmentIntersector::LIMIT_NEAREST);
+
+        osg::ref_ptr<osgUtil::IntersectionVisitor> iv = getIntersectionVisitor(intersector, ignorePlayer, true);
+        iv->setTraversalMask(iv->getTraversalMask() & maskAnd);
+        mViewer->getCamera()->accept(*iv);
+
+        return getIntersectionResult(intersector, mIntersectionVisitor);
+    }
+
+    RenderingManager::RayResult RenderingManager::castCameraToViewportRay(
         const float nX, const float nY, float maxDistance, bool ignorePlayer, bool ignoreActors)
     {
         osg::ref_ptr<osgUtil::LineSegmentIntersector> intersector(new osgUtil::LineSegmentIntersector(

@@ -196,6 +196,9 @@ namespace MWRender
         /// World-space camera ray for the given viewport coords; no traversal.
         void getCameraRay(float nX, float nY, float maxDistance, osg::Vec3f& outStart, osg::Vec3f& outEnd) const;
 
+        RayResult castCameraToViewportRay(const float nX, const float nY, float maxDistance, bool ignorePlayer,
+            unsigned int maskAnd);
+
         RayResult castCameraToViewportRay(
             const float nX, const float nY, float maxDistance, bool ignorePlayer, bool ignoreActors = false);
 

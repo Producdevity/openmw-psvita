@@ -36,6 +36,7 @@ extern "C" uint32_t phase_evt_us, phase_upd_us, phase_focus_us, phase_lua_us, ph
 extern "C" uint32_t phase_fin_us, phase_inp_us, phase_unref_us, phase_stats_us;
 extern "C" uint32_t phase_snd_us, phase_lsync_us, phase_state_us;
 extern "C" unsigned int vita_bin2_graphs, vita_bin2_leaves;
+extern "C" uint32_t gl_draw_us, gl_swap_us, gl_draw_max, gl_swap_max;
 
 namespace
 {
@@ -604,8 +605,16 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
                 glw->run([renderer, gc] {
                     const uint64_t t0 = sceKernelGetProcessTimeWide();
                     renderer->draw();
+                    const uint64_t t1 = sceKernelGetProcessTimeWide();
                     gc->swapBuffers();
-                    Vita::noteRenderTime(sceKernelGetProcessTimeWide() - t0);
+                    const uint64_t t2 = sceKernelGetProcessTimeWide();
+                    gl_draw_us += (uint32_t)(t1 - t0);
+                    gl_swap_us += (uint32_t)(t2 - t1);
+                    if ((uint32_t)(t1 - t0) > gl_draw_max)
+                        gl_draw_max = (uint32_t)(t1 - t0);
+                    if ((uint32_t)(t2 - t1) > gl_swap_max)
+                        gl_swap_max = (uint32_t)(t2 - t1);
+                    Vita::noteRenderTime(t2 - t0);
                     Vita::setDrawInFlight(false);
                 });
             }
