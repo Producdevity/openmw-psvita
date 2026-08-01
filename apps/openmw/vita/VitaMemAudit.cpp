@@ -29,7 +29,8 @@ extern "C"
     uint32_t phase_snd_us = 0, phase_lsync_us = 0, phase_state_us = 0;
     unsigned int vita_bin2_graphs = 0, vita_bin2_leaves = 0;
     uint32_t gl_draw_us = 0, gl_swap_us = 0, gl_draw_max = 0, gl_swap_max = 0;
-    extern uint32_t osgprof_dyn_leaves, osgprof_dyn_verts;
+    extern uint32_t osgprof_dyn_leaves, osgprof_dyn_verts, osgprof_dyn_us;
+    unsigned int rig_cull_count = 0, rig_cull_verts = 0;
     unsigned int cullprof_creplay = 0, cullprof_crep_drop = 0;
     uint32_t cullprof_terr_us = 0;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
@@ -437,13 +438,15 @@ namespace Vita
             const unsigned gf = (gfNow - s_prevGpuFrames) ? (gfNow - s_prevGpuFrames) : 1;
             s_prevGpuFrames = gfNow;
             snprintf(buf, sizeof(buf),
-                "[GlJob] draw=%.1f/%.1fms swap=%.1f/%.1fms dyn=%u/%uk /frame",
+                "[GlJob] draw=%.1f/%.1fms swap=%.1f/%.1fms rig=%u/%uk/%.1fms /frame",
                 gl_draw_us / 1000.0 / kReportEveryFrames, gl_draw_max / 1000.0,
                 gl_swap_us / 1000.0 / kReportEveryFrames, gl_swap_max / 1000.0,
-                osgprof_dyn_leaves / kReportEveryFrames, osgprof_dyn_verts / kReportEveryFrames / 1000);
+                rig_cull_count / kReportEveryFrames, rig_cull_verts / kReportEveryFrames / 1000,
+                osgprof_dyn_us / 1000.0 / kReportEveryFrames);
             auditLog(buf);
             gl_draw_us = gl_swap_us = gl_draw_max = gl_swap_max = 0;
-            osgprof_dyn_leaves = osgprof_dyn_verts = 0;
+            osgprof_dyn_leaves = osgprof_dyn_verts = osgprof_dyn_us = 0;
+            rig_cull_count = rig_cull_verts = 0;
             snprintf(buf, sizeof(buf), "[Gpu] qd=%.2f/%u blk=%.2f/%.1fms tchunk=%u tleaf=%u /frame",
                 (double)vgl_qdepth_sum / gf, vgl_qdepth_max, (double)vgl_swap_block_us / 1000.0 / gf,
                 vgl_swap_block_max / 1000.0, terr_chunks / kReportEveryFrames, terr_pass_leaves / kReportEveryFrames);
