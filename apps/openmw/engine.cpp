@@ -25,6 +25,7 @@
 #include "vita/VitaInit.h"
 #include "vita/VitaMemAudit.h"
 #include "vita/VitaSimWorker.h"
+#include "vita/VitaGLWorker.h"
 #include <components/vita/VitaDialogueText.h>
 #include <components/vita/VitaEsmPrefetch.h>
 #include <psp2/io/fcntl.h>
@@ -597,10 +598,26 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         mCullPrimed = true;
         if (havePrev)
         {
-            renderer->draw();
-            mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+            if (Vita::GLWorker* glw = Vita::getGLWorker())
+            {
+                osg::GraphicsContext* gc = mViewer->getCamera()->getGraphicsContext();
+                glw->run([renderer, gc] {
+                    const uint64_t t0 = sceKernelGetProcessTimeWide();
+                    renderer->draw();
+                    gc->swapBuffers();
+                    Vita::noteRenderTime(sceKernelGetProcessTimeWide() - t0);
+                    Vita::setDrawInFlight(false);
+                });
+            }
+            else
+            {
+                renderer->draw();
+                mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+                Vita::setDrawInFlight(false);
+            }
         }
-        Vita::setDrawInFlight(false);
+        else
+            Vita::setDrawInFlight(false);
     }
     else if (mSimWorker && mSimOverlap)
     {
@@ -625,7 +642,8 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     }
     else
         mViewer->renderingTraversals();
-    Vita::noteRenderTime(sceKernelGetProcessTimeWide() - renderStartUs);
+    if (!Vita::getGLWorker())
+        Vita::noteRenderTime(sceKernelGetProcessTimeWide() - renderStartUs);
 #else
     mViewer->renderingTraversals();
 #endif
@@ -1419,7 +1437,10 @@ void OMW::Engine::go()
             if (!Vita::isSimThread())
                 mSimWorker->finish();
             auto* renderer = static_cast<osgViewer::Renderer*>(mViewer->getCamera()->getRenderer());
-            renderer->draw();
+            if (Vita::GLWorker* glw = Vita::getGLWorker())
+                glw->call([renderer] { renderer->draw(); });
+            else
+                renderer->draw();
             mCullPrimed = false;
         });
     }
@@ -1735,6 +1756,7 @@ void OMW::Engine::go()
 #ifdef __vita__
     if (mSimWorker)
         mSimWorker->join();
+    Vita::destroyGLWorker();
 #endif
 
     // Save user settings

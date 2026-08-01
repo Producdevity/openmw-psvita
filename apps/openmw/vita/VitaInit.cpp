@@ -1,6 +1,7 @@
 #ifdef __vita__
 
 #include "VitaInit.h"
+#include "VitaGLWorker.h"
 
 #include <cxxabi.h>
 #include <pthread.h>
@@ -1340,6 +1341,23 @@ namespace Vita
 
         initClocks();
 
+        // Settings load later; peek the raw cfg for the GL-thread flag.
+        bool glThread = false;
+        {
+            SceUID fd = sceIoOpen("app0:/settings.cfg", SCE_O_RDONLY, 0);
+            if (fd >= 0)
+            {
+                static char cfg[16384];
+                int n = sceIoRead(fd, cfg, sizeof(cfg) - 1);
+                sceIoClose(fd);
+                if (n > 0)
+                {
+                    cfg[n] = 0;
+                    glThread = strstr(cfg, "vita gl thread = true") != nullptr;
+                }
+            }
+        }
+
         // Initialize vitaGL before SDL_Init so SDL2's video subsystem skips its default init.
         //
         // GXM has FOUR independent buffer sizes that all matter for crash-resistance:
@@ -1354,6 +1372,7 @@ namespace Vita
         // garbage → data abort inside SceGxm (R0 = bad CDRAM ptr like 0x70100254).
         // Observed crash in dense interior cells (Shulk Egg Mine repro). Bumping the
         // vertex/fragment/VDM rings 2× each. Param buffer left at default 16 MB.
+        const auto vitaInitGL = [&] {
         vglSetParamBufferSize(16 * 1024 * 1024);
         vglSetVDMBufferSize(256 * 1024);                  // 128 KB → 256 KB
         vglSetVertexBufferSize(8 * 1024 * 1024);          //  2 MB → 8 MB (4 MB still crashed; bumped further)
@@ -1377,6 +1396,15 @@ namespace Vita
         vglUseLowPrecision(GL_TRUE);
         // SHARK_OPT_UNSAFE: most aggressive ALU rewrites; HAVE_SHADER_CACHE=1 amortises compile.
         vglSetupRuntimeShaderCompiler(SHARK_OPT_UNSAFE, 1, 1, 1);
+        };
+        if (glThread)
+        {
+            Vita::ensureGLWorker();
+            Vita::getGLWorker()->call(vitaInitGL);
+            breadcrumb("BOOT: GL owned by worker thread");
+        }
+        else
+            vitaInitGL();
         {
             char bstamp[96];
             snprintf(bstamp, sizeof(bstamp), "BOOT: build %s %s", __DATE__, __TIME__);

@@ -47,6 +47,7 @@ namespace Settings
         SettingValue<bool> mVitaCullReplay{ mIndex, "General", "vita cull replay", false };
         SettingValue<bool> mVitaStaticVboRam{ mIndex, "General", "vita static vbo ram", false };
         SettingValue<bool> mVitaStaticBin{ mIndex, "General", "vita static bin", false };
+        SettingValue<bool> mVitaGLThread{ mIndex, "General", "vita gl thread", false };
         // Vita: heap MB held back from the watchdog budget. Raise to test eviction.
         SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 40,
             makeClampSanitizerInt(20, 150) };

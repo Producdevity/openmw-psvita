@@ -9,6 +9,7 @@ if(VITA)
         vita/VitaIme.cpp
         vita/VitaMemAudit.cpp
         vita/VitaSimWorker.cpp
+        vita/VitaGLWorker.cpp
     )
 endif()
 
