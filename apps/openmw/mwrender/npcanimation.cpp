@@ -49,6 +49,13 @@
 #include "rotatecontroller.hpp"
 #include "vismask.hpp"
 
+#ifdef __vita__
+#include <osg/LightSource>
+#include <osgParticle/ParticleProcessor>
+#include <osgParticle/ParticleSystem>
+extern "C" void vitaBreadcrumb(const char*);
+#endif
+
 namespace
 {
 
@@ -563,6 +570,92 @@ namespace MWRender
         return mesh;
     }
 
+#ifdef __vita__
+    namespace
+    {
+        // Counts bakeable gear leaves; rejects animated subtrees.
+        struct CompositeCensus : osg::NodeVisitor
+        {
+            std::vector<osg::StateSet*> mStates;
+            bool mViable = true;
+
+            CompositeCensus()
+                : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+            {
+            }
+
+            void apply(osg::Node& node) override
+            {
+                if (!mViable || node.getUpdateCallback() || dynamic_cast<osg::LightSource*>(&node)
+                    || dynamic_cast<osgParticle::ParticleProcessor*>(&node))
+                {
+                    mViable = false;
+                    return;
+                }
+                traverse(node);
+            }
+
+            void apply(osg::Drawable& drawable) override
+            {
+                if (!mViable)
+                    return;
+                osg::Geometry* geom = drawable.asGeometry();
+                if (drawable.getUpdateCallback() || dynamic_cast<osgParticle::ParticleSystem*>(&drawable) || !geom
+                    || strcmp(geom->className(), "Geometry") != 0)
+                {
+                    mViable = false;
+                    return;
+                }
+                osg::StateSet* ss = geom->getStateSet();
+                for (int p = (int)getNodePath().size() - 1; p >= 0 && !ss; --p)
+                    ss = getNodePath()[p]->getStateSet();
+                mStates.push_back(ss);
+            }
+        };
+    }
+
+    void NpcAnimation::logCompositeCensus()
+    {
+        int partsSeen = 0, partsViable = 0, pieceCount = 0;
+        std::vector<osg::StateSet*> groups;
+        for (int type = 0; type < ESM::PRT_Count; ++type)
+        {
+            if (!mObjectParts[type] || type == ESM::PRT_Head || type == ESM::PRT_Hair || type == ESM::PRT_Weapon
+                || type == ESM::PRT_Shield)
+                continue;
+            ++partsSeen;
+            osg::Node* node = mObjectParts[type]->getNode().get();
+            if (!node || node->getNumParents() == 0)
+                continue;
+            osg::MatrixTransform* bone = dynamic_cast<osg::MatrixTransform*>(node->getParent(0));
+            if (!bone || bone->getName().empty() || bone->getName().find("Left") != std::string::npos)
+                continue;
+            CompositeCensus cc;
+            node->accept(cc);
+            if (!cc.mViable || cc.mStates.empty())
+                continue;
+            ++partsViable;
+            for (osg::StateSet* ss : cc.mStates)
+            {
+                ++pieceCount;
+                bool found = false;
+                for (osg::StateSet* g : groups)
+                    if (g == ss || (g && ss && g->compare(*ss, true) == 0))
+                    {
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    groups.push_back(ss);
+            }
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[Composite] parts=%d/%d pieces=%d groups=%d census", partsViable, partsSeen,
+            pieceCount, (int)groups.size());
+        vitaBreadcrumb(buf);
+    }
+#endif
+
     void NpcAnimation::updateParts()
     {
         if (!mObjectRoot.get())
@@ -682,6 +775,9 @@ namespace MWRender
             }
         }
 
+#ifdef __vita__
+        logCompositeCensus();
+#endif
         if (wasArrowAttached)
             attachArrow();
     }
