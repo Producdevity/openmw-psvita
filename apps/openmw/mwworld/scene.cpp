@@ -961,6 +961,34 @@ namespace MWWorld
             }
         };
 
+        // Merge-eligible record types; items are Full-tier only.
+        bool mergeableType(unsigned int t)
+        {
+            switch (t)
+            {
+                case ESM::REC_STAT:
+                case ESM::REC_STAT4:
+                case ESM::REC_ACTI:
+                case ESM::REC_ACTI4:
+                case ESM::REC_CONT:
+                case ESM::REC_CONT4:
+                case ESM::REC_MISC:
+                case ESM::REC_WEAP:
+                case ESM::REC_ARMO:
+                case ESM::REC_CLOT:
+                case ESM::REC_BOOK:
+                case ESM::REC_INGR:
+                case ESM::REC_ALCH:
+                case ESM::REC_APPA:
+                case ESM::REC_LOCK:
+                case ESM::REC_PROB:
+                case ESM::REC_REPA:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         // Content-deduped composed statesets; shared across cells.
         std::vector<osg::ref_ptr<osg::StateSet>> sCanonical;
         std::vector<uint64_t> sCanonicalKeys;
@@ -1146,8 +1174,7 @@ namespace MWWorld
                 if (!ptrHolder)
                     continue;
                 unsigned int t = ptrHolder->mPtr.getType();
-                if (t != ESM::REC_STAT && t != ESM::REC_STAT4 && t != ESM::REC_ACTI && t != ESM::REC_ACTI4
-                    && t != ESM::REC_CONT && t != ESM::REC_CONT4)
+                if (!mergeableType(t))
                     continue;
                 osg::Group* pat = child->asGroup();
                 if (!pat)
@@ -1261,8 +1288,7 @@ namespace MWWorld
                 if (!holder)
                     continue;
                 unsigned int t = holder->mPtr.getType();
-                if (t != ESM::REC_STAT && t != ESM::REC_STAT4 && t != ESM::REC_ACTI && t != ESM::REC_ACTI4
-                    && t != ESM::REC_CONT && t != ESM::REC_CONT4)
+                if (!mergeableType(t))
                     continue;
                 if (!holder->mPtr.getCellRef().getRefNum().isSet())
                     continue;

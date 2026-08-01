@@ -2081,7 +2081,8 @@ namespace MWWorld
                 = (phys.mHit && !phys.mHitObject.isEmpty()) ? (phys.mHitPos - rayStart).length() : -1.f;
 
             const MWRender::RenderingManager::RayResult scene = mRendering->castCameraToViewportRay(
-                0.5f, 0.5f, maxDistance, ignorePlayer, MWRender::Mask_Scene | MWRender::Mask_Object);
+                0.5f, 0.5f, maxDistance, ignorePlayer,
+                MWRender::Mask_Scene | MWRender::Mask_Object | MWRender::Mask_VitaPick);
             float sceneDist = -1.f;
             MWWorld::Ptr sceneObject = scene.mHitObject;
             if (scene.mHit)
