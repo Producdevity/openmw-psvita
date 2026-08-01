@@ -23,6 +23,15 @@
 #include "../mwworld/cellstore.hpp"
 #include "../mwworld/esmstore.hpp"
 
+#ifdef __vita__
+#include <components/esm3/loadcrea.hpp>
+#include <components/esm3/loadregn.hpp>
+#include <components/esm3/loadsndg.hpp>
+#include <cstdio>
+#include <set>
+extern "C" void vitaBreadcrumb(const char*);
+#endif
+
 #include "../mwmechanics/actorutil.hpp"
 
 #include "constants.hpp"
@@ -249,6 +258,75 @@ namespace MWSound
             return nullptr;
         return sound;
     }
+
+#ifdef __vita__
+    void SoundManager::vitaWarmCellSounds(const ESM::RefId& regionId)
+    {
+        // Cold one-shots: SD read + decode at trigger = 100-570ms stalls.
+        int loaded = 0;
+        const auto warm = [&](const ESM::RefId& id) {
+            if (id.empty())
+                return;
+            SoundBuffer* sfx = mSoundBuffers.lookup(id);
+            const bool wasCold = sfx == nullptr || sfx->getHandle() == nullptr;
+            if (mSoundBuffers.load(id) != nullptr && wasCold)
+                ++loaded;
+        };
+
+        static const char* weatherNames[] = { "Clear", "Cloudy", "Foggy", "Overcast", "Rain", "Thunderstorm",
+            "Ashstorm", "Blight", "Snow", "Blizzard" };
+        for (const char* name : weatherNames)
+            warm(ESM::RefId::stringRefId(
+                Fallback::Map::getString(std::string("Weather_") + name + "_Ambient_Loop_Sound_ID")));
+        for (int i = 0; i < 4; ++i)
+            warm(ESM::RefId::stringRefId(
+                Fallback::Map::getString("Weather_Thunderstorm_Thunder_Sound_ID_" + std::to_string(i))));
+
+        if (const ESM::Region* region = MWBase::Environment::get().getESMStore()->get<ESM::Region>().search(regionId))
+            for (const ESM::Region::SoundRef& soundRef : region->mSoundList)
+                warm(soundRef.mSound);
+
+        if (loaded > 0)
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[SoundWarm] loaded %d cold buffer(s)", loaded);
+            vitaBreadcrumb(buf);
+        }
+    }
+
+    void SoundManager::vitaWarmActorSounds(MWWorld::CellStore& cell)
+    {
+        // SNDG records for creatures present here plus the generic set.
+        int loaded = 0;
+        const auto warm = [&](const ESM::RefId& id) {
+            if (id.empty())
+                return;
+            SoundBuffer* sfx = mSoundBuffers.lookup(id);
+            const bool wasCold = sfx == nullptr || sfx->getHandle() == nullptr;
+            if (mSoundBuffers.load(id) != nullptr && wasCold)
+                ++loaded;
+        };
+
+        std::set<ESM::RefId> creatureIds;
+        cell.forEachType<ESM::Creature>([&](const MWWorld::Ptr& ptr) {
+            creatureIds.insert(ptr.get<ESM::Creature>()->mBase->mId);
+            return true;
+        });
+
+        for (const ESM::SoundGenerator& sndGen : MWBase::Environment::get().getESMStore()->get<ESM::SoundGenerator>())
+        {
+            if (sndGen.mCreature.empty() || creatureIds.count(sndGen.mCreature) > 0)
+                warm(sndGen.mSound);
+        }
+
+        if (loaded > 0)
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[SoundWarm] loaded %d creature buffer(s)", loaded);
+            vitaBreadcrumb(buf);
+        }
+    }
+#endif
 
     void SoundManager::stopMusic()
     {

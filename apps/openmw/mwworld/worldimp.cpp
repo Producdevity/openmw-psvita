@@ -1325,6 +1325,7 @@ namespace MWWorld
     MWWorld::Ptr World::moveObject(
         const Ptr& ptr, CellStore* newCell, const osg::Vec3f& position, bool movePhysics, bool keepActive)
     {
+        mWorldScene->vitaOnObjectTransformed(ptr);
         ESM::Position pos = ptr.getRefData().getPosition();
         std::memcpy(pos.pos, &position, sizeof(osg::Vec3f));
         ptr.getRefData().setPosition(pos);
@@ -2062,7 +2063,27 @@ namespace MWWorld
             rayToObject = mRendering->castCameraToViewportRay(x, y, maxDistance, ignorePlayer);
         }
         else
+        {
+#ifdef __vita__
+            // Physics ray: ~0.2ms vs 7-8ms scene intersection every 3rd frame.
+            osg::Vec3f rayStart, rayEnd;
+            mRendering->getCameraRay(0.5f, 0.5f, maxDistance, rayStart, rayEnd);
+            std::vector<MWWorld::ConstPtr> ignore;
+            if (ignorePlayer)
+                ignore.push_back(mPlayer->getPlayer());
+            const MWPhysics::RayCastingResult res = mPhysics->castRay(rayStart, rayEnd, ignore, {},
+                MWPhysics::CollisionType_Default | MWPhysics::CollisionType_VisualOnly);
+            if (res.mHit && !res.mHitObject.isEmpty())
+            {
+                mDistanceToFocusObject = (res.mHitPos - rayStart).length() - camDist;
+                return res.mHitObject;
+            }
+            mDistanceToFocusObject = -1;
+            return MWWorld::Ptr();
+#else
             rayToObject = mRendering->castCameraToViewportRay(0.5f, 0.5f, maxDistance, ignorePlayer);
+#endif
+        }
 
         focusObject = rayToObject.mHitObject;
         if (focusObject.isEmpty() && rayToObject.mHitRefnum.isSet())

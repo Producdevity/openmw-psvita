@@ -31,6 +31,44 @@
 #include <psp2/display.h>
 // Pin API; vitasdk's stock vitaGL.h lacks it.
 extern "C" void vglSetStaticVboRam(unsigned char enable);
+extern "C" uint32_t phase_evt_us, phase_upd_us, phase_focus_us, phase_lua_us, phase_pre_us, phase_pace_us;
+extern "C" uint32_t phase_fin_us, phase_inp_us, phase_unref_us, phase_stats_us;
+extern "C" uint32_t phase_snd_us, phase_lsync_us, phase_state_us;
+extern "C" unsigned int vita_bin2_graphs, vita_bin2_leaves;
+
+namespace
+{
+    // Texture-sorted iteration over the merged-statics bin.
+    struct VitaStaticBinCallback : osgUtil::RenderBin::DrawCallback
+    {
+        static const osg::StateAttribute* texOf(const osgUtil::StateGraph* sg)
+        {
+            const osg::StateSet* ss = sg->getStateSet();
+            return ss ? ss->getTextureAttribute(0, osg::StateAttribute::TEXTURE) : nullptr;
+        }
+
+        void drawImplementation(
+            osgUtil::RenderBin* bin, osg::RenderInfo& renderInfo, osgUtil::RenderLeaf*& previous) override
+        {
+            osgUtil::RenderBin::StateGraphList& graphs = bin->getStateGraphList();
+            unsigned int leaves = 0;
+            for (const osgUtil::StateGraph* sg : graphs)
+                leaves += sg->_leaves.size();
+            vita_bin2_graphs += graphs.size();
+            vita_bin2_leaves += leaves;
+            // Texture-first order: adjacent deltas skip the rebind.
+            std::sort(graphs.begin(), graphs.end(),
+                [](const osgUtil::StateGraph* a, const osgUtil::StateGraph* b) {
+                    const osg::StateAttribute* ta = texOf(a);
+                    const osg::StateAttribute* tb = texOf(b);
+                    if (ta != tb)
+                        return ta < tb;
+                    return a->getStateSet() < b->getStateSet();
+                });
+            bin->drawImplementation(renderInfo, previous);
+        }
+    };
+}
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 // Fork replay switches (fetched-OSG RenderLeaf.cpp).
@@ -311,17 +349,31 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     mEnvironment.setFrameDuration(frametime);
 
+#ifdef __vita__
+    uint64_t vitaFrameT0 = 0;
+#endif
     try
     {
 #ifdef __vita__
+        phase_evt_us = phase_upd_us = phase_focus_us = phase_lua_us = phase_pre_us = 0;
+        phase_fin_us = phase_inp_us = phase_unref_us = phase_stats_us = 0;
+        phase_snd_us = phase_lsync_us = phase_state_us = 0;
+        vitaFrameT0 = sceKernelGetProcessTimeWide();
         // Finish overlapped sim before touching game state.
         if (mSimWorker && mSimOverlap && mSimPrimed)
             mSimWorker->finish();
+        phase_fin_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaFrameT0);
 #endif
         // update input
         {
+#ifdef __vita__
+            const uint64_t inpT0 = sceKernelGetProcessTimeWide();
+#endif
             ScopedProfile<UserStatsType::Input> profile(frameStart, frameNumber, *timer, *stats);
             mInputManager->update(frametime, false);
+#ifdef __vita__
+            phase_inp_us = (uint32_t)(sceKernelGetProcessTimeWide() - inpT0);
+#endif
         }
 
         // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
@@ -339,22 +391,40 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             else
                 mSoundManager->resumePlayback();
 
+#ifdef __vita__
+            const uint64_t sndT0 = sceKernelGetProcessTimeWide();
+#endif
             // sound
             if (mUseSound)
                 mSoundManager->update(frametime);
+#ifdef __vita__
+            phase_snd_us = (uint32_t)(sceKernelGetProcessTimeWide() - sndT0);
+#endif
         }
 
         {
             ScopedProfile<UserStatsType::LuaSyncUpdate> profile(frameStart, frameNumber, *timer, *stats);
+#ifdef __vita__
+            const uint64_t lsT0 = sceKernelGetProcessTimeWide();
+#endif
             // Should be called after input manager update and before any change to the game world.
             // It applies to the game world queued changes from the previous frame.
             mLuaManager->synchronizedUpdate();
+#ifdef __vita__
+            phase_lsync_us = (uint32_t)(sceKernelGetProcessTimeWide() - lsT0);
+#endif
         }
 
         // update game state
         {
             ScopedProfile<UserStatsType::State> profile(frameStart, frameNumber, *timer, *stats);
+#ifdef __vita__
+            const uint64_t stT0 = sceKernelGetProcessTimeWide();
+#endif
             mStateManager->update(frametime);
+#ifdef __vita__
+            phase_state_us = (uint32_t)(sceKernelGetProcessTimeWide() - stT0);
+#endif
         }
 
         bool paused = mWorld->getTimeManager()->isPaused();
@@ -407,8 +477,19 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     if (reportResource)
         stats->setAttribute(frameNumber, "UnrefQueue", static_cast<double>(mUnrefQueue->getSize()));
 
+#ifdef __vita__
+    {
+        const uint64_t unrefT0 = sceKernelGetProcessTimeWide();
+        mUnrefQueue->flush(*mWorkQueue);
+        phase_unref_us = (uint32_t)(sceKernelGetProcessTimeWide() - unrefT0);
+    }
+#else
     mUnrefQueue->flush(*mWorkQueue);
+#endif
 
+#ifdef __vita__
+    const uint64_t statsT0 = sceKernelGetProcessTimeWide();
+#endif
     if (reportResource)
     {
         stats->setAttribute(frameNumber, "FrameNumber", frameNumber);
@@ -424,11 +505,20 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
         stats->setAttribute(frameNumber, "StringRefId Count", static_cast<double>(ESM::StringRefId::totalCount()));
     }
+#ifdef __vita__
+    phase_stats_us = (uint32_t)(sceKernelGetProcessTimeWide() - statsT0);
+#endif
 
     mStereoManager->updateSettings(Settings::camera().mNearClip, Settings::camera().mViewingDistance);
 
+#ifdef __vita__
+    phase_pre_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaFrameT0);
+    uint64_t vitaPhaseT0 = sceKernelGetProcessTimeWide();
+#endif
     mViewer->eventTraversal();
 #ifdef __vita__
+    phase_evt_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
+    vitaPhaseT0 = sceKernelGetProcessTimeWide();
     if (mUpdateOverlap && mSimWorker && mSimOverlap && mCullOverlap && mViewer->getSceneData())
     {
         // Hazard classes update on main; the rest on the worker pre-cull.
@@ -444,6 +534,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     }
     else
         mViewer->updateTraversal();
+    phase_upd_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
 #else
     mViewer->updateTraversal();
 #endif
@@ -458,7 +549,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         if (s_focusAccum >= 0.1f)
         {
             s_focusAccum = 0.f;
+            vitaPhaseT0 = sceKernelGetProcessTimeWide();
             mWorld->updateFocusObject();
+            phase_focus_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
         }
 #else
         mWorld->updateFocusObject();
@@ -466,7 +559,13 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     }
 
     // if there is a separate Lua thread, it starts the update now
+#ifdef __vita__
+    vitaPhaseT0 = sceKernelGetProcessTimeWide();
     mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
+    phase_lua_us += (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
+#else
+    mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
+#endif
 
 #ifdef __vita__
     const uint64_t renderStartUs = sceKernelGetProcessTimeWide();
@@ -531,7 +630,13 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     mViewer->renderingTraversals();
 #endif
 
+#ifdef __vita__
+    vitaPhaseT0 = sceKernelGetProcessTimeWide();
     mLuaWorker->finishUpdate(frameStart, frameNumber, *stats);
+    phase_lua_us += (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
+#else
+    mLuaWorker->finishUpdate(frameStart, frameNumber, *stats);
+#endif
 
 #ifdef __vita__
     Vita::auditFrameStats(*mViewer);
@@ -1293,6 +1398,12 @@ void OMW::Engine::go()
     vita_draw_replay = Settings::general().mVitaDrawReplay ? 1 : 0;
     vita_state_replay = Settings::general().mVitaStateReplay ? 1 : 0;
     vglSetStaticVboRam(Settings::general().mVitaStaticVboRam ? 1 : 0);
+    if (Settings::general().mVitaStaticBin)
+    {
+        osg::ref_ptr<osgUtil::RenderBin> proto = new osgUtil::RenderBin(osgUtil::RenderBin::SORT_BY_STATE);
+        proto->setDrawCallback(new VitaStaticBinCallback);
+        osgUtil::RenderBin::addRenderBinPrototype("VitaStaticBin", proto);
+    }
     if (Settings::general().mVitaSimThread)
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();
@@ -1601,6 +1712,7 @@ void OMW::Engine::go()
             {
                 const unsigned int vblanksPerFrame
                     = std::max(1u, (unsigned int)(60.f / fpsLimit + 0.5f));
+                const uint64_t paceT0 = sceKernelGetProcessTimeWide();
                 const unsigned int vc = sceDisplayGetVcount();
                 if (s_lastVcount == 0 || vc >= s_lastVcount + vblanksPerFrame)
                     s_lastVcount = vc;
@@ -1610,6 +1722,7 @@ void OMW::Engine::go()
                         sceDisplayWaitVblankStart();
                     s_lastVcount += vblanksPerFrame;
                 }
+                phase_pace_us = (uint32_t)(sceKernelGetProcessTimeWide() - paceT0);
             }
         }
         frameRateLimiter.limit(); // dt bookkeeping only

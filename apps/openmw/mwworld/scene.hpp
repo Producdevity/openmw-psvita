@@ -284,6 +284,8 @@ namespace MWWorld
         void updateObjectRotation(const Ptr& ptr, RotationOrder order);
         void updateObjectScale(const Ptr& ptr);
 
+        void vitaOnObjectTransformed(const Ptr& ptr);
+
         bool isCellActive(const CellStore& cell);
 
         void preload(const std::string& mesh, bool useAnim = false);

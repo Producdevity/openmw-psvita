@@ -193,6 +193,9 @@ namespace MWRender
 
         /// Return the object under the mouse cursor / crosshair position, given by nX and nY normalized screen
         /// coordinates, where (0,0) is the top left corner.
+        /// World-space camera ray for the given viewport coords; no traversal.
+        void getCameraRay(float nX, float nY, float maxDistance, osg::Vec3f& outStart, osg::Vec3f& outEnd) const;
+
         RayResult castCameraToViewportRay(
             const float nX, const float nY, float maxDistance, bool ignorePlayer, bool ignoreActors = false);
 

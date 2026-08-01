@@ -534,7 +534,8 @@ namespace MWWorld
     {
         return recType == ESM::REC_STAT || recType == ESM::REC_STAT4
             || recType == ESM::REC_DOOR || recType == ESM::REC_DOOR4
-            || recType == ESM::REC_ACTI || recType == ESM::REC_ACTI4;
+            || recType == ESM::REC_ACTI || recType == ESM::REC_ACTI4
+            || recType == ESM::REC_CONT || recType == ESM::REC_CONT4;
     }
 #endif
 
@@ -543,8 +544,24 @@ namespace MWWorld
         return ptr.getRefData().getBaseNode() == pagedNode.get();
     }
 
+#ifdef __vita__
+    namespace VitaMerge
+    {
+        void onObjectRemoved(const MWWorld::Ptr& ptr);
+    }
+#endif
+
+    void Scene::vitaOnObjectTransformed(const Ptr& ptr)
+    {
+#ifdef __vita__
+        // Scripted moves must un-merge; merged copies never move.
+        VitaMerge::onObjectRemoved(ptr);
+#endif
+    }
+
     void Scene::updateObjectRotation(const Ptr& ptr, RotationOrder order)
     {
+        vitaOnObjectTransformed(ptr);
         const auto rot = makeNodeRotation(ptr, order);
         setNodeRotation(ptr, mRendering, rot);
         mPhysics->updateRotation(ptr, rot);
@@ -552,6 +569,7 @@ namespace MWWorld
 
     void Scene::updateObjectScale(const Ptr& ptr)
     {
+        vitaOnObjectTransformed(ptr);
         float scale = ptr.getCellRef().getScale();
         osg::Vec3f scaleVec(scale, scale, scale);
         ptr.getClass().adjustScale(ptr, scaleVec, true);
@@ -926,13 +944,13 @@ namespace MWWorld
 
         struct BatchKey
         {
-            std::vector<osg::StateSet*> mChain;
+            osg::StateSet* mComposed;
             unsigned int mSig;
             int mBx, mBy, mBz;
             bool operator<(const BatchKey& o) const
             {
-                if (mChain != o.mChain)
-                    return mChain < o.mChain;
+                if (mComposed != o.mComposed)
+                    return mComposed < o.mComposed;
                 if (mSig != o.mSig)
                     return mSig < o.mSig;
                 if (mBx != o.mBx)
@@ -942,6 +960,52 @@ namespace MWWorld
                 return mBz < o.mBz;
             }
         };
+
+        // Content-deduped composed statesets; shared across cells.
+        std::vector<osg::ref_ptr<osg::StateSet>> sCanonical;
+        std::vector<uint64_t> sCanonicalKeys;
+
+        uint64_t canonicalKey(const osg::StateSet* ss)
+        {
+            const void* tex = ss->getTextureAttribute(0, osg::StateAttribute::TEXTURE);
+            const uint64_t counts
+                = (uint64_t)ss->getAttributeList().size() << 48 | (uint64_t)ss->getModeList().size() << 56;
+            return (uint64_t)(uintptr_t)tex ^ counts;
+        }
+
+        osg::StateSet* canonicalize(const std::vector<osg::StateSet*>& chain)
+        {
+            osg::ref_ptr<osg::StateSet> composed = new osg::StateSet;
+            for (osg::StateSet* ss : chain)
+                composed->merge(*ss);
+            const uint64_t key = canonicalKey(composed.get());
+            for (size_t i = 0; i < sCanonical.size(); ++i)
+                if (sCanonicalKeys[i] == key && sCanonical[i]->compare(*composed, true) == 0)
+                    return sCanonical[i].get();
+            // Route merged statics to the dedicated bin (safe defaults only).
+            if (Settings::general().mVitaStaticBin
+                && (!composed->useRenderBinDetails()
+                    || (composed->getBinNumber() <= 1 && composed->getBinName() == "RenderBin")))
+                composed->setRenderBinDetails(2, "VitaStaticBin");
+            sCanonical.push_back(composed);
+            sCanonicalKeys.push_back(key);
+            return composed.get();
+        }
+
+        // Unreferenced canonicals pin textures; drop them with their last batch.
+        void pruneCanonical()
+        {
+            size_t w = 0;
+            for (size_t i = 0; i < sCanonical.size(); ++i)
+                if (sCanonical[i]->referenceCount() > 1)
+                {
+                    sCanonical[w] = sCanonical[i];
+                    sCanonicalKeys[w] = sCanonicalKeys[i];
+                    ++w;
+                }
+            sCanonical.resize(w);
+            sCanonicalKeys.resize(w);
+        }
 
         // Restore originals for a batch and every batch sharing an object.
         void unmergeClosure(CellState& state, size_t firstBatch)
@@ -989,9 +1053,12 @@ namespace MWWorld
             unmergeClosure(cit->second, oit->second.mBatches.front());
         }
 
+        void pruneCanonical();
+
         void onCellUnload(const MWWorld::CellStore* cell)
         {
             sCells.erase(cell);
+            pruneCanonical();
         }
 
         // Re-parents static drawables directly under their object roots,
@@ -1079,7 +1146,8 @@ namespace MWWorld
                 if (!ptrHolder)
                     continue;
                 unsigned int t = ptrHolder->mPtr.getType();
-                if (t != ESM::REC_STAT && t != ESM::REC_STAT4)
+                if (t != ESM::REC_STAT && t != ESM::REC_STAT4 && t != ESM::REC_ACTI && t != ESM::REC_ACTI4
+                    && t != ESM::REC_CONT && t != ESM::REC_CONT4)
                     continue;
                 osg::Group* pat = child->asGroup();
                 if (!pat)
@@ -1193,7 +1261,8 @@ namespace MWWorld
                 if (!holder)
                     continue;
                 unsigned int t = holder->mPtr.getType();
-                if (t != ESM::REC_STAT && t != ESM::REC_STAT4)
+                if (t != ESM::REC_STAT && t != ESM::REC_STAT4 && t != ESM::REC_ACTI && t != ESM::REC_ACTI4
+                    && t != ESM::REC_CONT && t != ESM::REC_CONT4)
                     continue;
                 if (!holder->mPtr.getCellRef().getRefNum().isSet())
                     continue;
@@ -1216,12 +1285,16 @@ namespace MWWorld
             }
 
             std::map<BatchKey, std::vector<size_t>> groups;
+            std::map<std::vector<osg::StateSet*>, osg::StateSet*> chainCanon;
             for (size_t i = 0; i < items.size(); ++i)
             {
                 const auto& item = items[i].mItem;
                 const osg::Vec3f c = item.mGeom->getBoundingBox().center() * item.mWorld;
+                auto cit = chainCanon.find(item.mChain);
+                if (cit == chainCanon.end())
+                    cit = chainCanon.emplace(item.mChain, canonicalize(item.mChain)).first;
                 // 1024 buckets: draw CPU, not vertex load, is the bound.
-                BatchKey key{ item.mChain, item.mSig, (int)std::floor(c.x() / 1024.f),
+                BatchKey key{ cit->second, item.mSig, (int)std::floor(c.x() / 1024.f),
                     (int)std::floor(c.y() / 1024.f), (int)std::floor(c.z() / 1024.f) };
                 groups[key].push_back(i);
             }
@@ -1249,8 +1322,6 @@ namespace MWWorld
             const bool useVbo = Settings::general().mVitaStaticGeometryVbo;
             int mergedItems = 0;
             size_t mergedVerts = 0;
-            // One composed stateset per chain, shared across buckets/batches.
-            std::map<std::vector<osg::StateSet*>, osg::ref_ptr<osg::StateSet>> composedCache;
 
             for (const auto& [key, members] : groups)
             {
@@ -1261,14 +1332,8 @@ namespace MWWorld
                 if (live.empty())
                     continue;
 
-                // Composed state: outer to inner, child entries win.
-                osg::ref_ptr<osg::StateSet>& composed = composedCache[key.mChain];
-                if (!composed)
-                {
-                    composed = new osg::StateSet;
-                    for (osg::StateSet* ss : key.mChain)
-                        composed->merge(*ss);
-                }
+                // Canonical composed state: content-deduped across cells.
+                osg::StateSet* composed = key.mComposed;
 
                 size_t cursor = 0;
                 while (cursor < live.size())
@@ -1391,7 +1456,7 @@ namespace MWWorld
                 ObjInfo& info = state.mObjects[objs[o].mRef];
                 info.mNode = objs[o].mNode;
                 info.mOldMask = objs[o].mNode->getNodeMask();
-                objs[o].mNode->setNodeMask(0);
+                objs[o].mNode->setNodeMask(MWRender::Mask_VitaPick);
                 ++hidden;
             }
 
@@ -1401,9 +1466,9 @@ namespace MWWorld
                 const std::string desc(cell.getCell()->getDescription());
                 char buf[192];
                 snprintf(buf, sizeof(buf),
-                    "[CellMerge] %s objs=%d/%d items=%d batches=%d verts=%uk",
+                    "[CellMerge] %s objs=%d/%d items=%d batches=%d verts=%uk canon=%d",
                     desc.c_str(), hidden, (int)objs.size(), mergedItems,
-                    (int)state.mBatches.size(), (unsigned)(mergedVerts / 1000));
+                    (int)state.mBatches.size(), (unsigned)(mergedVerts / 1000), (int)sCanonical.size());
                 Vita::breadcrumb(buf);
             }
         }
@@ -1615,6 +1680,9 @@ namespace MWWorld
                 if (node->getNumParents() > 0)
                     node->setUserDataContainer(udc);
             }
+
+            MWBase::Environment::get().getSoundManager()->vitaWarmCellSounds(cell.getCell()->getRegion());
+            MWBase::Environment::get().getSoundManager()->vitaWarmActorSounds(cell);
 
             if (Settings::general().mVitaCellFlatten)
                 VitaMerge::flattenCell(cell, cellRoot);
@@ -3419,6 +3487,8 @@ namespace MWWorld
         mRendering.flushUnrefQueueImmediate();
         mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());
         Vita::logMemoryStatus("Post-interior-load");
+        MWBase::Environment::get().getSoundManager()->vitaWarmCellSounds(cell.getCell()->getRegion());
+        MWBase::Environment::get().getSoundManager()->vitaWarmActorSounds(cell);
 #endif
 
         navigatorUpdateGuard.reset();

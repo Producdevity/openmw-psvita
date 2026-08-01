@@ -7,6 +7,10 @@
 
 #include "compositemaprenderer.hpp"
 
+#ifdef __vita__
+extern "C" unsigned int terr_chunks, terr_pass_leaves;
+#endif
+
 namespace Terrain
 {
 
@@ -102,11 +106,17 @@ namespace Terrain
         if (stateset)
             cv->pushStateSet(stateset);
 
+#ifdef __vita__
+        ++terr_chunks;
+#endif
         for (PassVector::const_iterator it = mPasses.begin(); it != mPasses.end(); ++it)
         {
             cv->pushStateSet(*it);
             cv->addDrawableAndDepth(this, &matrix, depth);
             cv->popStateSet();
+#ifdef __vita__
+            ++terr_pass_leaves;
+#endif
         }
 
         if (stateset)

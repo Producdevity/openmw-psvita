@@ -21,6 +21,13 @@ extern "C"
     extern unsigned int cullprof_node, cullprof_group, cullprof_transform, cullprof_geode, cullprof_drawable,
         cullprof_dcull, cullprof_leaves, cullprof_sg, cullprof_xf_bone;
     extern uint32_t vgl_memo_hits, vgl_memo_miss;
+    extern uint32_t vgl_swap_block_us, vgl_swap_block_max, vgl_qdepth_sum, vgl_qdepth_max, vgl_gpu_frames;
+    unsigned int terr_chunks = 0, terr_pass_leaves = 0;
+    uint32_t phase_evt_us = 0, phase_upd_us = 0, phase_focus_us = 0, phase_lua_us = 0;
+    uint32_t phase_pre_us = 0, phase_pace_us = 0;
+    uint32_t phase_fin_us = 0, phase_inp_us = 0, phase_unref_us = 0, phase_stats_us = 0;
+    uint32_t phase_snd_us = 0, phase_lsync_us = 0, phase_state_us = 0;
+    unsigned int vita_bin2_graphs = 0, vita_bin2_leaves = 0;
     unsigned int cullprof_creplay = 0, cullprof_crep_drop = 0;
     uint32_t cullprof_terr_us = 0;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
@@ -53,6 +60,8 @@ extern "C"
 
 namespace
 {
+    unsigned long long gLastRenderUs = 0;
+
     void auditLog(const char* buf)
     {
         sceClibPrintf("%s\n", buf);
@@ -319,6 +328,57 @@ namespace Vita
         if (!s_enabled)
             return;
 
+        static uint64_t s_prevFrameUs = 0;
+        static unsigned long long s_prevWaitUs = 0;
+        static double s_worstMs = 0, s_worstRender = 0, s_worstDraw = 0, s_worstCull = 0, s_worstWait = 0;
+        static double s_worstEvt = 0, s_worstUpd = 0, s_worstFocus = 0, s_worstLua = 0;
+        static double s_worstPre = 0, s_worstPace = 0;
+        static double s_worstFin = 0, s_worstInp = 0, s_worstUnref = 0, s_worstStats = 0;
+        static double s_worstSnd = 0, s_worstLsync = 0, s_worstState = 0;
+        static uint64_t s_sumEvt = 0, s_sumUpd = 0, s_sumFoc = 0, s_sumLua = 0, s_sumPre = 0, s_sumPace = 0,
+            s_sumRnd = 0;
+        static unsigned s_over40 = 0;
+        {
+            const uint64_t nowF = sceKernelGetProcessTimeWide();
+            if (s_prevFrameUs)
+            {
+                const double dtMs = (nowF - s_prevFrameUs) / 1000.0;
+                const double waitMs = (Vita::gWorkerWaitUs - s_prevWaitUs) / 1000.0;
+                if (dtMs > 40.0)
+                    ++s_over40;
+                if (dtMs > s_worstMs)
+                {
+                    s_worstMs = dtMs;
+                    s_worstRender = gLastRenderUs / 1000.0;
+                    s_worstDraw = msOf(camStats, "Draw traversal time taken");
+                    s_worstCull = msOf(camStats, "Cull traversal time taken");
+                    s_worstWait = waitMs;
+                    s_worstEvt = phase_evt_us / 1000.0;
+                    s_worstUpd = phase_upd_us / 1000.0;
+                    s_worstFocus = phase_focus_us / 1000.0;
+                    s_worstLua = phase_lua_us / 1000.0;
+                    s_worstPre = phase_pre_us / 1000.0;
+                    s_worstPace = phase_pace_us / 1000.0;
+                    s_worstFin = phase_fin_us / 1000.0;
+                    s_worstInp = phase_inp_us / 1000.0;
+                    s_worstUnref = phase_unref_us / 1000.0;
+                    s_worstStats = phase_stats_us / 1000.0;
+                    s_worstSnd = phase_snd_us / 1000.0;
+                    s_worstLsync = phase_lsync_us / 1000.0;
+                    s_worstState = phase_state_us / 1000.0;
+                }
+            }
+            s_prevFrameUs = nowF;
+            s_prevWaitUs = Vita::gWorkerWaitUs;
+            s_sumEvt += phase_evt_us;
+            s_sumUpd += phase_upd_us;
+            s_sumFoc += phase_focus_us;
+            s_sumLua += phase_lua_us;
+            s_sumPre += phase_pre_us;
+            s_sumPace += phase_pace_us;
+            s_sumRnd += (uint32_t)gLastRenderUs;
+        }
+
         if (++s_frames < kReportEveryFrames)
             return;
         const uint64_t nowUs = sceKernelGetProcessTimeWide();
@@ -349,18 +409,52 @@ namespace Vita
         auditLog(buf);
         Vita::gWorkerWaitUs = 0;
         snprintf(buf, sizeof(buf),
+            "[Worst] dt=%.0fms rnd=%.1f wt=%.1f evt=%.1f upd=%.1f foc=%.1f lua=%.1f pre=%.1f "
+            "(inp=%.1f snd=%.1f lsync=%.1f state=%.1f) pace=%.1f n40=%u",
+            s_worstMs, s_worstRender, s_worstWait, s_worstEvt, s_worstUpd, s_worstFocus,
+            s_worstLua, s_worstPre, s_worstInp, s_worstSnd, s_worstLsync, s_worstState, s_worstPace, s_over40);
+        auditLog(buf);
+        s_worstMs = s_worstRender = s_worstDraw = s_worstCull = s_worstWait = 0;
+        s_worstEvt = s_worstUpd = s_worstFocus = s_worstLua = 0;
+        s_worstPre = s_worstPace = 0;
+        s_worstFin = s_worstInp = s_worstUnref = s_worstStats = 0;
+        s_worstSnd = s_worstLsync = s_worstState = 0;
+        {
+            const double n = kReportEveryFrames * 1000.0;
+            snprintf(buf, sizeof(buf), "[PhaseAvg] rnd=%.1f evt=%.1f upd=%.1f foc=%.1f lua=%.1f pre=%.1f pace=%.1f",
+                s_sumRnd / n, s_sumEvt / n, s_sumUpd / n, s_sumFoc / n, s_sumLua / n, s_sumPre / n, s_sumPace / n);
+            auditLog(buf);
+            s_sumEvt = s_sumUpd = s_sumFoc = s_sumLua = s_sumPre = s_sumPace = s_sumRnd = 0;
+        }
+        s_over40 = 0;
+        s_prevWaitUs = 0;
+        {
+            static uint32_t s_prevGpuFrames = 0;
+            const uint32_t gfNow = vgl_gpu_frames;
+            const unsigned gf = (gfNow - s_prevGpuFrames) ? (gfNow - s_prevGpuFrames) : 1;
+            s_prevGpuFrames = gfNow;
+            snprintf(buf, sizeof(buf), "[Gpu] qd=%.2f/%u blk=%.2f/%.1fms tchunk=%u tleaf=%u /frame",
+                (double)vgl_qdepth_sum / gf, vgl_qdepth_max, (double)vgl_swap_block_us / 1000.0 / gf,
+                vgl_swap_block_max / 1000.0, terr_chunks / kReportEveryFrames, terr_pass_leaves / kReportEveryFrames);
+            auditLog(buf);
+            vgl_swap_block_us = vgl_swap_block_max = vgl_qdepth_sum = vgl_qdepth_max = 0;
+            terr_chunks = terr_pass_leaves = 0;
+        }
+        snprintf(buf, sizeof(buf),
             "[Scene] drawables=%.0f fast=%.0f lights=%.0f bins=%.0f tris=%.0f strips=%.0f lightCb=%u/%.2fms "
-            "glmemo=%u/%u",
+            "glmemo=%u/%u bin2=%u/%u",
             countOf(camStats, "Visible number of drawables"), countOf(camStats, "Visible number of fast drawables"),
             countOf(camStats, "Visible number of lights"), countOf(camStats, "Visible number of render bins"),
             countOf(camStats, "Visible number of GL_TRIANGLES"),
             countOf(camStats, "Visible number of GL_TRIANGLE_STRIP"),
             SceneUtil::gLightCbCalls / kReportEveryFrames,
             SceneUtil::gLightCbUs / 1000.0 / kReportEveryFrames,
-            vgl_memo_hits / kReportEveryFrames, vgl_memo_miss / kReportEveryFrames);
+            vgl_memo_hits / kReportEveryFrames, vgl_memo_miss / kReportEveryFrames,
+            vita_bin2_graphs / kReportEveryFrames, vita_bin2_leaves / kReportEveryFrames);
         SceneUtil::gLightCbCalls = 0;
         SceneUtil::gLightCbUs = 0;
         vgl_memo_hits = vgl_memo_miss = 0;
+        vita_bin2_graphs = vita_bin2_leaves = 0;
         auditLog(buf);
 
         // Per-leaf OSG draw-dispatch cost (probes in RenderLeaf.cpp).
@@ -411,6 +505,7 @@ namespace Vita
     {
         s_renderUsAccum += us;
         ++s_renderSamples;
+        gLastRenderUs = us;
     }
 }
 

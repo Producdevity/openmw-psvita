@@ -610,7 +610,7 @@ namespace MWRender
         mViewer->getCamera()->setCullingMode(cullingMode);
         mViewer->getCamera()->setName(Constants::SceneCamera);
 
-        auto mask = ~(Mask_UpdateVisitor | Mask_SimpleWater);
+        auto mask = ~(Mask_UpdateVisitor | Mask_SimpleWater | Mask_VitaPick);
         MWBase::Environment::get().getWindowManager()->setCullMask(mask);
         NifOsg::Loader::setHiddenNodeMask(Mask_UpdateVisitor);
         NifOsg::Loader::setIntersectionDisabledNodeMask(Mask_Effect);
@@ -1342,6 +1342,19 @@ namespace MWRender
         mViewer->getCamera()->accept(*getIntersectionVisitor(intersector, ignorePlayer, ignoreActors));
 
         return getIntersectionResult(intersector, mIntersectionVisitor);
+    }
+
+    void RenderingManager::getCameraRay(
+        float nX, float nY, float maxDistance, osg::Vec3f& outStart, osg::Vec3f& outEnd) const
+    {
+        const osg::Camera* cam = mViewer->getCamera();
+        const osg::Matrix invVP = osg::Matrix::inverse(cam->getViewMatrix() * cam->getProjectionMatrix());
+        const osg::Vec3f ndcNear(nX * 2.f - 1.f, nY * (-2.f) + 1.f, -1.f);
+        const osg::Vec3f ndcFar(nX * 2.f - 1.f, nY * (-2.f) + 1.f, 1.f);
+        outStart = ndcNear * invVP;
+        osg::Vec3f dir = (ndcFar * invVP) - outStart;
+        dir.normalize();
+        outEnd = outStart + dir * maxDistance;
     }
 
     void RenderingManager::updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& updated)
