@@ -44,6 +44,8 @@ namespace Settings
         SettingValue<bool> mVitaUpdateOverlap{ mIndex, "General", "vita update overlap", false };
         SettingValue<bool> mVitaDrawReplay{ mIndex, "General", "vita draw replay", false };
         SettingValue<bool> mVitaStateReplay{ mIndex, "General", "vita state replay", false };
+        SettingValue<bool> mVitaCullReplay{ mIndex, "General", "vita cull replay", false };
+        SettingValue<bool> mVitaStaticVboRam{ mIndex, "General", "vita static vbo ram", false };
         // Vita: heap MB held back from the watchdog budget. Raise to test eviction.
         SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 40,
             makeClampSanitizerInt(20, 150) };

@@ -12,6 +12,9 @@ namespace Vita
     /// True when called from the SimWorker thread.
     bool isSimThread();
 
+    /// Main-thread µs spent blocked in finish(); audit prints and resets.
+    extern unsigned long long gWorkerWaitUs;
+
     /// Main thread marks draw in flight around the overlapped draw.
     void setDrawInFlight(bool inFlight);
 

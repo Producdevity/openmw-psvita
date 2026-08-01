@@ -53,7 +53,8 @@ extern "C" {
 // dynamic texture tier-down (imagemanager.cpp), so 312 today gives
 // meaningfully more usable working set than 312 originally did.
 // 288: 312 starved thread stacks (video EAGAIN).
-unsigned int _newlib_heap_size_user = 288 * 1024 * 1024;
+// 268: funds vgl RAM pool 16->36 for static VBOs.
+unsigned int _newlib_heap_size_user = 268 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 
 // Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.
@@ -1366,7 +1367,7 @@ namespace Vita
         // proven-good 640x368 and cap the Render Resolution combo on
         // the Vita Settings tab at 640x368 (no 720/768 presets).
         vglInitWithCustomSizes(0x100000, 640, 368,
-            16 * 1024 * 1024,
+            36 * 1024 * 1024,
             88 * 1024 * 1024,
             0,
             0,

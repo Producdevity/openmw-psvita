@@ -29,6 +29,8 @@
 #include <components/vita/VitaEsmPrefetch.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/display.h>
+// Pin API; vitasdk's stock vitaGL.h lacks it.
+extern "C" void vglSetStaticVboRam(unsigned char enable);
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 // Fork replay switches (fetched-OSG RenderLeaf.cpp).
@@ -1290,6 +1292,7 @@ void OMW::Engine::go()
     mUpdateOverlap = Settings::general().mVitaUpdateOverlap;
     vita_draw_replay = Settings::general().mVitaDrawReplay ? 1 : 0;
     vita_state_replay = Settings::general().mVitaStateReplay ? 1 : 0;
+    vglSetStaticVboRam(Settings::general().mVitaStaticVboRam ? 1 : 0);
     if (Settings::general().mVitaSimThread)
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();

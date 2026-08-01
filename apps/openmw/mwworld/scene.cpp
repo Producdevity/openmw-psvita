@@ -16,6 +16,7 @@
 #include <osg/MatrixTransform>
 #include <osg/Sequence>
 #include <osg/Switch>
+#include <osgUtil/CullVisitor>
 #include <set>
 #include "../vita/VitaInit.h"
 #include "../vita/VitaSimWorker.h"
@@ -27,6 +28,7 @@
 #include <components/vita/VitaShader.h>
 #include <components/vita/CellCullCallback.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
+extern "C" unsigned int cullprof_creplay, cullprof_crep_drop;
 
 // Count drawables and total triangles in a scene graph subtree.
 static void countDrawables(const osg::Node* node, unsigned int& drawableCount, unsigned int& triCount)
@@ -698,6 +700,10 @@ namespace MWWorld
             osg::ref_ptr<osg::Node> mMerged;
             std::vector<uint64_t> mRefs;
             bool mActive = true;
+            osg::ref_ptr<osg::Geometry> mGeom;
+            osg::ref_ptr<osg::StateSet> mComposed;
+            osg::ref_ptr<SceneUtil::LightListCallback> mLightCb;
+            osg::BoundingBox mBb;
         };
         struct ObjInfo
         {
@@ -705,13 +711,73 @@ namespace MWWorld
             unsigned int mOldMask = 0;
             std::vector<size_t> mBatches;
         };
+        // Emits the merge-built batch list directly, skipping traversal.
+        // Light lists stay live via pushLightState per batch.
+        struct CullReplayCallback : osg::NodeCallback
+        {
+            struct Entry
+            {
+                osg::Geometry* mGeom;
+                osg::StateSet* mComposed;
+                osg::Node* mHolder;
+                SceneUtil::LightListCallback* mLightCb;
+                osg::BoundingBox mBb;
+            };
+            std::vector<Entry> mEntries;
+            bool mValid = false;
+
+            void operator()(osg::Node* node, osg::NodeVisitor* nv) override
+            {
+                if (!mValid || nv->getVisitorType() != osg::NodeVisitor::CULL_VISITOR)
+                {
+                    traverse(node, nv);
+                    return;
+                }
+                auto* cv = static_cast<osgUtil::CullVisitor*>(nv);
+                osg::RefMatrix* mv = cv->getModelViewMatrix();
+                const osg::Matrix& m = *mv;
+                for (const Entry& e : mEntries)
+                {
+                    if (cv->isCulled(e.mBb))
+                    {
+                        ++cullprof_crep_drop;
+                        continue;
+                    }
+                    const bool lit = e.mLightCb && e.mLightCb->pushLightState(e.mHolder, cv);
+                    cv->pushStateSet(e.mComposed);
+                    const osg::Vec3f c = e.mBb.center();
+                    const float depth = -(c.x() * m(0, 2) + c.y() * m(1, 2) + c.z() * m(2, 2) + m(3, 2));
+                    cv->addDrawableAndDepth(e.mGeom, mv, depth);
+                    cv->popStateSet();
+                    if (lit)
+                        cv->popStateSet();
+                    ++cullprof_creplay;
+                }
+            }
+        };
+
         struct CellState
         {
             osg::ref_ptr<osg::Group> mGroup;
+            osg::ref_ptr<CullReplayCallback> mCullReplay;
             std::vector<Batch> mBatches;
             std::map<uint64_t, ObjInfo> mObjects;
         };
         std::map<const MWWorld::CellStore*, CellState> sCells;
+
+        // (Re)build the replay list from live batches.
+        void rebuildReplayList(CellState& state)
+        {
+            if (!state.mCullReplay)
+                return;
+            state.mCullReplay->mValid = false;
+            state.mCullReplay->mEntries.clear();
+            for (const Batch& b : state.mBatches)
+                if (b.mActive && b.mGeom)
+                    state.mCullReplay->mEntries.push_back(
+                        { b.mGeom.get(), b.mComposed.get(), b.mMerged.get(), b.mLightCb.get(), b.mBb });
+            state.mCullReplay->mValid = true;
+        }
 
         uint64_t refKey(const ESM::RefNum& rn)
         {
@@ -894,6 +960,8 @@ namespace MWWorld
                 batch.mActive = false;
                 if (state.mGroup && batch.mMerged)
                     state.mGroup->removeChild(batch.mMerged);
+                if (state.mCullReplay)
+                    state.mCullReplay->mValid = false;
                 for (uint64_t ref : batch.mRefs)
                 {
                     auto it = state.mObjects.find(ref);
@@ -905,6 +973,7 @@ namespace MWWorld
                         work.push_back(other);
                 }
             }
+            rebuildReplayList(state);
         }
 
         void onObjectRemoved(const MWWorld::Ptr& ptr)
@@ -1170,6 +1239,11 @@ namespace MWWorld
             state.mGroup->setName("VitaMergedStatics");
             state.mGroup->setNodeMask(MWRender::Mask_Static);
             state.mGroup->setDataVariance(osg::Object::STATIC);
+            if (Settings::general().mVitaCullReplay)
+            {
+                state.mCullReplay = new CullReplayCallback;
+                state.mGroup->setCullCallback(state.mCullReplay);
+            }
             cellRoot->addChild(state.mGroup);
 
             const bool useVbo = Settings::general().mVitaStaticGeometryVbo;
@@ -1284,13 +1358,18 @@ namespace MWWorld
                     merged->setUseVertexBufferObjects(useVbo);
                     // Own light list per batch: point lights keep working.
                     osg::ref_ptr<osg::Group> holder = new osg::Group;
-                    holder->addCullCallback(new SceneUtil::LightListCallback);
+                    osg::ref_ptr<SceneUtil::LightListCallback> lightCb = new SceneUtil::LightListCallback;
+                    holder->addCullCallback(lightCb);
                     holder->addChild(merged);
                     state.mGroup->addChild(holder);
 
                     size_t batchIdx = state.mBatches.size();
                     Batch batch;
                     batch.mMerged = holder;
+                    batch.mGeom = merged;
+                    batch.mComposed = composed;
+                    batch.mLightCb = lightCb;
+                    batch.mBb = merged->getBoundingBox();
                     for (size_t i : batchItems)
                     {
                         const size_t objIdx = items[i].mObj;
@@ -1315,6 +1394,8 @@ namespace MWWorld
                 objs[o].mNode->setNodeMask(0);
                 ++hidden;
             }
+
+            rebuildReplayList(state);
 
             {
                 const std::string desc(cell.getCell()->getDescription());
