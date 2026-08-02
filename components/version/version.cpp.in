@@ -32,6 +32,11 @@ namespace Version
 
     std::string getOpenmwVersionDescription()
     {
+#ifdef __vita__
+        std::string str = "OpenMW Vita 2.1 (engine ";
+        str += getVersion();
+        str += ")";
+#else
         std::string str = "OpenMW version ";
         str += getVersion();
         if (!getCommitHash().empty())
@@ -39,6 +44,7 @@ namespace Version
             str += "\nRevision: ";
             str += getCommitHash().substr(0, 10);
         }
+#endif
         return str;
     }
 

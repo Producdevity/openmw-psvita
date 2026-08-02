@@ -5,13 +5,10 @@
 		<image>bg.png</image> 
 	</livearea-background>
 
-	<gate>
-		<startup-image>startup.png</startup-image>
-	</gate>
-
-	<frame id='frame1' multi='o' autoflip='1'>
-		<liveitem>
-			<image y="160" x="-180" width="430" height="243">startup.png</image>
+	<frame id='frame1' multi='o' autoflip='1' >  
+		<liveitem> 
+			<target>psla:eboot</target>
+			<image y="160" x="-180" width="430" height="243">startup.png</image>  
 		</liveitem>
 	</frame>
 

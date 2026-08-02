@@ -1550,8 +1550,7 @@ namespace Vita
 
         // --- Map: resolution / widget size not forced (defaults in cfg).
 
-        // --- GUI: only Vita-required bits. Font size is user-tunable via the
-        //     in-game Settings menu (slider 12-32) — bundled cfg has 16 default.
+        // --- GUI: only Vita-required bits. Font size user-tunable (12-32).
         Settings::gui().mScalingFactor.set(0.8f);
         Settings::gui().mControllerMenus.set(true);
 
