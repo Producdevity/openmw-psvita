@@ -39,6 +39,7 @@ namespace Vita
 
     // Returns true if heap usage exceeds the given MB threshold
     bool isMemoryPressure(int thresholdMB);
+    int getHeapFreeMB();
 
     // Replenish emergency reserve after OOM recovery.
     void replenishEmergencyReserve();

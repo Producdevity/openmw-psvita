@@ -48,6 +48,7 @@ namespace Settings
         SettingValue<bool> mVitaStaticVboRam{ mIndex, "General", "vita static vbo ram", false };
         SettingValue<bool> mVitaStaticBin{ mIndex, "General", "vita static bin", false };
         SettingValue<bool> mVitaGLThread{ mIndex, "General", "vita gl thread", false };
+        SettingValue<bool> mVitaSeamlessCrossing{ mIndex, "General", "vita seamless crossing", true };
         // Vita: heap MB held back from the watchdog budget. Raise to test eviction.
         SettingValue<int> mVitaMemoryReserveMb{ mIndex, "General", "vita memory reserve mb", 40,
             makeClampSanitizerInt(20, 150) };

@@ -795,8 +795,19 @@
             </Widget>
             <Widget type="TabItem">
                 <Property key="Caption" value=" Vita "/>
+                <!-- Streamed cell crossings -->
+                <Widget type="Widget" position="4 4 352 24" align="Left Top HStretch">
+                    <Widget type="AutoSizedButton" skin="MW_Button" position="0 0 50 22" align="Left Top" name="VitaSeamlessButton">
+                        <UserString key="SettingCategory" value="General"/>
+                        <UserString key="SettingName" value="vita seamless crossing"/>
+                        <UserString key="SettingType" value="CheckButton"/>
+                    </Widget>
+                    <Widget type="TextBox" skin="NormalText" position="56 2 296 20" align="Left Top">
+                        <Property key="Caption" value="Streamed Cell Crossings"/>
+                    </Widget>
+                </Widget>
                 <!-- View Distance -->
-                <Widget type="Widget" position="4 4 352 36" align="Left Top HStretch" name="VitaViewDistRow">
+                <Widget type="Widget" position="4 32 352 36" align="Left Top HStretch" name="VitaViewDistRow">
                     <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top" name="VitaViewDistText">
                         <Property key="Caption" value="View Distance"/>
                     </Widget>
@@ -814,7 +825,7 @@
                     </Widget>
                 </Widget>
                 <!-- Field of View -->
-                <Widget type="Widget" position="4 44 352 36" align="Left Top HStretch">
+                <Widget type="Widget" position="4 72 352 36" align="Left Top HStretch">
                     <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top" name="VitaFovText">
                         <Property key="Caption" value="Field of View"/>
                     </Widget>
@@ -832,7 +843,7 @@
                     </Widget>
                 </Widget>
                 <!-- Font Size -->
-                <Widget type="Widget" position="4 84 352 36" align="Left Top HStretch">
+                <Widget type="Widget" position="4 112 352 36" align="Left Top HStretch">
                     <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top" name="VitaFontText">
                         <Property key="Caption" value="Font Size"/>
                     </Widget>
@@ -850,7 +861,7 @@
                     </Widget>
                 </Widget>
                 <!-- Render Resolution (restart) -->
-                <Widget type="Widget" position="4 124 352 46" align="Left Top HStretch" name="VitaResolutionRow">
+                <Widget type="Widget" position="4 152 352 46" align="Left Top HStretch" name="VitaResolutionRow">
                     <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top">
                         <Property key="Caption" value="Render Resolution (restart)"/>
                     </Widget>
@@ -861,7 +872,7 @@
                     </Widget>
                 </Widget>
                 <!-- Texture Detail (restart) -->
-                <Widget type="Widget" position="4 174 352 46" align="Left Top HStretch" name="VitaTextureDetailRow">
+                <Widget type="Widget" position="4 202 352 46" align="Left Top HStretch" name="VitaTextureDetailRow">
                     <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top">
                         <Property key="Caption" value="Texture Detail (restart)"/>
                     </Widget>
@@ -873,7 +884,7 @@
                     </Widget>
                 </Widget>
                 <!-- Hint: texture filtering lives on the Video tab to avoid duplicate UI. -->
-                <Widget type="TextBox" skin="SandText" position="4 224 352 20" align="Left Top HStretch">
+                <Widget type="TextBox" skin="SandText" position="4 252 352 20" align="Left Top HStretch">
                     <Property key="Caption" value="Texture filtering: see the Video tab."/>
                 </Widget>
             </Widget>

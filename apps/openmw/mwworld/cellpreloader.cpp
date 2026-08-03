@@ -314,8 +314,47 @@ namespace MWWorld
         ++mAdded;
     }
 
+#ifdef __vita__
+    void CellPreloader::vitaPreloadPinned(CellStore& cell, double timestamp)
+    {
+        if (!mWorkQueue || cell.getState() == CellStore::State_Unloaded)
+            return;
+        auto found = mVitaPinnedPreloads.find(&cell);
+        if (found != mVitaPinnedPreloads.end())
+        {
+            found->second.mTimeStamp = timestamp;
+            return;
+        }
+        osg::ref_ptr<PreloadItem> item(new PreloadItem(&cell, mResourceSystem->getSceneManager(), mBulletShapeManager,
+            mResourceSystem->getKeyframeManager(), mTerrain, mLandManager, /*instances*/ false));
+        mWorkQueue->addWorkItem(item);
+        mVitaPinnedPreloads.emplace(&cell, PreloadEntry(timestamp, item));
+    }
+
+    void CellPreloader::vitaReleasePinned(const CellStore* cell)
+    {
+        auto it = mVitaPinnedPreloads.find(cell);
+        if (it == mVitaPinnedPreloads.end())
+            return;
+        if (it->second.mWorkItem)
+            it->second.mWorkItem->abort();
+        mVitaPinnedPreloads.erase(it);
+    }
+
+    void CellPreloader::vitaReleaseAllPinned()
+    {
+        for (auto& [cell, entry] : mVitaPinnedPreloads)
+            if (entry.mWorkItem)
+                entry.mWorkItem->abort();
+        mVitaPinnedPreloads.clear();
+    }
+#endif
+
     void CellPreloader::notifyLoaded(CellStore* cell)
     {
+#ifdef __vita__
+        vitaReleasePinned(cell);
+#endif
         PreloadMap::iterator found = mPreloadCells.find(cell);
         if (found != mPreloadCells.end())
         {
@@ -332,6 +371,23 @@ namespace MWWorld
 
     void CellPreloader::clear()
     {
+#ifdef __vita__
+        // Abort AND WAIT: items hold raw CellStore pointers and the world
+        // model may destroy the stores right after this returns.
+        for (auto& [cell, entry] : mVitaPinnedPreloads)
+            if (entry.mWorkItem)
+                entry.mWorkItem->abort();
+        for (auto& [cell, entry] : mPreloadCells)
+            if (entry.mWorkItem)
+                entry.mWorkItem->abort();
+        for (auto& [cell, entry] : mVitaPinnedPreloads)
+            if (entry.mWorkItem)
+                entry.mWorkItem->waitTillDone();
+        for (auto& [cell, entry] : mPreloadCells)
+            if (entry.mWorkItem)
+                entry.mWorkItem->waitTillDone();
+        mVitaPinnedPreloads.clear();
+#endif
         for (PreloadMap::iterator it = mPreloadCells.begin(); it != mPreloadCells.end();)
         {
             if (it->second.mWorkItem)

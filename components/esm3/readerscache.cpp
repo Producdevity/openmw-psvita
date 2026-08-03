@@ -22,6 +22,9 @@ namespace ESM
 
     ReadersCache::BusyItem ReadersCache::get(std::size_t index)
     {
+#ifdef __vita__
+        const std::lock_guard<std::recursive_mutex> lock(mVitaMutex);
+#endif
         const auto indexIt = mIndex.find(index);
         std::list<Item>::iterator it;
         if (indexIt == mIndex.end())
@@ -60,6 +63,9 @@ namespace ESM
 
     const std::filesystem::path& ReadersCache::getName(std::size_t index) const
     {
+#ifdef __vita__
+        const std::lock_guard<std::recursive_mutex> lock(mVitaMutex);
+#endif
         const auto indexIt = mIndex.find(index);
         if (indexIt == mIndex.end())
             throw std::logic_error("ESMReader at index " + std::to_string(index) + " has not been created yet");
@@ -79,6 +85,9 @@ namespace ESM
 
     std::size_t ReadersCache::getFileSize(std::size_t index)
     {
+#ifdef __vita__
+        const std::lock_guard<std::recursive_mutex> lock(mVitaMutex);
+#endif
         const auto indexIt = mIndex.find(index);
         if (indexIt == mIndex.end())
             return 0;
@@ -100,6 +109,9 @@ namespace ESM
 
     void ReadersCache::closeExtraReaders()
     {
+#ifdef __vita__
+        const std::lock_guard<std::recursive_mutex> lock(mVitaMutex);
+#endif
         while (!mFreeItems.empty() && mBusyItems.size() + mFreeItems.size() + 1 > mCapacity)
         {
             const auto it = mFreeItems.begin();
@@ -116,6 +128,9 @@ namespace ESM
 
     void ReadersCache::releaseItem(std::list<Item>::iterator it) noexcept
     {
+#ifdef __vita__
+        const std::lock_guard<std::recursive_mutex> lock(mVitaMutex);
+#endif
         assert(it->mState == State::Busy);
         if (it->mReader.isOpen())
         {
@@ -131,6 +146,9 @@ namespace ESM
 
     void ReadersCache::clear()
     {
+#ifdef __vita__
+        const std::lock_guard<std::recursive_mutex> lock(mVitaMutex);
+#endif
         mIndex.clear();
         mBusyItems.clear();
         mFreeItems.clear();

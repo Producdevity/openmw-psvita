@@ -56,6 +56,10 @@ extern "C" {
 // 288: 312 starved thread stacks (video EAGAIN).
 // 268: funds vgl RAM pool 16->36 for static VBOs.
 unsigned int _newlib_heap_size_user = 268 * 1024 * 1024;
+// Segment-gap pad: vita-elf-create needs slack after segment 0 for SCE
+// data; unlucky link layouts overlap segment 1 without this.
+__attribute__((used)) extern const char g_vitaSegPad[8192];
+__attribute__((used)) const char g_vitaSegPad[8192] = { 1 };
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 
 // Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.
@@ -1414,6 +1418,7 @@ namespace Vita
 
         // IME sysmodule is loaded later by Vita::initIme()
 
+        asm volatile("" ::"r"(g_vitaSegPad)); // opaque ref: keep segment pad
         char initBuf[128];
         snprintf(initBuf, sizeof(initBuf),
             "Vita Platform Initialized: heap=%uMB stack=%uKB",
@@ -1449,9 +1454,26 @@ namespace Vita
         return s_cachedMB;
     }
 
+    int getHeapFreeMB()
+    {
+        // fordblks only counts arena crumbs; true headroom includes the
+        // unclaimed heap the allocator grows into. Cached: mallinfo walks.
+        static int s_cachedFreeMB = 256;
+        static uint64_t s_lastFreeTime = 0;
+        const uint64_t now = sceKernelGetProcessTimeWide();
+        if (now - s_lastFreeTime > 250000)
+        {
+            struct mallinfo mi = mallinfo();
+            const int heapMB = (int)(_newlib_heap_size_user / (1024 * 1024));
+            s_cachedFreeMB = heapMB - (int)(mi.uordblks / (1024 * 1024));
+            s_lastFreeTime = now;
+        }
+        return s_cachedFreeMB;
+    }
+
     bool isMemoryPressure(int thresholdMB)
     {
-        return getHeapUsedMB() > thresholdMB;
+        return getHeapUsedMB() > thresholdMB || getHeapFreeMB() < 8;
     }
 
     void replenishEmergencyReserve()

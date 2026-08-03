@@ -1,6 +1,8 @@
 #ifndef OPENMW_APPS_OPENMW_MWWORLD_PTRREGISTRY_H
 #define OPENMW_APPS_OPENMW_MWWORLD_PTRREGISTRY_H
 
+#include <mutex>
+#include <shared_mutex>
 #include "ptr.hpp"
 
 #include "components/esm3/cellref.hpp"
@@ -22,6 +24,9 @@ namespace MWWorld
 
         Ptr getOrEmpty(ESM::RefNum refNum) const
         {
+#ifdef __vita__
+            const std::shared_lock<std::shared_mutex> lock(mVitaMutex);
+#endif
             const auto it = mIndex.find(refNum);
             if (it != mIndex.end())
                 return it->second;
@@ -32,6 +37,9 @@ namespace MWWorld
 
         void clear()
         {
+#ifdef __vita__
+            const std::unique_lock<std::shared_mutex> lock(mVitaMutex);
+#endif
             mIndex.clear();
             mLastGenerated = ESM::RefNum{};
             ++mRevision;
@@ -39,12 +47,18 @@ namespace MWWorld
 
         void insert(const Ptr& ptr)
         {
+#ifdef __vita__
+            const std::unique_lock<std::shared_mutex> lock(mVitaMutex);
+#endif
             mIndex[ptr.getCellRef().getOrAssignRefNum(mLastGenerated)] = ptr;
             ++mRevision;
         }
 
         void remove(const LiveCellRefBase& ref) noexcept
         {
+#ifdef __vita__
+            const std::unique_lock<std::shared_mutex> lock(mVitaMutex);
+#endif
             ESM::RefNum refNum = ref.mRef.getRefNum();
             if (!refNum.isSet())
                 return;
@@ -68,6 +82,9 @@ namespace MWWorld
         }
 
     private:
+#ifdef __vita__
+        mutable std::shared_mutex mVitaMutex;
+#endif
         std::size_t mRevision = 0;
         std::unordered_map<ESM::RefNum, Ptr> mIndex;
         ESM::RefNum mLastGenerated;

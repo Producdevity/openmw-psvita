@@ -81,6 +81,21 @@ namespace MWWorld
 
         std::size_t getCacheSize() const { return mPreloadCells.size(); }
 
+#ifdef __vita__
+        bool isCellPreloaded(const MWWorld::CellStore& cell) const
+        {
+            auto pinned = mVitaPinnedPreloads.find(&cell);
+            if (pinned != mVitaPinnedPreloads.end())
+                return pinned->second.mWorkItem && pinned->second.mWorkItem->isDone();
+            auto it = mPreloadCells.find(&cell);
+            return it != mPreloadCells.end() && it->second.mWorkItem && it->second.mWorkItem->isDone();
+        }
+        // Border warming: separate slots, immune to LRU eviction.
+        void vitaPreloadPinned(MWWorld::CellStore& cell, double timestamp);
+        void vitaReleasePinned(const MWWorld::CellStore* cell);
+        void vitaReleaseAllPinned();
+#endif
+
         void setWorkQueue(osg::ref_ptr<SceneUtil::WorkQueue> workQueue);
 
         void setTerrainPreloadPositions(std::span<const PositionCellGrid> positions);
@@ -126,6 +141,9 @@ namespace MWWorld
 
         // Cells that are currently being preloaded, or have already finished preloading
         PreloadMap mPreloadCells;
+#ifdef __vita__
+        PreloadMap mVitaPinnedPreloads;
+#endif
 
         std::vector<osg::ref_ptr<Terrain::View>> mTerrainViews;
         std::vector<PositionCellGrid> mTerrainPreloadPositions;

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <map>
 #include <chrono>
+#include <optional>
 #include <functional>
 #include <limits>
 
@@ -643,6 +644,10 @@ namespace MWWorld
 
             if (usedMB > budget - 20 && !s_cachesFlushed)
             {
+                // First relief valve: warming pins are rebuildable luxuries.
+                for (CellStore* c : mVitaAnticipatedPins)
+                    mPreloader->vitaReleasePinned(c);
+                mVitaAnticipatedPins.clear();
                 // Snapshot what is resident before the flush wipes it.
                 Vita::auditWorldModel(mWorld.getWorldModel());
                 Vita::auditResourceCaches(mRendering.getResourceSystem());
@@ -2822,6 +2827,61 @@ namespace MWWorld
 #ifdef __vita__
         Vita::simFence(); // Scene teardown; wait out overlapped draw.
         Vita::breadcrumb("changeCellGrid() enter");
+        const auto vitaCrossT0 = std::chrono::steady_clock::now();
+        bool vitaSeamless = Settings::general().mVitaSeamlessCrossing && mCurrentCell
+            && mCurrentCell->isExterior() && std::abs(playerCellIndex.mX - mCurrentGridCenter.x()) <= 1
+            && std::abs(playerCellIndex.mY - mCurrentGridCenter.y()) <= 1;
+        if (vitaSeamless)
+        {
+            // Screen anything predicted heavy: actor-dense center, dense
+            // depart cell, or a heavy/cold incoming ring.
+            int actorCount = 0;
+            std::size_t centerRefs = 0;
+            CellStore& centerCell = mWorld.getWorldModel().getExterior(playerCellIndex, false);
+            if (centerCell.getState() == CellStore::State_Loaded)
+            {
+                centerRefs = centerCell.count();
+                auto count = [&](const MWWorld::Ptr& ptr) {
+                    if (!ptr.mRef->isDeleted() && ptr.getRefData().isEnabled())
+                        ++actorCount;
+                    return true;
+                };
+                centerCell.forEachType<ESM::NPC>(count);
+                centerCell.forEachType<ESM::Creature>(count);
+            }
+            // Predict crossing duration; screen only when it's genuinely
+            // long. Cold store loads dominate (~1.3s each, measured).
+            int coldCells = 0;
+            int warmMs = 0;
+            std::size_t loadedRingRefs = 0;
+            iterateOverCellsAround(playerCellIndex.mX, playerCellIndex.mY, mHalfGridSize, [&](int x, int y) {
+                const ESM::ExteriorCellLocation loc(x, y, playerCellIndex.mWorldspace);
+                if (isCellInCollection(loc, mActiveCells))
+                    return;
+                CellStore& rc = mWorld.getWorldModel().getExterior(loc, false);
+                if (rc.getState() != CellStore::State_Loaded)
+                {
+                    ++coldCells;
+                    return;
+                }
+                loadedRingRefs += rc.count();
+                // Cold ASSETS dominate insert cost even with a warm store.
+                warmMs += (int)rc.count() * (mPreloader->isCellPreloaded(rc) ? 1 : 8);
+            });
+            const int predictedMs = coldCells * 1300 + warmMs + actorCount * 20
+                + ((centerCell.getState() != CellStore::State_Loaded)
+                        ? 800
+                        : (mPreloader->isCellPreloaded(centerCell) ? 0 : (int)centerRefs * 4));
+            constexpr int kScreenThresholdMs = 2000;
+            if (predictedMs >= kScreenThresholdMs)
+            {
+                vitaSeamless = false;
+                char buf[128];
+                snprintf(buf, sizeof(buf), "[Crossing] predicted %dms (cold=%d refs=%u actors=%d): screened",
+                    predictedMs, coldCells, (unsigned)loadedRingRefs, actorCount);
+                Vita::breadcrumb(buf);
+            }
+        }
         Vita::logMemoryStatus("Pre-changeCellGrid");
         // Drain any in-flight async physics worker before we start removing
         // collision objects below. Workers stay quiescent until next
@@ -2893,7 +2953,12 @@ namespace MWWorld
         if (mRendering.pagingUnlockCache())
             mPreloader->abortTerrainPreloadExcept(nullptr);
         if (!mPreloader->isTerrainLoaded(PositionCellGrid{ pos, newGrid }, mRendering.getReferenceTime()))
+        {
+#ifdef __vita__
+            vitaSeamless = false; // cold terrain: honest screen
+#endif
             preloadTerrain(pos, playerCellIndex.mWorldspace, true);
+        }
         mPagedRefs.clear();
         mRendering.getPagedRefnums(newGrid, mPagedRefs);
 
@@ -2977,7 +3042,17 @@ namespace MWWorld
         });
 
         Loading::Listener* loadingListener = MWBase::Environment::get().getWindowManager()->getLoadingScreen();
+#ifdef __vita__
+        // Seamless: all listener calls become no-ops; screen never shows.
+        static Loading::Listener sVitaNullListener;
+        std::optional<Loading::ScopedLoad> load;
+        if (vitaSeamless)
+            loadingListener = &sVitaNullListener;
+        else
+            load.emplace(loadingListener);
+#else
         Loading::ScopedLoad load(loadingListener);
+#endif
         loadingListener->setLabel("#{OMWEngine:LoadingExterior}");
         loadingListener->setProgressRange(refsToLoad);
 
@@ -3140,6 +3215,16 @@ namespace MWWorld
         Vita::auditResourceCaches(mRendering.getResourceSystem());
 #endif
 
+#ifdef __vita__
+        {
+            const int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - vitaCrossT0)
+                               .count();
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[Crossing] seamless=%d total=%dms", (int)vitaSeamless, ms);
+            Vita::breadcrumb(buf);
+        }
+#endif
         if (changeEvent)
             mCellChanged = true;
 
@@ -3756,6 +3841,73 @@ namespace MWWorld
                 preloadFastTravelDestinations(playerPos, exteriorPositions);
         }
 
+#ifdef __vita__
+        // Border anticipation: warm terrain and assets for cells the player
+        // is approaching AND heading toward. Retention keeps corner revisits
+        // warm; crossings and pressure release pins.
+        if (mCurrentCell && mCurrentCell->isExterior() && Settings::general().mVitaSeamlessCrossing
+            && !Vita::isMemoryPressure(getVitaCellBudgetMB()))
+        {
+            constexpr float kAnticipateDist = 4096.f;
+            const float cellSize
+                = static_cast<float>(ESM::getCellSize(mCurrentCell->getCell()->getWorldSpace()));
+            const int cx = mCurrentGridCenter.x();
+            const int cy = mCurrentGridCenter.y();
+            const float px = playerPos.x() - cx * cellSize;
+            const float py = playerPos.y() - cy * cellSize;
+            int ax = 0, ay = 0;
+            if (px < kAnticipateDist)
+                ax = -1;
+            else if (cellSize - px < kAnticipateDist)
+                ax = 1;
+            if (py < kAnticipateDist)
+                ay = -1;
+            else if (cellSize - py < kAnticipateDist)
+                ay = 1;
+            if (ax != 0 && mSmoothedMoveDir.x() * ax < 0.15f)
+                ax = 0;
+            if (ay != 0 && mSmoothedMoveDir.y() * ay < 0.15f)
+                ay = 0;
+            if (ax != 0)
+                exteriorPositions.push_back(
+                    PositionCellGrid{ playerPos, gridCenterToBounds({ cx + ax, cy }) });
+            if (ay != 0)
+                exteriorPositions.push_back(
+                    PositionCellGrid{ playerPos, gridCenterToBounds({ cx, cy + ay }) });
+            if (ax != 0 && ay != 0)
+                exteriorPositions.push_back(
+                    PositionCellGrid{ playerPos, gridCenterToBounds({ cx + ax, cy + ay }) });
+
+            std::vector<std::pair<int, int>> incoming;
+            if (ax != 0)
+                for (int dy = -1; dy <= 1; ++dy)
+                    incoming.push_back({ cx + 2 * ax, cy + dy });
+            if (ay != 0)
+                for (int dx = -1; dx <= 1; ++dx)
+                    incoming.push_back({ cx + dx, cy + 2 * ay });
+            if (ax != 0 && ay != 0)
+                incoming.push_back({ cx + 2 * ax, cy + 2 * ay });
+            const ESM::RefId ws = mCurrentCell->getCell()->getWorldSpace();
+            for (auto [gx, gy] : incoming)
+            {
+                CellStore& c
+                    = mWorld.getWorldModel().getExterior(ESM::ExteriorCellLocation(gx, gy, ws), false);
+                if (c.getState() != CellStore::State_Loaded)
+                    continue; // stores load at the crossing; workers stay out
+                if (c.count() >= 250)
+                    continue; // heavy cells get a screen anyway; warming them costs fps + MBs
+                mPreloader->vitaPreloadPinned(c, mRendering.getReferenceTime());
+                if (std::find(mVitaAnticipatedPins.begin(), mVitaAnticipatedPins.end(), &c)
+                    == mVitaAnticipatedPins.end())
+                    mVitaAnticipatedPins.push_back(&c);
+            }
+            while (mVitaAnticipatedPins.size() > 4)
+            {
+                mPreloader->vitaReleasePinned(mVitaAnticipatedPins.front());
+                mVitaAnticipatedPins.erase(mVitaAnticipatedPins.begin());
+            }
+        }
+#endif
         mPreloader->setTerrainPreloadPositions(exteriorPositions);
     }
 

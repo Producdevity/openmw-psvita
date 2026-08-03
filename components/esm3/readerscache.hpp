@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <list>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -64,6 +65,10 @@ namespace ESM
 
     private:
         const std::size_t mCapacity;
+#ifdef __vita__
+        // Shared by terrain/preload workers and main-thread cell loads.
+        mutable std::recursive_mutex mVitaMutex;
+#endif
         std::map<std::size_t, std::list<Item>::iterator> mIndex;
         std::list<Item> mBusyItems;
         std::list<Item> mFreeItems;
