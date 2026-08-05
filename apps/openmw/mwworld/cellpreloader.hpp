@@ -127,6 +127,7 @@ namespace MWWorld
         void vitaDropRegionRefs();
         unsigned vitaRegionEpoch() const { return mVitaRegionEpoch; }
         float vitaKnownBoundRadius(const std::string& path) const;
+        bool vitaShapeCached(const std::string& path) const;
         int vitaDemandLatencyMs() const { return mVitaDemandLatencyMs; }
         void vitaSaveModelBounds();
         void vitaLoadModelBounds();

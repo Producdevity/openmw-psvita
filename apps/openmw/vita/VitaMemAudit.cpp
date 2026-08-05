@@ -35,7 +35,9 @@ extern "C"
     uint32_t cullprof_terr_us = 0;
     extern uint32_t osgapply_calls, osgapply_tex_us, osgapply_mode_us, osgapply_attr_us, osgapply_unif_us;
     extern uint32_t osgapply_unif_n, osgapply_unif_up;
+    extern uint32_t osgapply_unif_rup;
     extern uint32_t osgapply_push, osgapply_pop;
+    int osgapply_unif_hist_report(char* buf, unsigned int buflen);
 }
 
 #include <cstdint>
@@ -505,15 +507,25 @@ namespace Vita
         if (osgapply_calls > 0)
         {
             snprintf(buf, sizeof(buf),
-                "[OsgApply] calls=%u tex=%.1f mode=%.1f attr=%.1f unif=%.1f us/call push=%u pop=%u un=%u up=%u",
+                "[OsgApply] calls=%u tex=%.1f mode=%.1f attr=%.1f unif=%.1f us/call push=%u pop=%u un=%u up=%u rup=%u /%dfr",
                 osgapply_calls, (double)osgapply_tex_us / osgapply_calls, (double)osgapply_mode_us / osgapply_calls,
                 (double)osgapply_attr_us / osgapply_calls, (double)osgapply_unif_us / osgapply_calls, osgapply_push,
-                osgapply_pop, osgapply_unif_n, osgapply_unif_up);
+                osgapply_pop, osgapply_unif_n, osgapply_unif_up, osgapply_unif_rup, kReportEveryFrames);
             auditLog(buf);
         }
         osgapply_calls = osgapply_tex_us = osgapply_mode_us = osgapply_attr_us = osgapply_unif_us = 0;
-        osgapply_unif_n = osgapply_unif_up = 0;
+        osgapply_unif_n = osgapply_unif_up = osgapply_unif_rup = 0;
         osgapply_push = osgapply_pop = 0;
+
+        // Upload histogram: name=up/redundant, top 8 per window.
+        {
+            char hb[224];
+            if (osgapply_unif_hist_report(hb, sizeof(hb)) > 0)
+            {
+                snprintf(buf, sizeof(buf), "[UnifHist] %s", hb);
+                auditLog(buf);
+            }
+        }
     }
 
     void noteRenderTime(unsigned long long us)

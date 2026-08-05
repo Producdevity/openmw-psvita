@@ -577,6 +577,11 @@ namespace MWWorld
         return 0.f;
     }
 
+    bool CellPreloader::vitaShapeCached(const std::string& path) const
+    {
+        return mBulletShapeManager->getObjectCache()->getRefFromObjectCacheOrNone(path).has_value();
+    }
+
     float CellPreloader::vitaKnownBoundRadius(const std::string& path) const
     {
         const float resident = vitaWarmBoundRadius(path);

@@ -359,37 +359,37 @@ namespace Terrain
             // Group VitaTerrainMulti draws together to minimize SGX543 program switches.
             // Bin must be < FirstPerson (12) so depth-tests correctly with hands/weapon.
             stateset->setRenderBinDetails(2, "RenderBin");
-            stateset->addUniform(new osg::Uniform("u_numLayers", numLayers));
-            stateset->addUniform(new osg::Uniform("colorMode", 2));
-            stateset->addUniform(new osg::Uniform("alphaRef", 0.0f));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_numLayers", numLayers)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("colorMode", 2)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("alphaRef", 0.0f)));
             {
                 osg::Uniform* material = new osg::Uniform(osg::Uniform::FLOAT_VEC4, "u_material", 3);
                 material->setElement(0u, osg::Vec4f(1, 1, 1, 1));
                 material->setElement(1u, osg::Vec4f(1, 1, 1, 1));
                 material->setElement(2u, osg::Vec4f(0, 0, 0, 1));
-                stateset->addUniform(material);
+                stateset->addUniform(Vita::internUniform(material));
             }
 
             if (layerTileSize != 1.f)
-                stateset->addUniform(new osg::Uniform("u_texMat0",
-                    osg::Matrixf::scale(osg::Vec3f(layerTileSize, layerTileSize, 1.f))));
+                stateset->addUniform(Vita::internUniform(new osg::Uniform("u_texMat0",
+                    osg::Matrixf::scale(osg::Vec3f(layerTileSize, layerTileSize, 1.f)))));
             else
-                stateset->addUniform(new osg::Uniform("u_texMat0", osg::Matrixf::identity()));
+                stateset->addUniform(Vita::internUniform(new osg::Uniform("u_texMat0", osg::Matrixf::identity())));
 
             if (!blendmaps.empty())
-                stateset->addUniform(new osg::Uniform("u_texMat1",
-                    BlendmapTexMat::value(blendmapScale)->getMatrix()));
+                stateset->addUniform(Vita::internUniform(new osg::Uniform("u_texMat1",
+                    BlendmapTexMat::value(blendmapScale)->getMatrix())));
             else
-                stateset->addUniform(new osg::Uniform("u_texMat1", osg::Matrixf::identity()));
+                stateset->addUniform(Vita::internUniform(new osg::Uniform("u_texMat1", osg::Matrixf::identity())));
 
             // Bind layer sampler uniforms
-            stateset->addUniform(new osg::Uniform("u_layer0", 0));
-            stateset->addUniform(new osg::Uniform("u_layer1", 1));
-            stateset->addUniform(new osg::Uniform("u_layer2", 2));
-            stateset->addUniform(new osg::Uniform("u_layer3", 3));
-            stateset->addUniform(new osg::Uniform("u_blend1", 4));
-            stateset->addUniform(new osg::Uniform("u_blend2", 5));
-            stateset->addUniform(new osg::Uniform("u_blend3", 6));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_layer0", 0)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_layer1", 1)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_layer2", 2)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_layer3", 3)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_blend1", 4)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_blend2", 5)));
+            stateset->addUniform(Vita::internUniform(new osg::Uniform("u_blend3", 6)));
 
             // Bind diffuse textures to units 0-3
             for (int i = 0; i < numLayers; ++i)

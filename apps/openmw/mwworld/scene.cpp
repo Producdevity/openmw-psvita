@@ -25,8 +25,10 @@
 #include "../mwrender/vismask.hpp"
 #include "../mwrender/animation.hpp"
 #include "../mwmechanics/aipackage.hpp"
+#include "../mwmechanics/creaturestats.hpp"
 #include <components/esm3/loadstat.hpp>
 #include <components/vita/VitaShader.h>
+#include <components/sceneutil/attach.hpp>
 #include <components/vita/CellCullCallback.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 extern "C" unsigned int cullprof_creplay, cullprof_crep_drop;
@@ -180,6 +182,18 @@ namespace
     // TODO: find a more clever way to make paging exclusion more reliable?
     static osg::ref_ptr<SceneUtil::PositionAttitudeTransform> pagedNode = new SceneUtil::PositionAttitudeTransform;
 
+#ifdef __vita__
+    // [Hydrate] breakdown: add cost by phase since last tick + worst single add.
+    uint32_t sVitaAddRendUs = 0, sVitaAddMechUs = 0, sVitaAddPhysUs = 0, sVitaAddLuaUs = 0, sVitaAddNavUs = 0;
+    uint32_t sVitaAddWorstUs = 0;
+    char sVitaAddWorstTag[48] = {};
+    inline uint32_t vitaUsSince(const std::chrono::steady_clock::time_point& t0)
+    {
+        return (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    }
+#endif
+
     void addObject(const MWWorld::Ptr& ptr, const MWWorld::World& world, const std::vector<ESM::RefNum>& pagedRefs,
         MWPhysics::PhysicsSystem& physics, MWRender::RenderingManager& rendering)
     {
@@ -207,10 +221,25 @@ namespace
             }
         }
 #endif
+#ifdef __vita__
+        const auto add0 = std::chrono::steady_clock::now();
+#endif
         if (!isPaged)
             ptr.getClass().insertObjectRendering(ptr, model, rendering);
         else
             ptr.getRefData().setBaseNode(pagedNode);
+#ifdef __vita__
+        {
+            const uint32_t rendUs = vitaUsSince(add0);
+            sVitaAddRendUs += rendUs;
+            if (rendUs > sVitaAddWorstUs)
+            {
+                sVitaAddWorstUs = rendUs;
+                snprintf(sVitaAddWorstTag, sizeof(sVitaAddWorstTag), "%s",
+                    ptr.getCellRef().getRefId().toDebugString().c_str());
+            }
+        }
+#endif
 #ifdef __vita__
         {
             // Chargen-only post-insert debug. Mask_Object (0x400) and
@@ -239,6 +268,9 @@ namespace
 #endif
         setNodeRotation(ptr, rendering, rotation);
 
+#ifdef __vita__
+        const auto mech0 = std::chrono::steady_clock::now();
+#endif
         if (ptr.getClass().useAnim())
             MWBase::Environment::get().getMechanicsManager()->add(ptr);
 
@@ -247,17 +279,35 @@ namespace
 
         // Restore effect particles
         world.applyLoopingParticles(ptr);
+#ifdef __vita__
+        sVitaAddMechUs += vitaUsSince(mech0);
+        const auto phys0 = std::chrono::steady_clock::now();
+#endif
 
         if (!model.empty())
             ptr.getClass().insertObject(ptr, model, rotation, physics);
 
+#ifdef __vita__
+        sVitaAddPhysUs += vitaUsSince(phys0);
+        const auto lua0 = std::chrono::steady_clock::now();
+#endif
         MWBase::Environment::get().getLuaManager()->objectAddedToScene(ptr);
+#ifdef __vita__
+        sVitaAddLuaUs += vitaUsSince(lua0);
+#endif
     }
 
     void addObject(const MWWorld::Ptr& ptr, const MWWorld::World& world, const MWPhysics::PhysicsSystem& physics,
         float& lowestPoint, bool isInterior, DetourNavigator::Navigator& navigator,
         const DetourNavigator::UpdateGuard* navigatorUpdateGuard = nullptr)
     {
+#ifdef __vita__
+        struct NavTimer
+        {
+            std::chrono::steady_clock::time_point mT0;
+            ~NavTimer() { sVitaAddNavUs += vitaUsSince(mT0); }
+        } navTimer{ std::chrono::steady_clock::now() };
+#endif
         if (const auto object = physics.getObject(ptr))
         {
             // Find the lowest point of this collision object in world space from its AABB if interior
@@ -2298,6 +2348,25 @@ namespace MWWorld
             else
                 maxMs = 10; // normal 30-40ms frames still make progress
         }
+        static uint32_t sSegShellUs, sSegLaneAUs, sSegDomUs, sSegActorUs;
+        sSegShellUs = sSegLaneAUs = sSegDomUs = sSegActorUs = 0;
+        sVitaAddRendUs = sVitaAddMechUs = sVitaAddPhysUs = sVitaAddLuaUs = sVitaAddNavUs = 0;
+        sVitaAddWorstUs = 0;
+        sVitaAddWorstTag[0] = 0;
+        struct SegTimer
+        {
+            uint32_t* mTgt;
+            Clock::time_point mT0;
+            SegTimer(uint32_t* tgt)
+                : mTgt(tgt)
+                , mT0(Clock::now())
+            {
+            }
+            ~SegTimer()
+            {
+                *mTgt += (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - mT0).count();
+            }
+        };
         struct TickTimer
         {
             Clock::time_point mStart;
@@ -2307,8 +2376,13 @@ namespace MWWorld
                     = (int)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - mStart).count();
                 if (ms > 400)
                 {
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "[Hydrate] tick %dms", ms);
+                    char buf[192];
+                    snprintf(buf, sizeof(buf),
+                        "[Hydrate] tick %dms sh=%u A=%u dom=%u B=%u | rend=%u mech=%u phys=%u lua=%u nav=%u "
+                        "worst=%s:%ums",
+                        ms, sSegShellUs / 1000, sSegLaneAUs / 1000, sSegDomUs / 1000, sSegActorUs / 1000,
+                        sVitaAddRendUs / 1000, sVitaAddMechUs / 1000, sVitaAddPhysUs / 1000, sVitaAddLuaUs / 1000,
+                        sVitaAddNavUs / 1000, sVitaAddWorstTag, sVitaAddWorstUs / 1000);
                     Vita::breadcrumb(buf);
                 }
             }
@@ -2366,8 +2440,13 @@ namespace MWWorld
                     = std::min(2400.f, (osg::Vec2f(pp.x(), pp.y()) - sLastPP).length() / dtS);
         }
         static float sPrevSpeed = 0.f;
-        if (sPrevSpeed > 1500.f && vitaPlayerSpeed < 300.f)
+        static Clock::time_point sLastDrain{};
+        if (sPrevSpeed > 1500.f && vitaPlayerSpeed < 300.f
+            && (sLastDrain.time_since_epoch().count() == 0 || tick0 - sLastDrain > std::chrono::seconds(12)))
+        {
             mPreloader->vitaDrainWarmSync(400); // touchdown after superhuman travel
+            sLastDrain = tick0;
+        }
         sPrevSpeed = vitaPlayerSpeed;
         sLastPP = osg::Vec2f(pp.x(), pp.y());
         sLastPPT = nowTtn;
@@ -2385,6 +2464,7 @@ namespace MWWorld
         // Budget exhausts in the nearest unfinished shell, so catch-up under
         // sprint fills as a wave from the player outward, not by cell.
         {
+            SegTimer segShell(&sSegShellUs);
             // Shells take at most 2/3 of the box: the outer band (4500 to
             // rStructIn+stretch) must always make progress or the visible
             // stream edge collapses to the last shell under movement.
@@ -2457,6 +2537,7 @@ namespace MWWorld
         }
 
         // ---- Lane A ----
+        const auto laneA0 = Clock::now();
         for (std::size_t ci = 0; ci < n; ++ci)
         {
             if (Clock::now() >= deadline)
@@ -2473,6 +2554,7 @@ namespace MWWorld
                 continue;
             if (wantFull && !inActorDomain)
             {
+                SegTimer segDom(&sSegDomUs);
                 mVitaActorDomain.insert(&cell);
                 mWorld.getLocalScripts().addCell(&cell);
                 cell.respawn();
@@ -2630,6 +2712,14 @@ namespace MWWorld
                         const bool hasPhys = mPhysics->getObject(ptr) != nullptr;
                         if (!hasPhys && d2 < rPhysIn * rPhysIn)
                         {
+                            // Physics lane invariant, cache-aware: shapes
+                            // usually still sit in the bullet cache from the
+                            // render era — only truly cold ones take the
+                            // ledger round trip (ledger churn = pop-in).
+                            const VFS::Path::Normalized pm = getModel(ptr);
+                            if (!pm.empty() && !mPreloader->vitaShapeCached(std::string(pm.value()))
+                                && !warmPath(std::string(pm.value()), d2))
+                                return true; // shape warming; add next pass
                             try
                             {
                                 addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
@@ -2638,8 +2728,10 @@ namespace MWWorld
                             }
                             catch (const std::exception& e)
                             {
-                                Log(Debug::Error)
-                                    << "phys hydrate fail '" << ptr.getCellRef().getRefId() << "': " << e.what();
+                                char pb[176];
+                                snprintf(pb, sizeof(pb), "[PhysFail] %s: %s",
+                                    ptr.getCellRef().getRefId().toDebugString().c_str(), e.what());
+                                Vita::breadcrumb(pb);
                             }
                         }
                         else if (hasPhys && d2 > rPhysOut * rPhysOut)
@@ -2713,10 +2805,12 @@ namespace MWWorld
                 char mm[144];
                 int dw = 0, dl = 0, dr = 0;
                 mPreloader->vitaDemandStats(dw, dl, dr);
-                snprintf(mm, sizeof(mm), "[MemMap] heap=%dMB objs=%d phys=%d stores=%d dmd=%d/%d/%d",
+                unsigned rigH = 0, rigM = 0, rigN = 0;
+                SceneUtil::getRigCacheStats(rigH, rigM, rigN);
+                snprintf(mm, sizeof(mm), "[MemMap] heap=%dMB objs=%d phys=%d stores=%d dmd=%d/%d/%d rig=%u/%u/%u",
                     Vita::getHeapUsedMB(), (int)mRendering.getObjects().getObjectCount(),
                     (int)mPhysics->getObjectCount(), (int)mWorld.getWorldModel().vitaCellStoreCount(), dw, dl,
-                    dr);
+                    dr, rigH, rigM, rigN);
                 Vita::breadcrumb(mm);
             }
         }
@@ -2737,8 +2831,10 @@ namespace MWWorld
         }
 
         // ---- Lane B: one actor per healthy tick, nearest wins globally ----
+        sSegLaneAUs = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - laneA0).count();
         if (!bigBudget && frameDt >= 30)
             return vitaOps;
+        SegTimer segActor(&sSegActorUs);
         int actorBudget = bigBudget ? 1000 : 1;
         while (actorBudget > 0)
         {
@@ -2838,6 +2934,55 @@ namespace MWWorld
                 }
                 if (!partsWarm)
                     return vitaOps; // parts streaming; assemble next tick
+            }
+            else if (best.getType() == ESM::REC_LEVC)
+            {
+                // Same invariant for leveled spawns: warm every model the
+                // roll could resolve to; gate on models, never pre-roll.
+                bool spawnWarm = true;
+                const ESM::CreatureLevList* lev = best.get<ESM::CreatureLevList>()->mBase;
+                const MWWorld::Ptr player = mWorld.getPlayerPtr();
+                const int playerLevel = player.getClass().getCreatureStats(player).getLevel();
+                static std::map<std::pair<ESM::RefId, int>, std::vector<std::string>> sLevcModels;
+                const auto lkey = std::make_pair(lev->mId, playerLevel);
+                auto lit = sLevcModels.find(lkey);
+                if (lit == sLevcModels.end())
+                {
+                    std::vector<std::string> models;
+                    std::vector<const ESM::CreatureLevList*> stack{ lev };
+                    std::set<ESM::RefId> seen{ lev->mId };
+                    const auto& creatures = mWorld.getStore().get<ESM::Creature>();
+                    const auto& levLists = mWorld.getStore().get<ESM::CreatureLevList>();
+                    while (!stack.empty())
+                    {
+                        const ESM::CreatureLevList* cur = stack.back();
+                        stack.pop_back();
+                        for (const auto& item : cur->mList)
+                        {
+                            if ((int)item.mLevel > playerLevel)
+                                continue;
+                            if (const ESM::Creature* cre = creatures.search(item.mId))
+                            {
+                                if (!cre->mModel.empty())
+                                    models.push_back(
+                                        Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(cre->mModel))
+                                            .value());
+                            }
+                            else if (const ESM::CreatureLevList* sub = levLists.search(item.mId))
+                            {
+                                if (seen.insert(sub->mId).second)
+                                    stack.push_back(sub);
+                            }
+                        }
+                    }
+                    std::sort(models.begin(), models.end());
+                    models.erase(std::unique(models.begin(), models.end()), models.end());
+                    lit = sLevcModels.emplace(lkey, std::move(models)).first;
+                }
+                for (const std::string& m : lit->second)
+                    spawnWarm = warmPath(m, bestD2) && spawnWarm;
+                if (!spawnWarm)
+                    return vitaOps; // spawn model streaming; try next tick
             }
             try
             {
@@ -3603,6 +3748,7 @@ namespace MWWorld
         mVitaIcoPending.clear();
         mVitaCleanSweep.clear();
         mVitaCellRefBox.clear();
+        SceneUtil::clearRigCache();
         mPendingCellLoads.clear();
         // Pending demotions/promotions reference cells that are about to be
         // unloaded by the loop below. Drop them now to avoid stale
