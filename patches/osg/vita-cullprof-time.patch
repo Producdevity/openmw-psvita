@@ -128,15 +128,24 @@
  
      // push the culling mode.
      pushCurrentMask();
-@@ -1167,6 +1247,7 @@
+@@ -1167,13 +1247,16 @@
      StateSet* node_state = node.getStateSet();
      if (node_state) pushStateSet(node_state);
  
 +    CULLPROF_ADD(cullprof_grp_us, grp0)
      handle_cull_callbacks_and_traverse(node);
  
++    const unsigned int grp1 = CULLPROF_T();
      // pop the node's state off the render graph stack.
-@@ -1183,7 +1264,12 @@
+     if (node_state) popStateSet();
+ 
+     // pop the culling mode.
+     popCurrentMask();
++    CULLPROF_ADD(cullprof_grp_us, grp1)
+ }
+ 
+ void CullVisitor::apply(Transform& node)
+@@ -1183,7 +1266,12 @@
      if (cullprof_in_skeleton)
          ++cullprof_xf_bone;
  #endif
@@ -150,15 +159,26 @@
  
      // push the culling mode.
      pushCurrentMask();
-@@ -1196,6 +1282,7 @@
+@@ -1196,8 +1284,10 @@
      node.computeLocalToWorldMatrix(*matrix,this);
      pushModelViewMatrix(matrix, node.getReferenceFrame());
  
 +    CULLPROF_ADD(cullprof_xf_us, xf0)
      handle_cull_callbacks_and_traverse(node);
  
++    const unsigned int xf1 = CULLPROF_T();
      popModelViewMatrix();
-@@ -1774,3 +1861,4 @@
+ 
+     // pop the node's state off the render graph stack.
+@@ -1205,6 +1295,7 @@
+ 
+     // pop the culling mode.
+     popCurrentMask();
++    CULLPROF_ADD(cullprof_xf_us, xf1)
+ }
+ 
+ void CullVisitor::apply(Projection& node)
+@@ -1774,3 +1865,4 @@
      popCurrentMask();
  }
  

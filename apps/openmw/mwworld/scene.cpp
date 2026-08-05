@@ -25,6 +25,7 @@
 #include "../mwrender/vismask.hpp"
 #include "../mwrender/animation.hpp"
 #include "../mwmechanics/aipackage.hpp"
+#include "../mwmechanics/summoning.hpp"
 #include "../mwmechanics/creaturestats.hpp"
 #include <components/esm3/loadstat.hpp>
 #include <components/vita/VitaShader.h>
@@ -3935,7 +3936,8 @@ namespace MWWorld
             ESM::ExteriorCellLocation(cell.x(), cell.y(), mCurrentCell->getCell()->getWorldSpace()), changeEvent };
     }
 
-    void Scene::changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent)
+    void Scene::changeCellGrid(
+        const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent, bool loadScreen)
     {
 #ifdef __vita__
         Vita::simFence(); // Scene teardown; wait out overlapped draw.
@@ -3944,9 +3946,12 @@ namespace MWWorld
         auto vitaM1 = vitaCrossT0; // after entry flush
         auto vitaM2 = vitaCrossT0; // after load loop + end flush
         auto vitaM3 = vitaCrossT0; // after navigator update
-        bool vitaSeamless = Settings::general().mVitaSeamlessCrossing && mCurrentCell
-            && mCurrentCell->isExterior() && std::abs(playerCellIndex.mX - mCurrentGridCenter.x()) <= 1
-            && std::abs(playerCellIndex.mY - mCurrentGridCenter.y()) <= 1;
+        // Radial mode: a movement crossing is bookkeeping, always. Only the
+        // load-screen path does synchronous work — the player waits there by
+        // definition, and nothing else may stall live play.
+        const bool vitaRadial = Settings::general().mVitaSeamlessCrossing;
+        bool vitaSeamless = vitaRadial && !loadScreen && mCurrentCell && mCurrentCell->isExterior();
+        mVitaLastCrossScreened = !vitaSeamless;
         int vitaPredictedMs = 0;
         if (vitaSeamless)
         {
@@ -3977,19 +3982,16 @@ namespace MWWorld
                     ++coldCells;
             });
             // Radial world: a crossing syncs only ESM store parses; all
-            // content streams by radius. Screens = cold frontiers/teleports.
+            // content streams by radius. Telemetry only — a heavy prediction
+            // no longer demotes the crossing (that stalled live play).
             const int predictedMs = coldCells * 1300;
             vitaPredictedMs = predictedMs;
-            constexpr int kScreenThresholdMs = 2000;
             {
                 char buf[128];
-                snprintf(buf, sizeof(buf), "[Crossing] predicted %dms (cold=%d actors=%d): %s", predictedMs,
-                    coldCells, actorCount,
-                    predictedMs >= kScreenThresholdMs ? "screened" : "seamless");
+                snprintf(buf, sizeof(buf), "[Crossing] predicted %dms (cold=%d actors=%d): seamless", predictedMs,
+                    coldCells, actorCount);
                 Vita::breadcrumb(buf);
             }
-            if (predictedMs >= kScreenThresholdMs)
-                vitaSeamless = false;
         }
         Vita::logMemoryStatus("Pre-changeCellGrid");
         // Drain any in-flight async physics worker before we start removing
@@ -4074,9 +4076,8 @@ namespace MWWorld
             mPreloader->abortTerrainPreloadExcept(nullptr);
         if (!mPreloader->isTerrainLoaded(PositionCellGrid{ pos, newGrid }, mRendering.getReferenceTime()))
         {
-#ifdef __vita__
-            vitaSeamless = false; // cold terrain: honest screen
-#endif
+            // Cold terrain used to demote the crossing mid-flight — an
+            // 11s live stall. Terrain preloads in the background instead.
             preloadTerrain(pos, playerCellIndex.mWorldspace, true);
         }
         mPagedRefs.clear();
@@ -4355,8 +4356,11 @@ namespace MWWorld
                 }
             }
             auto tierIt = center ? mCellLoadTiers.find(center) : mCellLoadTiers.end();
+            // Missing center = player standing on nothing: rescue in both
+            // modes. Tier promotion is classic-only — radial cells carry no
+            // tier and the hydrator owns their content.
             const bool needsLoad = !center;
-            const bool needsPromote = center
+            const bool needsPromote = !vitaRadial && center
                 && (tierIt == mCellLoadTiers.end() || tierIt->second != CellLoadTier::Full);
             if (needsLoad || needsPromote)
             {
@@ -4367,23 +4371,19 @@ namespace MWWorld
                 if (needsLoad)
                 {
                     CellStore& cellRef = mWorld.getWorldModel().getExterior(playerCellIndex);
-                    loadCell(cellRef, loadingListener, changeEvent, pos, rescueGuard.get());
+                    if (vitaRadial)
+                        // Ground, water and nav only — enough that the player
+                        // isn't standing on nothing. Objects are the
+                        // hydrator's; a classic loadCell here stalls play.
+                        prepareCellForDeferredLoad(cellRef, pos, rescueGuard.get());
+                    else
+                        loadCell(cellRef, loadingListener, changeEvent, pos, rescueGuard.get());
                 }
                 else if (tierIt == mCellLoadTiers.end())
                 {
-                    if (Settings::general().mVitaSeamlessCrossing)
-                    {
-                        // Radial cells carry no tier; content is the
-                        // hydrator's. This "rescue" was sync-loading the
-                        // whole center every crossing (tail= 0.4-2.7s).
-                        mCellLoadTiers[center] = CellLoadTier::Full;
-                    }
-                    else
-                    {
-                        insertCellLite(*center, loadingListener, rescueGuard.get());
-                        mCellLoadTiers[center] = CellLoadTier::Lite;
-                        promoteCellToFull(*center, loadingListener, rescueGuard.get());
-                    }
+                    insertCellLite(*center, loadingListener, rescueGuard.get());
+                    mCellLoadTiers[center] = CellLoadTier::Lite;
+                    promoteCellToFull(*center, loadingListener, rescueGuard.get());
                 }
                 else
                 {
@@ -4432,20 +4432,21 @@ namespace MWWorld
 
 #ifdef __vita__
         // Sync-drain pending demote/promote work before the loading screen
-        // closes. Async streaming during gameplay was leaving the player
-        // "stuck" — main thread budget consumed by the queues for ~1-2s
-        // after the loading screen ended. Cleaner UX: longer load screen
-        // (which already animates progress), then immediate playable state.
-        // The loadingListener is still active here (ScopedLoad in scope above).
-        while (!mPendingPromotions.empty())
+        // closes: cleaner to finish under the screen than to bleed 1-2s of
+        // main-thread work into first play. Screened path ONLY — on a live
+        // crossing there is no screen and no listener, just a stall.
+        if (!vitaSeamless)
         {
-            flushPendingPromotion(mPendingPromotions.front().cell);
-            loadingListener->increaseProgress(1);
-        }
-        while (!mPendingDemotions.empty())
-        {
-            flushPendingDemotion(mPendingDemotions.front().cell);
-            loadingListener->increaseProgress(1);
+            while (!mPendingPromotions.empty())
+            {
+                flushPendingPromotion(mPendingPromotions.front().cell);
+                loadingListener->increaseProgress(1);
+            }
+            while (!mPendingDemotions.empty())
+            {
+                flushPendingDemotion(mPendingDemotions.front().cell);
+                loadingListener->increaseProgress(1);
+            }
         }
 
         // Audits live in the MemWatchdog now: walking every store's refs
@@ -4679,6 +4680,41 @@ namespace MWWorld
                         std::chrono::steady_clock::now() - g0)
                         .count());
                 Vita::breadcrumb(gb);
+            }
+            // Summons appear instantly on cast — no gate can defer them, so
+            // their assets must be resident before the first spell lands.
+            static bool sSummonsWarmed = false;
+            if (!sSummonsWarmed)
+            {
+                sSummonsWarmed = true;
+                std::vector<ESM::RefId> summonIds;
+                MWMechanics::getSummonableCreatures(summonIds);
+                std::vector<std::string> summonModels;
+                const VFS::Manager* svfs = mRendering.getResourceSystem()->getVFS();
+                constexpr VFS::Path::ExtensionView kfExt("kf");
+                for (const ESM::RefId& id : summonIds)
+                {
+                    const ESM::Creature* cre = mWorld.getStore().get<ESM::Creature>().search(id);
+                    if (!cre || cre->mModel.empty())
+                        continue;
+                    const VFS::Path::Normalized cm
+                        = Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(cre->mModel));
+                    summonModels.push_back(cm.value());
+                    const VFS::Path::Normalized am = Misc::ResourceHelpers::correctActorModelPath(cm, svfs);
+                    if (am != cm)
+                        summonModels.push_back(am.value());
+                    VFS::Path::Normalized kfp(am);
+                    kfp.changeExtension(kfExt);
+                    if (svfs->exists(kfp))
+                        summonModels.push_back(kfp.value());
+                }
+                if (!summonModels.empty())
+                {
+                    char sb[64];
+                    snprintf(sb, sizeof(sb), "[SummonWarm] %d models", (int)summonModels.size());
+                    Vita::breadcrumb(sb);
+                    mPreloader->vitaPrefetchModels(summonModels);
+                }
             }
             // Post-screen grace: small worker batches while first visible
             // frames absorb catch-up work (idle pump would flood otherwise).
@@ -5005,7 +5041,10 @@ namespace MWWorld
                 // Eliminates the 100-400 ms hang on every interior entry
                 // that the sync-demote previously caused.
                 auto tierIt = mCellLoadTiers.find(cellToUnload);
-                if (tierIt != mCellLoadTiers.end() && tierIt->second == CellLoadTier::Full)
+                // Radial mode never demotes: the hydrator owns content, and
+                // queued demotions only wait to stall a later crossing.
+                if (!Settings::general().mVitaSeamlessCrossing && tierIt != mCellLoadTiers.end()
+                    && tierIt->second == CellLoadTier::Full)
                 {
                     if (std::find_if(mPendingDemotions.begin(), mPendingDemotions.end(),
                             [cellToUnload](const PendingDemotion& pd) { return pd.cell == cellToUnload; })
@@ -5135,7 +5174,8 @@ namespace MWWorld
         const osg::Vec2i cellIndex(current.getCell()->getGridX(), current.getCell()->getGridY());
 
         changeCellGrid(position.asVec3(),
-            ESM::ExteriorCellLocation(cellIndex.x(), cellIndex.y(), current.getCell()->getWorldSpace()), changeEvent);
+            ESM::ExteriorCellLocation(cellIndex.x(), cellIndex.y(), current.getCell()->getWorldSpace()), changeEvent,
+            /*loadScreen*/ true);
 
         changePlayerCell(current, position, adjustPlayerPos);
 

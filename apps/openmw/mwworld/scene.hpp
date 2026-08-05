@@ -92,6 +92,7 @@ namespace MWWorld
         CellStoreCollection mActiveCells;
         bool mCellChanged;
         bool mCellLoaded = false;
+        bool mVitaLastCrossScreened = true;
         MWWorld::World& mWorld;
         MWPhysics::PhysicsSystem* mPhysics;
         MWRender::RenderingManager& mRendering;
@@ -127,7 +128,11 @@ namespace MWWorld
         osg::Vec2i mCurrentGridCenter;
 
         // Load and unload cells as necessary to create a cell grid with "X" and "Y" in the center
-        void changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent = true);
+        // loadScreen: boot/load-game/teleport/interior-exit — the player is
+        // already waiting, so synchronous completion work belongs here and
+        // NEVER on the movement path (radial mode: crossings are bookkeeping).
+        void changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent = true,
+            bool loadScreen = false);
 
         void requestChangeCellGrid(const osg::Vec3f& position, const osg::Vec2i& cell, bool changeEvent = true);
 
@@ -280,6 +285,9 @@ namespace MWWorld
         ///< Has the set of active cells changed, since the last frame?
 
         bool hasCellLoaded() const { return mCellLoaded; }
+        // True when the last grid change ran under a loading screen; a live
+        // streaming crossing must never block on completion work.
+        bool vitaLastCrossScreened() const { return mVitaLastCrossScreened; }
 
         void resetCellLoaded() { mCellLoaded = false; }
 

@@ -240,6 +240,7 @@ namespace MyGUIPlatform
             mBatchVector[mWriteTo].clear();
         }
 
+
         osg::StateSet* getDrawableStateSet() { return mStateSet; }
 
         META_Object(osgMyGUI, Drawable)
