@@ -2332,6 +2332,126 @@ namespace MWWorld
     static long sVitaCostKB = 0;
     static unsigned sVitaContactAdds = 0;
 
+    void Scene::vitaActorWarmPaths(const Ptr& ptr, std::vector<std::string>& out) const
+    {
+        const VFS::Manager* vfs = mRendering.getResourceSystem()->getVFS();
+        constexpr VFS::Path::ExtensionView kfExt("kf");
+        const auto pushAnim = [&](const VFS::Path::Normalized& base) {
+            // Animation instantiates the x-variant, not the base mesh.
+            const VFS::Path::Normalized am = Misc::ResourceHelpers::correctActorModelPath(base, vfs);
+            if (am != base)
+                out.push_back(am.value());
+            VFS::Path::Normalized kfp(am);
+            kfp.changeExtension(kfExt);
+            if (vfs->exists(kfp))
+                out.push_back(kfp.value());
+        };
+        if (ptr.getType() == ESM::REC_CREA)
+        {
+            const VFS::Path::Normalized cm = getModel(ptr);
+            if (!cm.empty())
+                pushAnim(cm);
+        }
+        else if (ptr.getType() == ESM::REC_NPC_)
+        {
+            const ESM::NPC* npc = ptr.get<ESM::NPC>()->mBase;
+            const auto& bodyParts = mWorld.getStore().get<ESM::BodyPart>();
+            for (const ESM::RefId& bpId : { npc->mHead, npc->mHair })
+                if (const ESM::BodyPart* bp = bodyParts.search(bpId))
+                    out.push_back(
+                        Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(bp->mModel)).value());
+            // Race skin parts (chest/arms/legs), cached per race+sex.
+            const bool female = !npc->isMale();
+            static std::map<std::pair<ESM::RefId, bool>, std::vector<std::string>> sRaceParts;
+            const auto key = std::make_pair(npc->mRace, female);
+            auto rit = sRaceParts.find(key);
+            if (rit == sRaceParts.end())
+            {
+                std::vector<std::string> paths;
+                for (const ESM::BodyPart& part : bodyParts)
+                {
+                    if (part.mRace != npc->mRace || part.mData.mType != ESM::BodyPart::MT_Skin
+                        || part.mModel.empty())
+                        continue;
+                    if (((part.mData.mFlags & ESM::BodyPart::BPF_Female) != 0) != female)
+                        continue;
+                    paths.push_back(
+                        Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(part.mModel)).value());
+                }
+                rit = sRaceParts.emplace(key, std::move(paths)).first;
+            }
+            out.insert(out.end(), rit->second.begin(), rit->second.end());
+            if (ptr.getClass().hasInventoryStore(ptr))
+            {
+                MWWorld::InventoryStore& inv = ptr.getClass().getInventoryStore(ptr);
+                for (int slot = 0; slot < MWWorld::InventoryStore::Slots; ++slot)
+                {
+                    auto sit = inv.getSlot(slot);
+                    if (sit != inv.end())
+                    {
+                        const VFS::Path::Normalized im = getModel(*sit);
+                        if (!im.empty())
+                            out.push_back(im.value());
+                    }
+                }
+            }
+        }
+        else if (ptr.getType() == ESM::REC_LEVC)
+        {
+            // Every model the roll could resolve to; gate on models, never
+            // pre-roll. Cached per (list, player level).
+            const ESM::CreatureLevList* lev = ptr.get<ESM::CreatureLevList>()->mBase;
+            const MWWorld::Ptr player = mWorld.getPlayerPtr();
+            const int playerLevel = player.getClass().getCreatureStats(player).getLevel();
+            static std::map<std::pair<ESM::RefId, int>, std::vector<std::string>> sLevcModels;
+            const auto lkey = std::make_pair(lev->mId, playerLevel);
+            auto lit = sLevcModels.find(lkey);
+            if (lit == sLevcModels.end())
+            {
+                std::vector<std::string> models;
+                std::vector<const ESM::CreatureLevList*> stack{ lev };
+                std::set<ESM::RefId> seen{ lev->mId };
+                const auto& creatures = mWorld.getStore().get<ESM::Creature>();
+                const auto& levLists = mWorld.getStore().get<ESM::CreatureLevList>();
+                while (!stack.empty())
+                {
+                    const ESM::CreatureLevList* cur = stack.back();
+                    stack.pop_back();
+                    for (const auto& item : cur->mList)
+                    {
+                        if ((int)item.mLevel > playerLevel)
+                            continue;
+                        if (const ESM::Creature* cre = creatures.search(item.mId))
+                        {
+                            if (cre->mModel.empty())
+                                continue;
+                            const VFS::Path::Normalized cm
+                                = Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(cre->mModel));
+                            models.push_back(cm.value()); // base: physics shape
+                            const VFS::Path::Normalized am
+                                = Misc::ResourceHelpers::correctActorModelPath(cm, vfs);
+                            if (am != cm)
+                                models.push_back(am.value());
+                            VFS::Path::Normalized kfp(am);
+                            kfp.changeExtension(kfExt);
+                            if (vfs->exists(kfp))
+                                models.push_back(kfp.value());
+                        }
+                        else if (const ESM::CreatureLevList* sub = levLists.search(item.mId))
+                        {
+                            if (seen.insert(sub->mId).second)
+                                stack.push_back(sub);
+                        }
+                    }
+                }
+                std::sort(models.begin(), models.end());
+                models.erase(std::unique(models.begin(), models.end()), models.end());
+                lit = sLevcModels.emplace(lkey, std::move(models)).first;
+            }
+            out.insert(out.end(), lit->second.begin(), lit->second.end());
+        }
+    }
+
     int Scene::vitaBubbleTick(int maxMs)
     {
         int vitaOps = 0;
@@ -2948,139 +3068,16 @@ namespace MWWorld
                 return vitaOps;
             if (!warmOrRequest(best, bestD2))
                 return vitaOps; // skeleton warming; try next tick
-            if (best.getType() == ESM::REC_CREA)
             {
-                // Animation instantiates the x-variant mesh, not getModel's
-                // base — warm what will actually load: x-mesh + its kf.
-                const VFS::Path::Normalized cm = getModel(best);
-                if (!cm.empty())
-                {
-                    const VFS::Manager* vfs = mRendering.getResourceSystem()->getVFS();
-                    const VFS::Path::Normalized am = Misc::ResourceHelpers::correctActorModelPath(cm, vfs);
-                    if (am != cm && !warmPath(std::string(am.value()), bestD2))
-                        return vitaOps; // anim mesh streaming; try next tick
-                    VFS::Path::Normalized kfp(am);
-                    constexpr VFS::Path::ExtensionView kfExt("kf");
-                    kfp.changeExtension(kfExt);
-                    if (vfs->exists(kfp) && !warmPath(std::string(kfp.value()), bestD2))
-                        return vitaOps; // keyframes streaming; try next tick
-                }
-            }
-            if (best.getType() == ESM::REC_NPC_)
-            {
-                // The invariant covers parts: composite assembly must never
-                // cold-load head/hair/gear on the main thread.
-                bool partsWarm = true;
-                const ESM::NPC* npc = best.get<ESM::NPC>()->mBase;
-                const auto& bodyParts = mWorld.getStore().get<ESM::BodyPart>();
-                for (const ESM::RefId& bpId : { npc->mHead, npc->mHair })
-                    if (const ESM::BodyPart* bp = bodyParts.search(bpId))
-                        partsWarm
-                            = warmPath(Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(bp->mModel))
-                                           .value(),
-                                  bestD2)
-                            && partsWarm;
-                {
-                    // Race skin parts (chest/arms/legs): same invariant.
-                    const bool female = !npc->isMale();
-                    static std::map<std::pair<ESM::RefId, bool>, std::vector<std::string>> sRaceParts;
-                    const auto key = std::make_pair(npc->mRace, female);
-                    auto rit = sRaceParts.find(key);
-                    if (rit == sRaceParts.end())
-                    {
-                        std::vector<std::string> paths;
-                        for (const ESM::BodyPart& part : bodyParts)
-                        {
-                            if (part.mRace != npc->mRace || part.mData.mType != ESM::BodyPart::MT_Skin
-                                || part.mModel.empty())
-                                continue;
-                            if (((part.mData.mFlags & ESM::BodyPart::BPF_Female) != 0) != female)
-                                continue;
-                            paths.push_back(
-                                Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(part.mModel)).value());
-                        }
-                        rit = sRaceParts.emplace(key, std::move(paths)).first;
-                    }
-                    for (const std::string& pmodel : rit->second)
-                        partsWarm = warmPath(pmodel, bestD2) && partsWarm;
-                }
-                if (best.getClass().hasInventoryStore(best))
-                {
-                    MWWorld::InventoryStore& inv = best.getClass().getInventoryStore(best);
-                    for (int slot = 0; slot < MWWorld::InventoryStore::Slots; ++slot)
-                    {
-                        auto sit = inv.getSlot(slot);
-                        if (sit != inv.end())
-                        {
-                            const VFS::Path::Normalized im = getModel(*sit);
-                            if (!im.empty())
-                                partsWarm = warmPath(std::string(im.value()), bestD2) && partsWarm;
-                        }
-                    }
-                }
-                if (!partsWarm)
-                    return vitaOps; // parts streaming; assemble next tick
-            }
-            else if (best.getType() == ESM::REC_LEVC)
-            {
-                // Same invariant for leveled spawns: warm every model the
-                // roll could resolve to; gate on models, never pre-roll.
-                bool spawnWarm = true;
-                const ESM::CreatureLevList* lev = best.get<ESM::CreatureLevList>()->mBase;
-                const MWWorld::Ptr player = mWorld.getPlayerPtr();
-                const int playerLevel = player.getClass().getCreatureStats(player).getLevel();
-                static std::map<std::pair<ESM::RefId, int>, std::vector<std::string>> sLevcModels;
-                const auto lkey = std::make_pair(lev->mId, playerLevel);
-                auto lit = sLevcModels.find(lkey);
-                if (lit == sLevcModels.end())
-                {
-                    std::vector<std::string> models;
-                    std::vector<const ESM::CreatureLevList*> stack{ lev };
-                    std::set<ESM::RefId> seen{ lev->mId };
-                    const auto& creatures = mWorld.getStore().get<ESM::Creature>();
-                    const auto& levLists = mWorld.getStore().get<ESM::CreatureLevList>();
-                    while (!stack.empty())
-                    {
-                        const ESM::CreatureLevList* cur = stack.back();
-                        stack.pop_back();
-                        for (const auto& item : cur->mList)
-                        {
-                            if ((int)item.mLevel > playerLevel)
-                                continue;
-                            if (const ESM::Creature* cre = creatures.search(item.mId))
-                            {
-                                if (!cre->mModel.empty())
-                                {
-                                    const VFS::Manager* vfs = mRendering.getResourceSystem()->getVFS();
-                                    const VFS::Path::Normalized cm
-                                        = Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(cre->mModel));
-                                    models.push_back(cm.value()); // base: physics shape
-                                    const VFS::Path::Normalized am
-                                        = Misc::ResourceHelpers::correctActorModelPath(cm, vfs);
-                                    if (am != cm)
-                                        models.push_back(am.value()); // x-variant: render/anim
-                                    VFS::Path::Normalized kfp(am);
-                                    constexpr VFS::Path::ExtensionView kfExt("kf");
-                                    kfp.changeExtension(kfExt);
-                                    if (vfs->exists(kfp))
-                                        models.push_back(kfp.value());
-                                }
-                            }
-                            else if (const ESM::CreatureLevList* sub = levLists.search(item.mId))
-                            {
-                                if (seen.insert(sub->mId).second)
-                                    stack.push_back(sub);
-                            }
-                        }
-                    }
-                    std::sort(models.begin(), models.end());
-                    models.erase(std::unique(models.begin(), models.end()), models.end());
-                    lit = sLevcModels.emplace(lkey, std::move(models)).first;
-                }
-                for (const std::string& m : lit->second)
-                    spawnWarm = warmPath(m, bestD2) && spawnWarm;
-                if (!spawnWarm)
-                    return vitaOps; // spawn model streaming; try next tick
+                // Composite assembly must never cold-load on the main thread:
+                // gate on every asset the construction will reach for.
+                std::vector<std::string> actorPaths;
+                vitaActorWarmPaths(best, actorPaths);
+                bool assetsWarm = true;
+                for (const std::string& ap : actorPaths)
+                    assetsWarm = warmPath(ap, bestD2) && assetsWarm;
+                if (!assetsWarm)
+                    return vitaOps; // actor assets streaming; assemble next tick
             }
             try
             {
@@ -4585,81 +4582,99 @@ namespace MWWorld
             if (Settings::general().mVitaSeamlessCrossing)
             {
                 const auto g0 = std::chrono::steady_clock::now();
-                constexpr float rGuarantee = 4500.f;
                 const osg::Vec3f gp = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
-                int gWant = 0;
-                for (CellStore* gc : mActiveCells)
-                {
-                    if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, gp) > rGuarantee * rGuarantee)
-                        continue;
-                    gc->forEach([&](const MWWorld::Ptr& ptr) {
-                        if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
-                            return true;
-                        if (ptr.getRefData().getBaseNode() != nullptr)
-                            return true;
+                int gWant = 0, gAdds = 0;
+                float gDone = 0.f;
+                const auto sweep = [&](float rG) {
+                    const auto inRange = [&](const MWWorld::Ptr& ptr) {
                         const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
                         const float gdx = op.x() - gp.x();
                         const float gdy = op.y() - gp.y();
-                        if (gdx * gdx + gdy * gdy > rGuarantee * rGuarantee)
-                            return true;
-                        const VFS::Path::Normalized gm = getModel(ptr);
-                        if (!gm.empty())
-                        {
-                            mPreloader->vitaDemandWant(std::string(gm.value()));
-                            ++gWant;
-                        }
-                        return true;
-                    });
-                }
-                if (gWant > 0 && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
-                    mPreloader->vitaDrainWarmSync(8000);
-                int gAdds = 0;
-                for (CellStore* gc : mActiveCells)
-                {
-                    if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, gp) > rGuarantee * rGuarantee)
-                        continue;
-                    gc->forEach([&](const MWWorld::Ptr& ptr) {
-                        if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
-                            return true;
-                        if (mVitaBareAfterAdd.count(ptr.mRef) > 0)
-                            return true;
-                        const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
-                        const float gdx = op.x() - gp.x();
-                        const float gdy = op.y() - gp.y();
-                        if (gdx * gdx + gdy * gdy > rGuarantee * rGuarantee)
-                            return true;
-                        const bool hasNode = ptr.getRefData().getBaseNode() != nullptr;
-                        const bool hasPhys
-                            = mPhysics->getObject(ptr) != nullptr || mPhysics->getActor(ptr) != nullptr;
-                        if (hasNode && hasPhys)
-                            return true;
-                        try
-                        {
-                            if (!hasNode)
+                        return gdx * gdx + gdy * gdy <= rG * rG;
+                    };
+                    for (CellStore* gc : mActiveCells)
+                    {
+                        if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, gp) > rG * rG)
+                            continue;
+                        gc->forEach([&](const MWWorld::Ptr& ptr) {
+                            if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                                return true;
+                            if (ptr.getRefData().getBaseNode() != nullptr || !inRange(ptr))
+                                return true;
+                            const VFS::Path::Normalized gm = getModel(ptr);
+                            if (!gm.empty())
                             {
-                                addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
-                                ++sVitaLiveObjects;
+                                mPreloader->vitaDemandWant(std::string(gm.value()));
+                                ++gWant;
                             }
-                            else
-                                addPhysicsOnly(ptr, *mPhysics);
-                            addObject(ptr, mWorld, *mPhysics, mLowestPoint, /*isInterior*/ false, mNavigator, nullptr);
-                            ++sVitaLivePhys;
-                            ++gAdds;
-                            if (!hasNode && ptr.getRefData().getBaseNode() == nullptr)
-                                mVitaBareAfterAdd.insert(ptr.mRef);
-                        }
-                        catch (const std::exception& e)
-                        {
-                            char gb[176];
-                            snprintf(gb, sizeof(gb), "[LoadGuarantee] fail %s: %s",
-                                ptr.getCellRef().getRefId().toDebugString().c_str(), e.what());
-                            Vita::breadcrumb(gb);
-                        }
-                        return true;
-                    });
+                            // Actors load far more than their base model.
+                            std::vector<std::string> apaths;
+                            vitaActorWarmPaths(ptr, apaths);
+                            for (const std::string& ap : apaths)
+                            {
+                                mPreloader->vitaDemandWant(ap);
+                                ++gWant;
+                            }
+                            return true;
+                        });
+                    }
+                    if (mPreloader->vitaDemandWantedCount() > 0
+                        && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                        mPreloader->vitaDrainWarmSync(8000);
+                    for (CellStore* gc : mActiveCells)
+                    {
+                        if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, gp) > rG * rG)
+                            continue;
+                        gc->forEach([&](const MWWorld::Ptr& ptr) {
+                            if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                                return true;
+                            if (mVitaBareAfterAdd.count(ptr.mRef) > 0 || !inRange(ptr))
+                                return true;
+                            const bool hasNode = ptr.getRefData().getBaseNode() != nullptr;
+                            const bool hasPhys
+                                = mPhysics->getObject(ptr) != nullptr || mPhysics->getActor(ptr) != nullptr;
+                            if (hasNode && hasPhys)
+                                return true;
+                            try
+                            {
+                                if (!hasNode)
+                                {
+                                    addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
+                                    ++sVitaLiveObjects;
+                                }
+                                else
+                                    addPhysicsOnly(ptr, *mPhysics);
+                                addObject(
+                                    ptr, mWorld, *mPhysics, mLowestPoint, /*isInterior*/ false, mNavigator, nullptr);
+                                ++sVitaLivePhys;
+                                ++gAdds;
+                                if (!hasNode && ptr.getRefData().getBaseNode() == nullptr)
+                                    mVitaBareAfterAdd.insert(ptr.mRef);
+                            }
+                            catch (const std::exception& e)
+                            {
+                                char gb[176];
+                                snprintf(gb, sizeof(gb), "[LoadGuarantee] fail %s: %s",
+                                    ptr.getCellRef().getRefId().toDebugString().c_str(), e.what());
+                                Vita::breadcrumb(gb);
+                            }
+                            return true;
+                        });
+                    }
+                    gDone = rG;
+                };
+                // Near disc is the hard guarantee; spend whatever budget it
+                // leaves promoting outer rings to the same completeness.
+                for (float rG : { 4500.f, 6000.f, 7500.f })
+                {
+                    if (std::chrono::steady_clock::now() - g0 > std::chrono::seconds(14))
+                        break;
+                    if (rG > 4500.f && Vita::getHeapUsedMB() > getVitaCellBudgetMB() - 20)
+                        break; // promotion is opportunistic; never spend the ceiling
+                    sweep(rG);
                 }
-                char gb[112];
-                snprintf(gb, sizeof(gb), "[LoadGuarantee] want=%d adds=%d %dms", gWant, gAdds,
+                char gb[128];
+                snprintf(gb, sizeof(gb), "[LoadGuarantee] want=%d adds=%d r=%d %dms", gWant, gAdds, (int)gDone,
                     (int)std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - g0)
                         .count());

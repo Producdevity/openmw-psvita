@@ -182,6 +182,9 @@ namespace MWWorld
         // failed add): skip in the actor scan or it respins every tick.
         std::set<const LiveCellRefBase*> mVitaBareAfterAdd;
         float vitaCellEdge2(CellStore& cell, const osg::Vec3f& pp);
+        // Every model an actor's construction will actually load beyond its
+        // base: x-variant mesh + kf, NPC parts/gear, LEVC candidates.
+        void vitaActorWarmPaths(const Ptr& ptr, std::vector<std::string>& out) const;
         void vitaRemovePhysicsOnly(const Ptr& ptr, const DetourNavigator::UpdateGuard* guard);
         void vitaRetirePump();
         std::set<CellStore*, std::less<>> vitaProtectedCells() const;
