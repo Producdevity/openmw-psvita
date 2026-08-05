@@ -13,6 +13,7 @@
 #include <set>
 #include <unordered_map>
 #include <atomic>
+#include <chrono>
 #include <span>
 
 namespace osg
@@ -131,9 +132,14 @@ namespace MWWorld
         int vitaDemandLatencyMs() const { return mVitaDemandLatencyMs; }
         void vitaSaveModelBounds();
         void vitaLoadModelBounds();
+        // Loads a warm resource by extension: .kf via KeyframeManager, else template+shape.
+        void vitaLoadWarmResource(const std::string& path, osg::ref_ptr<const osg::Referenced>& tmpl,
+            osg::ref_ptr<const osg::Referenced>& shape) const;
         // Drains warm work in small batches, only when crossings are quiet.
         void vitaPumpWarm(bool idle);
         void vitaDrainWarmSync(int maxMs);
+        // Post-screen grace: clamp pump batches while visible frames catch up.
+        void vitaPumpGrace(int ms);
         std::size_t vitaWarmBacklog() const { return mVitaCommonBacklog.size() + mVitaRegionBacklog.size(); }
         void vitaDropCommonRefs();
         void vitaRelievePressure();
@@ -214,6 +220,7 @@ namespace MWWorld
         std::map<std::string, float> mVitaModelBounds; // learned, persisted
         bool mVitaBoundsDirty = false;
         std::atomic<int> mVitaDemandLatencyMs{ 1500 };
+        std::chrono::steady_clock::time_point mVitaPumpGraceUntil{};
         osg::ref_ptr<SceneUtil::WorkItem> mVitaDemandItem;
         void vitaDemandGC();
         std::map<std::pair<int, int>, std::vector<std::pair<std::string, unsigned>>> mVitaHotspots;

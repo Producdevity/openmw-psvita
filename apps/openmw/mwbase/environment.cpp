@@ -6,6 +6,10 @@
 
 MWBase::Environment* MWBase::Environment::sThis = nullptr;
 
+#ifdef __vita__
+thread_local float MWBase::Environment::sVitaDtScale = 1.f;
+#endif
+
 MWBase::Environment::Environment()
 {
     assert(sThis == nullptr);

@@ -350,9 +350,9 @@ namespace MWWorld
                     break;
                 try
                 {
-                    const VFS::Path::Normalized normalized(path);
-                    osg::ref_ptr<const osg::Referenced> tmpl = mSceneManager->getTemplate(normalized);
-                    osg::ref_ptr<const osg::Referenced> shape = mBulletShapeManager->getShape(normalized);
+                    osg::ref_ptr<const osg::Referenced> tmpl;
+                    osg::ref_ptr<const osg::Referenced> shape;
+                    mPreloader->vitaLoadWarmResource(path, tmpl, shape);
                     if (mDemandTarget)
                         mPreloader->vitaStoreDemandRef(path, tmpl, shape);
                     else
@@ -577,6 +577,20 @@ namespace MWWorld
         return 0.f;
     }
 
+    void CellPreloader::vitaLoadWarmResource(const std::string& path, osg::ref_ptr<const osg::Referenced>& tmpl,
+        osg::ref_ptr<const osg::Referenced>& shape) const
+    {
+        const VFS::Path::Normalized normalized(path);
+        constexpr VFS::Path::ExtensionView kfExt("kf");
+        if (normalized.extension() == kfExt)
+        {
+            tmpl = mResourceSystem->getKeyframeManager()->get(normalized);
+            return;
+        }
+        tmpl = mResourceSystem->getSceneManager()->getTemplate(normalized);
+        shape = mBulletShapeManager->getShape(normalized);
+    }
+
     bool CellPreloader::vitaShapeCached(const std::string& path) const
     {
         return mBulletShapeManager->getObjectCache()->getRefFromObjectCacheOrNone(path).has_value();
@@ -765,6 +779,11 @@ namespace MWWorld
             mVitaCommonBacklog.push_back(std::move(c));
     }
 
+    void CellPreloader::vitaPumpGrace(int ms)
+    {
+        mVitaPumpGraceUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    }
+
     void CellPreloader::vitaDrainWarmSync(int maxMs)
     {
         using Clock = std::chrono::steady_clock;
@@ -789,10 +808,9 @@ namespace MWWorld
             }
             try
             {
-                const VFS::Path::Normalized normalized(dpath);
-                osg::ref_ptr<const osg::Referenced> tmpl
-                    = mResourceSystem->getSceneManager()->getTemplate(normalized);
-                osg::ref_ptr<const osg::Referenced> shape = mBulletShapeManager->getShape(normalized);
+                osg::ref_ptr<const osg::Referenced> tmpl;
+                osg::ref_ptr<const osg::Referenced> shape;
+                vitaLoadWarmResource(dpath, tmpl, shape);
                 vitaStoreDemandRef(dpath, tmpl, shape);
                 ++warmed;
             }
@@ -809,9 +827,9 @@ namespace MWWorld
                 backlog.erase(backlog.begin());
                 try
                 {
-                    const VFS::Path::Normalized normalized(path);
-                    osg::ref_ptr<const osg::Referenced> tmpl = mResourceSystem->getSceneManager()->getTemplate(normalized);
-                    osg::ref_ptr<const osg::Referenced> shape = mBulletShapeManager->getShape(normalized);
+                    osg::ref_ptr<const osg::Referenced> tmpl;
+                    osg::ref_ptr<const osg::Referenced> shape;
+                    vitaLoadWarmResource(path, tmpl, shape);
                     vitaStoreCommonRef(path, tmpl, shape, regionTarget);
                     ++warmed;
                 }
@@ -996,7 +1014,8 @@ namespace MWWorld
             ? 33
             : (int)std::chrono::duration_cast<std::chrono::milliseconds>(pumpNow - sLastPumpT).count();
         sLastPumpT = pumpNow;
-        const std::size_t kBatch = idle ? 25 : (pumpDt > 37 ? 5 : 12);
+        const bool grace = pumpNow < mVitaPumpGraceUntil;
+        const std::size_t kBatch = grace ? 5 : (idle ? 25 : (pumpDt > 37 ? 5 : 12));
         vitaDemandGC();
         // Demand first: these models block eligible hydrations right now.
         if (!mVitaDemandItem || mVitaDemandItem->isDone())

@@ -92,7 +92,15 @@ namespace Resource
     {
         for (std::vector<BaseResourceManager*>::iterator it = mResourceManagers.begin(); it != mResourceManagers.end();
              ++it)
+        {
+#ifdef __vita__
+            // Keyframes are a few hundred KB parsed; re-parsing xbase_anim.kf
+            // after a flush cost ~900ms per NPC assembly.
+            if (*it == mKeyframeManager.get())
+                continue;
+#endif
             (*it)->clearCache();
+        }
     }
 
     void ResourceSystem::addResourceManager(BaseResourceManager* resourceMgr)

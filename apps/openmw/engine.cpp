@@ -3,6 +3,8 @@
 #include <cerrno>
 #include <chrono>
 #include <future>
+#include <map>
+#include <mutex>
 #include <system_error>
 #include <thread>
 #ifdef __vita__
@@ -243,18 +245,97 @@ namespace
     }
 }
 
+#ifdef __vita__
+namespace
+{
+    std::mutex sVitaScriptHistMutex;
+    std::map<ESM::RefId, uint32_t> sVitaScriptHist;
+}
+
+extern "C" int vita_script_hist_report(char* buf, unsigned int buflen)
+{
+    // Top 6 by time this window, then reset.
+    const std::lock_guard<std::mutex> lock(sVitaScriptHistMutex);
+    int written = 0;
+    for (int rank = 0; rank < 6; ++rank)
+    {
+        auto best = sVitaScriptHist.end();
+        for (auto it = sVitaScriptHist.begin(); it != sVitaScriptHist.end(); ++it)
+            if (it->second > 0 && (best == sVitaScriptHist.end() || it->second > best->second))
+                best = it;
+        if (best == sVitaScriptHist.end())
+            break;
+        int n = snprintf(buf + written, buflen - written, "%s%s=%ums", written ? " " : "",
+            best->first.toDebugString().c_str(), best->second / 1000);
+        best->second = 0;
+        if (n < 0 || (unsigned)n >= buflen - written)
+            break;
+        written += n;
+    }
+    sVitaScriptHist.clear();
+    return written;
+}
+#endif
+
 void OMW::Engine::executeLocalScripts()
 {
     MWWorld::LocalScripts& localScripts = mWorld->getLocalScripts();
 
     localScripts.startIteration();
     std::pair<ESM::RefId, MWWorld::Ptr> script;
+#ifdef __vita__
+    // Far-tier scheduling: scripted objects beyond kNearR tick every 4th
+    // frame with dt scaled 4x (thread-local, opcodes see correct elapsed).
+    static unsigned sScriptFrame = 0;
+    ++sScriptFrame;
+    constexpr float kNearR = 2048.f;
+    const osg::Vec3f playerPos = mWorld->getPlayerPtr().getRefData().getPosition().asVec3();
+#endif
     while (localScripts.getNext(script))
     {
+#ifdef __vita__
+        bool farTier = false;
+        if (script.second.isInCell())
+        {
+            const osg::Vec3f op = script.second.getRefData().getPosition().asVec3();
+            farTier = (op - playerPos).length2() > kNearR * kNearR;
+        }
+        if (farTier)
+        {
+            const unsigned phase = (unsigned)((uintptr_t)script.second.mRef >> 4);
+            if ((sScriptFrame & 3u) != (phase & 3u))
+                continue;
+        }
+        MWScript::InterpreterContext interpreterContext(&script.second.getRefData().getLocals(), script.second);
+        const osg::Timer* const stimer = osg::Timer::instance();
+        const osg::Timer_t st0 = stimer->tick();
+        if (farTier)
+            MWBase::Environment::sVitaDtScale = 4.f;
+        mScriptManager->run(script.first, interpreterContext);
+        MWBase::Environment::sVitaDtScale = 1.f;
+        const uint32_t sus = (uint32_t)stimer->delta_u(st0, stimer->tick());
+        {
+            const std::lock_guard<std::mutex> lock(sVitaScriptHistMutex);
+            sVitaScriptHist[script.first] += sus;
+        }
+#else
         MWScript::InterpreterContext interpreterContext(&script.second.getRefData().getLocals(), script.second);
         mScriptManager->run(script.first, interpreterContext);
+#endif
     }
 }
+
+#ifdef __vita__
+extern "C" {
+uint32_t vita_sim_script_us = 0, vita_sim_mech_us = 0, vita_sim_phys_us = 0;
+uint32_t vita_sim_gscript_us = 0;
+}
+#define VITA_SIM_T0() const osg::Timer_t simT0 = timer->tick();
+#define VITA_SIM_ADD(var) var += (uint32_t)timer->delta_u(simT0, timer->tick());
+#else
+#define VITA_SIM_T0()
+#define VITA_SIM_ADD(var)
+#endif
 
 void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, float frametime, bool paused)
 {
@@ -263,6 +344,7 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
 
         {
             ScopedProfile<UserStatsType::Script> profile(frameStart, frameNumber, *timer, *stats);
+            VITA_SIM_T0()
 
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
@@ -274,7 +356,15 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
                         executeLocalScripts();
 
                         // global scripts
+#ifdef __vita__
+                        {
+                            const osg::Timer_t gt0 = timer->tick();
+                            mScriptManager->getGlobalScripts().run();
+                            vita_sim_gscript_us += (uint32_t)timer->delta_u(gt0, timer->tick());
+                        }
+#else
                         mScriptManager->getGlobalScripts().run();
+#endif
                     }
 
                     mWorld->getWorldScene().markCellAsUnchanged();
@@ -300,11 +390,13 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
 #endif
                 }
             }
+            VITA_SIM_ADD(vita_sim_script_us)
         }
 
         // update mechanics
         {
             ScopedProfile<UserStatsType::Mechanics> profile(frameStart, frameNumber, *timer, *stats);
+            VITA_SIM_T0()
 
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
@@ -317,11 +409,13 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
                 if (!paused && player.getClass().getCreatureStats(player).isDead())
                     mStateManager->endGame();
             }
+            VITA_SIM_ADD(vita_sim_mech_us)
         }
 
         // update physics
         {
             ScopedProfile<UserStatsType::Physics> profile(frameStart, frameNumber, *timer, *stats);
+            VITA_SIM_T0()
 
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
@@ -339,6 +433,7 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
                 mWorld->updatePhysics(frametime, paused, frameStart, frameNumber, *stats);
 #endif
             }
+            VITA_SIM_ADD(vita_sim_phys_us)
         }
 
 }

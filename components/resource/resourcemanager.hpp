@@ -53,8 +53,14 @@ namespace Resource
         /// Clear cache entries that have not been referenced for longer than expiryDelay.
         void updateCache(double referenceTime) override { mCache->update(referenceTime, mExpiryDelay); }
 
+#ifdef __vita__
+        /// Keep externally referenced entries (warm pool pins them anyway):
+        /// same bytes freed, no cold-reload of still-resident objects.
+        void clearCache() override { mCache->clearUnreferenced(); }
+#else
         /// Clear all cache entries.
         void clearCache() override { mCache->clear(); }
+#endif
 
         /// Direct cache access for diagnostics/statistics (e.g. Vita memory audit).
         CacheType* getObjectCache() { return mCache.get(); }

@@ -1,0 +1,165 @@
+--- a/src/osgUtil/CullVisitor.cpp
++++ b/src/osgUtil/CullVisitor.cpp
+@@ -39,16 +39,68 @@
+ using namespace osgUtil;
+ 
+ #ifdef __vita__
++#include <psp2/kernel/processmgr.h>
+ extern "C" {
+     unsigned int cullprof_node = 0, cullprof_group = 0, cullprof_transform = 0, cullprof_geode = 0,
+         cullprof_drawable = 0, cullprof_dcull = 0, cullprof_leaves = 0, cullprof_sg = 0;
+     // Set by SceneUtil::Skeleton around its cull traverse; counts bone visits.
+     int cullprof_in_skeleton = 0;
+     unsigned int cullprof_xf_bone = 0;
++    // Time buckets: drawable-apply total, cull-callback share, pre-traverse
++    // exclusive cost of Transform/Group applies.
++    unsigned int cullprof_drw_us = 0, cullprof_cb_us = 0, cullprof_xf_us = 0, cullprof_grp_us = 0;
++}
++#include <cstdio>
++namespace
++{
++    // Per-class callback cost; className() literals are pointer-stable.
++    struct VitaCbStat
++    {
++        const char* name;
++        char owner[32];
++        unsigned int us;
++        unsigned int n;
++    };
++    VitaCbStat sVitaCbStats[8] = {};
++
++    void cullprofCbNote(const char* name, const std::string& ownerName, unsigned int us)
++    {
++        for (int i = 0; i < 8; ++i)
++            if (sVitaCbStats[i].name == name || !sVitaCbStats[i].name)
++            {
++                sVitaCbStats[i].name = name;
++                if (!sVitaCbStats[i].owner[0] && !ownerName.empty())
++                    snprintf(sVitaCbStats[i].owner, sizeof(sVitaCbStats[i].owner), "%s", ownerName.c_str());
++                sVitaCbStats[i].us += us;
++                ++sVitaCbStats[i].n;
++                return;
++            }
++    }
++}
++extern "C" int cullprof_cb_report(char* buf, unsigned int buflen)
++{
++    int written = 0;
++    for (int i = 0; i < 8 && sVitaCbStats[i].name; ++i)
++    {
++        int n = snprintf(buf + written, buflen - written, "%s%s(%s)=%u/%uus", written ? " " : "", sVitaCbStats[i].name,
++            sVitaCbStats[i].owner[0] ? sVitaCbStats[i].owner : "?", sVitaCbStats[i].n, sVitaCbStats[i].us);
++        sVitaCbStats[i].us = 0;
++        sVitaCbStats[i].n = 0;
++        if (n < 0 || (unsigned)n >= buflen - written)
++            break;
++        written += n;
++    }
++    return written;
+ }
+ #define CULLPROF_INC(x) (++x)
++#define CULLPROF_T() sceKernelGetProcessTimeLow()
++#define CULLPROF_ADD(var, t0) var += sceKernelGetProcessTimeLow() - (t0);
++#define CULLPROF_CB_NOTE(name, owner, us) cullprofCbNote(name, owner, us);
+ #else
+ #define CULLPROF_INC(x) ((void)0)
++#define CULLPROF_T() 0
++#define CULLPROF_ADD(var, t0)
++#define CULLPROF_CB_NOTE(name, owner, us)
+ #endif
+ 
+ inline float MAX_F(float a, float b)
+@@ -918,20 +970,43 @@
+ void CullVisitor::apply(osg::Drawable& drawable)
+ {
+     CULLPROF_INC(cullprof_drawable);
++#ifdef __vita__
++    struct DrwTimer
++    {
++        unsigned int mT0;
++        ~DrwTimer() { CULLPROF_ADD(cullprof_drw_us, mT0) }
++    } drwTimer{ CULLPROF_T() };
++#endif
+     RefMatrix& matrix = *getModelViewMatrix();
+ 
+     const BoundingBox &bb =drawable.getBoundingBox();
+ 
+     if( drawable.getCullCallback() )
+     {
++        const unsigned int cb0 = CULLPROF_T();
+         osg::DrawableCullCallback* dcb = drawable.getCullCallback()->asDrawableCullCallback();
+         if (dcb)
+         {
+-            if( dcb->cull( this, &drawable, &_renderInfo ) == true ) return;
++            const bool cbCulled = dcb->cull( this, &drawable, &_renderInfo ) == true;
++            const unsigned int cbe = CULLPROF_T() - cb0;
++            cullprof_cb_us += cbe;
++            CULLPROF_CB_NOTE(drawable.getCullCallback()->className(),
++                !drawable.getName().empty() ? drawable.getName()
++                    : std::string(drawable.className()) + "<"
++                        + (drawable.getNumParents() ? drawable.getParent(0)->getName() : "") + ">",
++                cbe)
++            if (cbCulled) return;
+         }
+         else
+         {
+             drawable.getCullCallback()->run(&drawable,this);
++            const unsigned int cbe = CULLPROF_T() - cb0;
++            cullprof_cb_us += cbe;
++            CULLPROF_CB_NOTE(drawable.getCullCallback()->className(),
++                !drawable.getName().empty() ? drawable.getName()
++                    : std::string(drawable.className()) + "<"
++                        + (drawable.getNumParents() ? drawable.getParent(0)->getName() : "") + ">",
++                cbe)
+         }
+     }
+ 
+@@ -1158,7 +1233,12 @@
+ void CullVisitor::apply(Group& node)
+ {
+     CULLPROF_INC(cullprof_group);
+-    if (isCulled(node)) return;
++    const unsigned int grp0 = CULLPROF_T();
++    if (isCulled(node))
++    {
++        CULLPROF_ADD(cullprof_grp_us, grp0)
++        return;
++    }
+ 
+     // push the culling mode.
+     pushCurrentMask();
+@@ -1167,6 +1247,7 @@
+     StateSet* node_state = node.getStateSet();
+     if (node_state) pushStateSet(node_state);
+ 
++    CULLPROF_ADD(cullprof_grp_us, grp0)
+     handle_cull_callbacks_and_traverse(node);
+ 
+     // pop the node's state off the render graph stack.
+@@ -1183,7 +1264,12 @@
+     if (cullprof_in_skeleton)
+         ++cullprof_xf_bone;
+ #endif
+-    if (isCulled(node)) return;
++    const unsigned int xf0 = CULLPROF_T();
++    if (isCulled(node))
++    {
++        CULLPROF_ADD(cullprof_xf_us, xf0)
++        return;
++    }
+ 
+     // push the culling mode.
+     pushCurrentMask();
+@@ -1196,6 +1282,7 @@
+     node.computeLocalToWorldMatrix(*matrix,this);
+     pushModelViewMatrix(matrix, node.getReferenceFrame());
+ 
++    CULLPROF_ADD(cullprof_xf_us, xf0)
+     handle_cull_callbacks_and_traverse(node);
+ 
+     popModelViewMatrix();
+@@ -1774,3 +1861,4 @@
+     popCurrentMask();
+ }
+ 
++

@@ -178,6 +178,9 @@ namespace MWWorld
         std::map<CellStore*, int> mVitaIcoPending;
         std::map<CellStore*, osg::Vec2f> mVitaCleanSweep;
         std::map<CellStore*, osg::Vec4f> mVitaCellRefBox;
+        // Lane B targets whose add produced no base node (nothing-roll LEVC,
+        // failed add): skip in the actor scan or it respins every tick.
+        std::set<const LiveCellRefBase*> mVitaBareAfterAdd;
         float vitaCellEdge2(CellStore& cell, const osg::Vec3f& pp);
         void vitaRemovePhysicsOnly(const Ptr& ptr, const DetourNavigator::UpdateGuard* guard);
         void vitaRetirePump();

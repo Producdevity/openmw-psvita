@@ -106,6 +106,26 @@ namespace Resource
             mItems.clear();
         }
 
+        /** Remove only solely-owned objects. Externally referenced entries stay
+         * cached: erasing them frees just a map node while the ref pins the
+         * object anyway — and the next lookup would cold-reload a duplicate.*/
+        void clearUnreferenced()
+        {
+            std::vector<osg::ref_ptr<osg::Object>> objectsToRemove;
+            {
+                std::lock_guard<std::mutex> lock(mMutex);
+                std::erase_if(mItems, [&](auto& v) {
+                    Item& item = v.second;
+                    if (item.mValue != nullptr && item.mValue->referenceCount() > 1)
+                        return false;
+                    if (item.mValue != nullptr)
+                        objectsToRemove.push_back(std::move(item.mValue));
+                    return true;
+                });
+            }
+            objectsToRemove.clear();
+        }
+
         /** Add a key,object,timestamp triple to the Registry::ObjectCache.*/
         template <class K>
         void addEntryToObjectCache(K&& key, osg::Object* object, double timestamp = 0.0)

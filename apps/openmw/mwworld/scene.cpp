@@ -75,6 +75,7 @@ static void countDrawables(const osg::Node* node, unsigned int& drawableCount, u
 
 #include <components/esm3/loadbody.hpp>
 #include <components/resource/resourcesystem.hpp>
+#include <components/vfs/manager.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/optimizer.hpp>
@@ -295,6 +296,16 @@ namespace
 #ifdef __vita__
         sVitaAddLuaUs += vitaUsSince(lua0);
 #endif
+    }
+
+    // The nav overload below no-ops without a collision object; re-add paths
+    // (phys stripped beyond the ring, then approached) must recreate it first.
+    void addPhysicsOnly(const MWWorld::Ptr& ptr, MWPhysics::PhysicsSystem& physics)
+    {
+        const VFS::Path::Normalized model = getModel(ptr);
+        if (model.empty() || physics.getObject(ptr))
+            return;
+        ptr.getClass().insertObject(ptr, model, makeDirectNodeRotation(ptr), physics);
     }
 
     void addObject(const MWWorld::Ptr& ptr, const MWWorld::World& world, const MWPhysics::PhysicsSystem& physics,
@@ -1661,6 +1672,7 @@ namespace MWWorld
             return;
         mVitaCleanSweep.erase(cell);
         mVitaCellRefBox.erase(cell);
+        mVitaBareAfterAdd.clear(); // ref addresses die with the store; no stale skips
         Log(Debug::Info) << "Unloading cell " << cell->getCell()->getDescription();
         const auto ul0 = std::chrono::steady_clock::now();
         struct UlTimer
@@ -2318,6 +2330,7 @@ namespace MWWorld
     static int sVitaLivePhys = 0;
     static int sVitaCostN = 0;
     static long sVitaCostKB = 0;
+    static unsigned sVitaContactAdds = 0;
 
     int Scene::vitaBubbleTick(int maxMs)
     {
@@ -2439,15 +2452,8 @@ namespace MWWorld
                 vitaPlayerSpeed
                     = std::min(2400.f, (osg::Vec2f(pp.x(), pp.y()) - sLastPP).length() / dtS);
         }
-        static float sPrevSpeed = 0.f;
-        static Clock::time_point sLastDrain{};
-        if (sPrevSpeed > 1500.f && vitaPlayerSpeed < 300.f
-            && (sLastDrain.time_since_epoch().count() == 0 || tick0 - sLastDrain > std::chrono::seconds(12)))
-        {
-            mPreloader->vitaDrainWarmSync(400); // touchdown after superhuman travel
-            sLastDrain = tick0;
-        }
-        sPrevSpeed = vitaPlayerSpeed;
+        // Touchdown drain deleted: time-to-need prefetch + nearest-first
+        // demand pump clear the small landing tail (~20 models) without a stall.
         sLastPP = osg::Vec2f(pp.x(), pp.y());
         sLastPPT = nowTtn;
         const float vitaWindowUnits = vitaPlayerSpeed
@@ -2459,6 +2465,63 @@ namespace MWWorld
         if (cells.empty())
             return 0;
         const std::size_t n = cells.size();
+
+        // ---- Contact ring: solid ground where the player IS, before any
+        // visible streaming. Targets rendered-but-collider-less objects
+        // (far-rendered earlier, approached fast). Own small budget.
+        {
+            SegTimer segContact(&sSegShellUs);
+            // Speed-scaled: at 2400 u/s a fixed 1500 ring gives 0.6s of
+            // warning vs ~1.5s demand latency — colliders lose the race.
+            const float rContact = std::clamp(1500.f + vitaPlayerSpeed * 1.8f, 1500.f, 6000.f);
+            const auto contactDeadline = tick0 + std::chrono::milliseconds(3);
+            for (std::size_t ci = 0; ci < n && Clock::now() < contactDeadline; ++ci)
+            {
+                CellStore& cell = *cells[(ci + sStartRot) % n];
+                if (!cell.getCell()->isExterior())
+                    continue;
+                if (vitaCellEdge2(cell, pp) > rContact * rContact)
+                    continue;
+                cell.forEach([&](const MWWorld::Ptr& ptr) {
+                    if (Clock::now() >= contactDeadline)
+                        return false;
+                    if (!isLiteType(ptr.getType()) || isPagedRef(ptr))
+                        return true;
+                    if (ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                        return true;
+                    if (ptr.getRefData().getBaseNode() == nullptr)
+                        return true; // not rendered yet; shells own the pair
+                    if (mPhysics->getObject(ptr) != nullptr)
+                        return true;
+                    const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
+                    const float dx = op.x() - pp.x();
+                    const float dy = op.y() - pp.y();
+                    const float d2 = dx * dx + dy * dy;
+                    if (d2 > rContact * rContact)
+                        return true;
+                    const VFS::Path::Normalized pm = getModel(ptr);
+                    if (!pm.empty() && !mPreloader->vitaShapeCached(std::string(pm.value()))
+                        && !warmPath(std::string(pm.value()), d2))
+                        return true; // shape warming; next pass
+                    try
+                    {
+                        addPhysicsOnly(ptr, *mPhysics);
+                        addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
+                        ++vitaOps;
+                        ++sVitaLivePhys;
+                        ++sVitaContactAdds;
+                    }
+                    catch (const std::exception& e)
+                    {
+                        char pb[176];
+                        snprintf(pb, sizeof(pb), "[PhysFail] %s: %s",
+                            ptr.getCellRef().getRefId().toDebugString().c_str(), e.what());
+                        Vita::breadcrumb(pb);
+                    }
+                    return true;
+                });
+            }
+        }
 
         // ---- Shell passes: the closest missing structure ANYWHERE wins.
         // Budget exhausts in the nearest unfinished shell, so catch-up under
@@ -2557,6 +2620,7 @@ namespace MWWorld
                 SegTimer segDom(&sSegDomUs);
                 mVitaActorDomain.insert(&cell);
                 mWorld.getLocalScripts().addCell(&cell);
+                mVitaBareAfterAdd.clear(); // respawn may re-roll blacklisted spawns
                 cell.respawn();
                 MWBase::Environment::get().getSoundManager()->vitaWarmCellSounds(cell.getCell()->getRegion());
                 MWBase::Environment::get().getSoundManager()->vitaWarmActorSounds(cell);
@@ -2722,6 +2786,7 @@ namespace MWWorld
                                 return true; // shape warming; add next pass
                             try
                             {
+                                addPhysicsOnly(ptr, *mPhysics);
                                 addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
                                 ++vitaOps;
                                 ++sVitaLivePhys;
@@ -2807,10 +2872,11 @@ namespace MWWorld
                 mPreloader->vitaDemandStats(dw, dl, dr);
                 unsigned rigH = 0, rigM = 0, rigN = 0;
                 SceneUtil::getRigCacheStats(rigH, rigM, rigN);
-                snprintf(mm, sizeof(mm), "[MemMap] heap=%dMB objs=%d phys=%d stores=%d dmd=%d/%d/%d rig=%u/%u/%u",
+                snprintf(mm, sizeof(mm), "[MemMap] heap=%dMB objs=%d phys=%d stores=%d dmd=%d/%d/%d rig=%u/%u/%u ct=%u",
                     Vita::getHeapUsedMB(), (int)mRendering.getObjects().getObjectCount(),
                     (int)mPhysics->getObjectCount(), (int)mWorld.getWorldModel().vitaCellStoreCount(), dw, dl,
-                    dr, rigH, rigM, rigN);
+                    dr, rigH, rigM, rigN, sVitaContactAdds);
+                sVitaContactAdds = 0;
                 Vita::breadcrumb(mm);
             }
         }
@@ -2864,6 +2930,8 @@ namespace MWWorld
                         return true;
                     if (ptr.getRefData().getBaseNode() != nullptr)
                         return true;
+                    if (mVitaBareAfterAdd.count(ptr.mRef) > 0)
+                        return true; // nothing-roll LEVC / failed add: don't respin
                     const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
                     const float dx = op.x() - pp.x();
                     const float dy = op.y() - pp.y();
@@ -2880,6 +2948,24 @@ namespace MWWorld
                 return vitaOps;
             if (!warmOrRequest(best, bestD2))
                 return vitaOps; // skeleton warming; try next tick
+            if (best.getType() == ESM::REC_CREA)
+            {
+                // Animation instantiates the x-variant mesh, not getModel's
+                // base — warm what will actually load: x-mesh + its kf.
+                const VFS::Path::Normalized cm = getModel(best);
+                if (!cm.empty())
+                {
+                    const VFS::Manager* vfs = mRendering.getResourceSystem()->getVFS();
+                    const VFS::Path::Normalized am = Misc::ResourceHelpers::correctActorModelPath(cm, vfs);
+                    if (am != cm && !warmPath(std::string(am.value()), bestD2))
+                        return vitaOps; // anim mesh streaming; try next tick
+                    VFS::Path::Normalized kfp(am);
+                    constexpr VFS::Path::ExtensionView kfExt("kf");
+                    kfp.changeExtension(kfExt);
+                    if (vfs->exists(kfp) && !warmPath(std::string(kfp.value()), bestD2))
+                        return vitaOps; // keyframes streaming; try next tick
+                }
+            }
             if (best.getType() == ESM::REC_NPC_)
             {
                 // The invariant covers parts: composite assembly must never
@@ -2964,9 +3050,21 @@ namespace MWWorld
                             if (const ESM::Creature* cre = creatures.search(item.mId))
                             {
                                 if (!cre->mModel.empty())
-                                    models.push_back(
-                                        Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(cre->mModel))
-                                            .value());
+                                {
+                                    const VFS::Manager* vfs = mRendering.getResourceSystem()->getVFS();
+                                    const VFS::Path::Normalized cm
+                                        = Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(cre->mModel));
+                                    models.push_back(cm.value()); // base: physics shape
+                                    const VFS::Path::Normalized am
+                                        = Misc::ResourceHelpers::correctActorModelPath(cm, vfs);
+                                    if (am != cm)
+                                        models.push_back(am.value()); // x-variant: render/anim
+                                    VFS::Path::Normalized kfp(am);
+                                    constexpr VFS::Path::ExtensionView kfExt("kf");
+                                    kfp.changeExtension(kfExt);
+                                    if (vfs->exists(kfp))
+                                        models.push_back(kfp.value());
+                                }
                             }
                             else if (const ESM::CreatureLevList* sub = levLists.search(item.mId))
                             {
@@ -2996,6 +3094,8 @@ namespace MWWorld
             {
                 Log(Debug::Error) << "actor hydrate fail '" << best.getCellRef().getRefId() << "': " << e.what();
             }
+            if (best.getRefData().getBaseNode() == nullptr)
+                mVitaBareAfterAdd.insert(best.mRef);
             --actorBudget;
         }
         return vitaOps;
@@ -3748,6 +3848,7 @@ namespace MWWorld
         mVitaIcoPending.clear();
         mVitaCleanSweep.clear();
         mVitaCellRefBox.clear();
+        mVitaBareAfterAdd.clear();
         SceneUtil::clearRigCache();
         mPendingCellLoads.clear();
         // Pending demotions/promotions reference cells that are about to be
@@ -4416,9 +4517,9 @@ namespace MWWorld
             // finished disc. Ticks register their own demand (cold models,
             // actor parts) — drain it between passes or "quiescence" lies.
             const auto qStart = std::chrono::steady_clock::now();
-            for (int pass = 0; pass < 40; ++pass)
+            for (int pass = 0; pass < 80; ++pass)
             {
-                if (std::chrono::steady_clock::now() - qStart > std::chrono::seconds(10))
+                if (std::chrono::steady_clock::now() - qStart > std::chrono::seconds(20))
                     break;
                 const int qOps = vitaBubbleTick(2000);
                 if (mPreloader->vitaDemandWantedCount() > 0
@@ -4427,6 +4528,146 @@ namespace MWWorld
                 else if (qOps == 0)
                     break;
             }
+            // Tier 2: deferred ring cells join the disc BEHIND the screen —
+            // post-lift one-per-frame preps were the wall-of-structure pop-in.
+            if (Settings::general().mVitaSeamlessCrossing && !mPendingCellLoads.empty())
+            {
+                const auto p0 = std::chrono::steady_clock::now();
+                int preps = 0;
+                const osg::Vec3f prepPos = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
+                for (auto it = mPendingCellLoads.begin(); it != mPendingCellLoads.end();)
+                {
+                    if (std::chrono::steady_clock::now() - p0 > std::chrono::seconds(4)
+                        || Vita::isMemoryPressure(getVitaCellBudgetMB()))
+                        break;
+                    CellStore& prepCell = *it->cell;
+                    prepareCellForDeferredLoad(prepCell, prepPos, nullptr);
+                    if (prepCell.getState() == CellStore::State_Loaded)
+                    {
+                        std::vector<std::string> cold;
+                        prepCell.forEach([&](const MWWorld::Ptr& cp) {
+                            const VFS::Path::Normalized m = getModel(cp);
+                            if (!m.empty())
+                                cold.emplace_back(m.value());
+                            return true;
+                        });
+                        mPreloader->vitaPrefetchModels(cold);
+                    }
+                    it = mPendingCellLoads.erase(it);
+                    ++preps;
+                }
+                // View-reach fill over the completed cell set: quiescence
+                // again, bounded — leftovers stream post-lift (far + small).
+                const auto q2Start = std::chrono::steady_clock::now();
+                for (int pass = 0; pass < 30; ++pass)
+                {
+                    if (std::chrono::steady_clock::now() - q2Start > std::chrono::seconds(8))
+                        break;
+                    const int qOps = vitaBubbleTick(2000);
+                    if (mPreloader->vitaDemandWantedCount() > 0
+                        && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                        mPreloader->vitaDrainWarmSync(1500);
+                    else if (qOps == 0)
+                        break;
+                }
+                char tb[96];
+                snprintf(tb, sizeof(tb), "[LoadGuarantee] tier2 preps=%d %dms", preps,
+                    (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - p0)
+                        .count());
+                Vita::breadcrumb(tb);
+            }
+
+            // Load guarantee: quiescence is complete-per-policy; the lifted
+            // screen must be complete-geometrically. Sweep the near disc and
+            // give EVERY object its pair — warm-synced first, cold bits load
+            // sync behind the screen like the classic path.
+            if (Settings::general().mVitaSeamlessCrossing)
+            {
+                const auto g0 = std::chrono::steady_clock::now();
+                constexpr float rGuarantee = 4500.f;
+                const osg::Vec3f gp = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
+                int gWant = 0;
+                for (CellStore* gc : mActiveCells)
+                {
+                    if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, gp) > rGuarantee * rGuarantee)
+                        continue;
+                    gc->forEach([&](const MWWorld::Ptr& ptr) {
+                        if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                            return true;
+                        if (ptr.getRefData().getBaseNode() != nullptr)
+                            return true;
+                        const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
+                        const float gdx = op.x() - gp.x();
+                        const float gdy = op.y() - gp.y();
+                        if (gdx * gdx + gdy * gdy > rGuarantee * rGuarantee)
+                            return true;
+                        const VFS::Path::Normalized gm = getModel(ptr);
+                        if (!gm.empty())
+                        {
+                            mPreloader->vitaDemandWant(std::string(gm.value()));
+                            ++gWant;
+                        }
+                        return true;
+                    });
+                }
+                if (gWant > 0 && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                    mPreloader->vitaDrainWarmSync(8000);
+                int gAdds = 0;
+                for (CellStore* gc : mActiveCells)
+                {
+                    if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, gp) > rGuarantee * rGuarantee)
+                        continue;
+                    gc->forEach([&](const MWWorld::Ptr& ptr) {
+                        if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                            return true;
+                        if (mVitaBareAfterAdd.count(ptr.mRef) > 0)
+                            return true;
+                        const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
+                        const float gdx = op.x() - gp.x();
+                        const float gdy = op.y() - gp.y();
+                        if (gdx * gdx + gdy * gdy > rGuarantee * rGuarantee)
+                            return true;
+                        const bool hasNode = ptr.getRefData().getBaseNode() != nullptr;
+                        const bool hasPhys
+                            = mPhysics->getObject(ptr) != nullptr || mPhysics->getActor(ptr) != nullptr;
+                        if (hasNode && hasPhys)
+                            return true;
+                        try
+                        {
+                            if (!hasNode)
+                            {
+                                addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
+                                ++sVitaLiveObjects;
+                            }
+                            else
+                                addPhysicsOnly(ptr, *mPhysics);
+                            addObject(ptr, mWorld, *mPhysics, mLowestPoint, /*isInterior*/ false, mNavigator, nullptr);
+                            ++sVitaLivePhys;
+                            ++gAdds;
+                            if (!hasNode && ptr.getRefData().getBaseNode() == nullptr)
+                                mVitaBareAfterAdd.insert(ptr.mRef);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            char gb[176];
+                            snprintf(gb, sizeof(gb), "[LoadGuarantee] fail %s: %s",
+                                ptr.getCellRef().getRefId().toDebugString().c_str(), e.what());
+                            Vita::breadcrumb(gb);
+                        }
+                        return true;
+                    });
+                }
+                char gb[112];
+                snprintf(gb, sizeof(gb), "[LoadGuarantee] want=%d adds=%d %dms", gWant, gAdds,
+                    (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - g0)
+                        .count());
+                Vita::breadcrumb(gb);
+            }
+            // Post-screen grace: small worker batches while first visible
+            // frames absorb catch-up work (idle pump would flood otherwise).
+            mPreloader->vitaPumpGrace(5000);
         }
             const auto segMs = [&](std::chrono::steady_clock::time_point a,
                                  std::chrono::steady_clock::time_point b) {

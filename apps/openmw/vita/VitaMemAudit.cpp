@@ -20,7 +20,12 @@ extern "C"
     extern uint32_t osgprof_replayable, osgprof_replayed, osgprof_streplayed;
     extern unsigned int cullprof_node, cullprof_group, cullprof_transform, cullprof_geode, cullprof_drawable,
         cullprof_dcull, cullprof_leaves, cullprof_sg, cullprof_xf_bone;
+    extern unsigned int cullprof_drw_us, cullprof_cb_us, cullprof_xf_us, cullprof_grp_us;
+    extern uint32_t vita_sim_script_us, vita_sim_mech_us, vita_sim_phys_us, vita_sim_gscript_us;
+    int cullprof_cb_report(char* buf, unsigned int buflen);
+    int vita_script_hist_report(char* buf, unsigned int buflen);
     extern uint32_t vgl_memo_hits, vgl_memo_miss;
+    extern uint32_t vgl_vprog_hits, vgl_vprog_miss;
     extern uint32_t vgl_swap_block_us, vgl_swap_block_max, vgl_qdepth_sum, vgl_qdepth_max, vgl_gpu_frames;
     unsigned int terr_chunks = 0, terr_pass_leaves = 0;
     uint32_t phase_evt_us = 0, phase_upd_us = 0, phase_focus_us = 0, phase_lua_us = 0;
@@ -458,7 +463,7 @@ namespace Vita
         }
         snprintf(buf, sizeof(buf),
             "[Scene] drawables=%.0f fast=%.0f lights=%.0f bins=%.0f tris=%.0f strips=%.0f lightCb=%u/%.2fms "
-            "glmemo=%u/%u bin2=%u/%u",
+            "glmemo=%u/%u vprog=%u/%u bin2=%u/%u",
             countOf(camStats, "Visible number of drawables"), countOf(camStats, "Visible number of fast drawables"),
             countOf(camStats, "Visible number of lights"), countOf(camStats, "Visible number of render bins"),
             countOf(camStats, "Visible number of GL_TRIANGLES"),
@@ -466,10 +471,12 @@ namespace Vita
             SceneUtil::gLightCbCalls / kReportEveryFrames,
             SceneUtil::gLightCbUs / 1000.0 / kReportEveryFrames,
             vgl_memo_hits / kReportEveryFrames, vgl_memo_miss / kReportEveryFrames,
+            vgl_vprog_hits / kReportEveryFrames, vgl_vprog_miss / kReportEveryFrames,
             vita_bin2_graphs / kReportEveryFrames, vita_bin2_leaves / kReportEveryFrames);
         SceneUtil::gLightCbCalls = 0;
         SceneUtil::gLightCbUs = 0;
         vgl_memo_hits = vgl_memo_miss = 0;
+        vgl_vprog_hits = vgl_vprog_miss = 0;
         vita_bin2_graphs = vita_bin2_leaves = 0;
         auditLog(buf);
 
@@ -489,19 +496,52 @@ namespace Vita
         if (cullprof_node + cullprof_group + cullprof_drawable + cullprof_sg > 0)
         {
             snprintf(buf, sizeof(buf),
-                "[CullProf] node=%u grp=%u xf=%u bone=%u geode=%u drw=%u dcull=%u leaves=%u crep=%u sg=%u terr=%.2fms cdrop=%u /frame",
+                "[CullProf] node=%u grp=%u xf=%u bone=%u geode=%u drw=%u dcull=%u leaves=%u crep=%u sg=%u terr=%.2fms "
+                "dus=%.2f cbus=%.2f xfus=%.2f gus=%.2f cdrop=%u /frame",
                 cullprof_node / kReportEveryFrames, cullprof_group / kReportEveryFrames,
                 cullprof_transform / kReportEveryFrames, cullprof_xf_bone / kReportEveryFrames,
                 cullprof_geode / kReportEveryFrames, cullprof_drawable / kReportEveryFrames,
                 cullprof_dcull / kReportEveryFrames, cullprof_leaves / kReportEveryFrames,
                 cullprof_creplay / kReportEveryFrames, cullprof_sg / kReportEveryFrames,
-                (double)cullprof_terr_us / 1000.0 / kReportEveryFrames, cullprof_crep_drop / kReportEveryFrames);
+                (double)cullprof_terr_us / 1000.0 / kReportEveryFrames,
+                (double)cullprof_drw_us / 1000.0 / kReportEveryFrames,
+                (double)cullprof_cb_us / 1000.0 / kReportEveryFrames,
+                (double)cullprof_xf_us / 1000.0 / kReportEveryFrames,
+                (double)cullprof_grp_us / 1000.0 / kReportEveryFrames, cullprof_crep_drop / kReportEveryFrames);
             auditLog(buf);
         }
         cullprof_node = cullprof_group = cullprof_transform = cullprof_geode = 0;
         cullprof_drawable = cullprof_dcull = cullprof_leaves = cullprof_sg = 0;
         cullprof_xf_bone = cullprof_creplay = cullprof_crep_drop = 0;
         cullprof_terr_us = 0;
+        cullprof_drw_us = cullprof_cb_us = cullprof_xf_us = cullprof_grp_us = 0;
+
+        // Sim-worker phase split: what the main thread's join actually waits on.
+        if (vita_sim_script_us + vita_sim_mech_us + vita_sim_phys_us > 0)
+        {
+            snprintf(buf, sizeof(buf), "[SimSplit] scr=%.1f (glob=%.1f) mech=%.1f phys=%.1f ms/frame",
+                (double)vita_sim_script_us / 1000.0 / kReportEveryFrames,
+                (double)vita_sim_gscript_us / 1000.0 / kReportEveryFrames,
+                (double)vita_sim_mech_us / 1000.0 / kReportEveryFrames,
+                (double)vita_sim_phys_us / 1000.0 / kReportEveryFrames);
+            auditLog(buf);
+        }
+        vita_sim_script_us = vita_sim_mech_us = vita_sim_phys_us = vita_sim_gscript_us = 0;
+
+        // Per-script and per-cull-callback cost breakdowns.
+        {
+            char hb[224];
+            if (vita_script_hist_report(hb, sizeof(hb)) > 0)
+            {
+                snprintf(buf, sizeof(buf), "[ScriptHist] %s", hb);
+                auditLog(buf);
+            }
+            if (cullprof_cb_report(hb, sizeof(hb)) > 0)
+            {
+                snprintf(buf, sizeof(buf), "[CullCb] %s", hb);
+                auditLog(buf);
+            }
+        }
 
         // Inside State::apply: which section eats the state bucket.
         if (osgapply_calls > 0)
