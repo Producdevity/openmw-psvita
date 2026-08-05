@@ -439,6 +439,10 @@ if (VITA AND BUILD_OPENMW)
         # (app0:/resources/vfs and app0:/resources/vfs-mw). Skips ~22KB of
         # recursive_directory_iterator work on first launch. Copied to
         # ux0:data/openmw/config/ at boot if not already present.
+        # PC-cooked warm packages (fallback when no learned copy on ux0)
+        FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/warm/commonwarm.txt warm/commonwarm.txt
+        FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/warm/warm_regions.txt warm/warm_regions.txt
+        FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/warm/object_index.txt warm/object_index.txt
         FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/vfs_seed/vfs_dir_0.bin vfs_seed/vfs_dir_0.bin
         FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/vfs_seed/vfs_dir_1.bin vfs_seed/vfs_dir_1.bin
         # GOG ships ~21k loose files extracted from the BSAs, making the

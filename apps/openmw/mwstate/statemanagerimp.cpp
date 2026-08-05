@@ -500,9 +500,7 @@ void MWState::StateManager::loadGame(const Character* character, const std::file
         cleanup();
 
 #ifdef __vita__
-        // Flush caches before save loading (cleanup may skip on first load).
-        MWBase::Environment::get().getWorld()->getRenderingManager()->flushUnrefQueueImmediate();
-        MWBase::Environment::get().getResourceSystem()->clearCache();
+        MWBase::Environment::get().getWorldScene()->vitaLoadPurge();
         Vita::logMemoryStatus("Pre-save-load");
 #endif
 

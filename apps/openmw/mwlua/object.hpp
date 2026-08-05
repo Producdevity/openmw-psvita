@@ -35,20 +35,29 @@ namespace MWLua
         }
     };
 
-    // Used only in local scripts
+    // Used only in local scripts.
+    // Holds the cell by id: CellStores can be evicted and recreated by the
+    // radial memory management, so raw pointers dangle across frames (was
+    // the crash-on-save: Lua serialization walking a destroyed store).
     struct LCell
     {
-        MWWorld::CellStore* mStore;
+        LCell() = default;
+        LCell(const MWWorld::CellStore* store);
+        MWWorld::CellStore* store() const;
+        ESM::RefId mId;
     };
     class LObject : public Object
     {
         using Object::Object;
     };
 
-    // Used only in global scripts
+    // Used only in global scripts (id-held; see LCell)
     struct GCell
     {
-        MWWorld::CellStore* mStore;
+        GCell() = default;
+        GCell(const MWWorld::CellStore* store);
+        MWWorld::CellStore* store() const;
+        ESM::RefId mId;
     };
     class GObject : public Object
     {

@@ -70,6 +70,8 @@ static void countDrawables(const osg::Node* node, unsigned int& drawableCount, u
 #include <components/loadinglistener/loadinglistener.hpp>
 #include <components/misc/convert.hpp>
 #include <components/misc/resourcehelpers.hpp>
+
+#include <components/esm3/loadbody.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/lightmanager.hpp>
@@ -103,6 +105,7 @@ static void countDrawables(const osg::Node* node, unsigned int& drawableCount, u
 #include "cellvisitors.hpp"
 #include "class.hpp"
 #include "esmstore.hpp"
+#include "inventorystore.hpp"
 #include "localscripts.hpp"
 #include "player.hpp"
 #include "worldimp.hpp"
@@ -589,10 +592,83 @@ namespace MWWorld
 
         mPreloader->updateCache(mRendering.getReferenceTime());
         preloadCells(duration);
+#ifdef __vita__
+        {
+            static int sWarmTick = 0;
+            static int sFastTick = 0;
+            ++sFastTick;
+            if (sFastTick >= 8 && mPreloader->vitaDemandWantedCount() > 0 && sWarmTick < 29)
+            {
+                // Demand pending: the worker should not wait for the slow
+                // cadence. ~50 models/sec ceiling while content streams.
+                sFastTick = 0;
+                if (Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                    mPreloader->vitaPumpWarm(false);
+            }
+            if (++sWarmTick >= 30)
+            {
+                sWarmTick = 0;
+                sFastTick = 0;
+                const bool idle = std::chrono::steady_clock::now() - mVitaLastCrossing
+                    > std::chrono::seconds(2);
+                // Indoors nothing radial needs warming; skip the churn.
+                const bool indoors = mCurrentCell && !mCurrentCell->isExterior();
+                if (!indoors && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                    mPreloader->vitaPumpWarm(idle);
+
+                // Neighborhood-bound the resident cell stores: distant
+                // stores are low-reuse memory better spent on warm assets.
+                // Not idle-gated: eviction is cheap, unlike warming.
+                if (mCurrentCell && mCurrentCell->isExterior()
+                    && mWorld.getWorldModel().vitaCellStoreCount() > 120)
+                    vitaStoreEvictPass(false);
+            }
+            // State now resurrects correctly, so state-ful stores accumulate
+            // during seamless play; reclamation must outpace resurrection or
+            // the allocator saturates and every op inflates ~3x.
+            static int sEvictFast = 0;
+            if (++sEvictFast >= 6)
+            {
+                sEvictFast = 0;
+                if (Settings::general().mVitaSeamlessCrossing && mCurrentCell && mCurrentCell->isExterior())
+                {
+                    // Flush only on frames that can afford it; latched
+                    // pressure with futility backoff so a world with nothing
+                    // to free is not rescanned at 5Hz.
+                    using EvClock = std::chrono::steady_clock;
+                    static EvClock::time_point sLastSix{};
+                    const auto nowEv = EvClock::now();
+                    float avgFrameMs = 33.f;
+                    if (sLastSix.time_since_epoch().count() != 0)
+                        avgFrameMs = std::chrono::duration<float, std::milli>(nowEv - sLastSix).count() / 6.f;
+                    sLastSix = nowEv;
+                    if (avgFrameMs < 36.f)
+                        mRendering.flushUnrefQueueImmediate();
+                    static bool sPressureLatch = false;
+                    static EvClock::time_point sEvictCooldown{};
+                    const int fastHeap = Vita::getHeapUsedMB();
+                    if (!sPressureLatch && fastHeap > getVitaCellBudgetMB() - 24)
+                        sPressureLatch = true;
+                    else if (sPressureLatch && fastHeap < getVitaCellBudgetMB() - 34)
+                        sPressureLatch = false;
+                    if (sPressureLatch
+                        && (sEvictCooldown.time_since_epoch().count() == 0 || nowEv >= sEvictCooldown))
+                    {
+                        const int storesBefore = (int)mWorld.getWorldModel().vitaCellStoreCount();
+                        vitaStoreEvictPass(true);
+                        if ((int)mWorld.getWorldModel().vitaCellStoreCount() >= storesBefore)
+                            sEvictCooldown = nowEv + std::chrono::seconds(5); // freed nothing
+                    }
+                }
+            }
+        }
+#endif
 
 #ifdef __vita__
         // Incrementally load deferred ring cells
         processPendingCellLoads();
+        vitaBubbleTick(4);
+        vitaRetirePump();
 
         // Drain queued cell demotions (cells deferred from interior entry).
         // Gated on no pending loads inside processPendingDemotions itself.
@@ -644,17 +720,37 @@ namespace MWWorld
 
             if (usedMB > budget - 20 && !s_cachesFlushed)
             {
-                // First relief valve: warming pins are rebuildable luxuries.
-                for (CellStore* c : mVitaAnticipatedPins)
-                    mPreloader->vitaReleasePinned(c);
-                mVitaAnticipatedPins.clear();
+                // Warm sets are the payload, not the luxury: only severe
+                // pressure drops them, or the drop/re-warm churn taxes
+                // every screen.
+                if (usedMB > budget - 8)
+                {
+                    const auto pressureProtected = vitaProtectedCells();
+                    int freed = 0;
+                    while (freed < 25
+                        && mWorld.getWorldModel().vitaEvictOneDistant(pressureProtected, mCurrentGridCenter.x(),
+                            mCurrentGridCenter.y(), 4, [this](CellStore& store) { mWorld.purgeCellRefs(store); }))
+                        ++freed;
+                    freed += (int)mWorld.getWorldModel().vitaEvictInteriors(
+                        pressureProtected, 5, [this](CellStore& store) { mWorld.purgeCellRefs(store); });
+                    if (freed > 0)
+                    {
+                        char pbuf[64];
+                        snprintf(pbuf, sizeof(pbuf), "[Pressure] evicted %d stores", freed);
+                        Vita::breadcrumb(pbuf);
+                    }
+                    else
+                        mPreloader->vitaRelievePressure();
+                }
+                const auto wdFlush0 = std::chrono::steady_clock::now();
                 // Snapshot what is resident before the flush wipes it.
                 Vita::auditWorldModel(mWorld.getWorldModel());
                 Vita::auditResourceCaches(mRendering.getResourceSystem());
                 {
-                    const std::size_t swept = mWorld.getWorldModel().evictSweptCellStores();
+                    const auto watchdogProtected = vitaProtectedCells();
+                    const std::size_t swept = mWorld.getWorldModel().evictSweptCellStores(watchdogProtected);
                     const std::size_t loaded = mWorld.getWorldModel().evictInactiveLoadedCellStores(
-                        mActiveCells, [this](CellStore& store) { mWorld.purgeCellRefs(store); });
+                        watchdogProtected, [this](CellStore& store) { mWorld.purgeCellRefs(store); });
                     if (swept + loaded > 0)
                     {
                         char evictBuf[112];
@@ -685,9 +781,12 @@ namespace MWWorld
                 ++s_flushCount;
                 int usedAfterMB = Vita::getHeapUsedMB();
                 char buf[160];
+                const int wdMs = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - wdFlush0)
+                                     .count();
                 snprintf(buf, sizeof(buf),
-                    "[MemWatchdog] flush #%d: %dMB->%dMB (-%dMB) budget=%dMB",
-                    s_flushCount, usedMB, usedAfterMB, usedMB - usedAfterMB, budget);
+                    "[MemWatchdog] flush #%d: %dMB->%dMB (-%dMB) budget=%dMB %dms",
+                    s_flushCount, usedMB, usedAfterMB, usedMB - usedAfterMB, budget, wdMs);
                 Vita::breadcrumb(buf);
                 // Best moment to try replenishing the emergency reserve:
                 // we just freed and coalesced. The previous code only
@@ -1510,7 +1609,28 @@ namespace MWWorld
     {
         if (mActiveCells.find(cell) == mActiveCells.end())
             return;
+        mVitaCleanSweep.erase(cell);
+        mVitaCellRefBox.erase(cell);
         Log(Debug::Info) << "Unloading cell " << cell->getCell()->getDescription();
+        const auto ul0 = std::chrono::steady_clock::now();
+        struct UlTimer
+        {
+            std::chrono::steady_clock::time_point mStart;
+            CellStore* mCell;
+            ~UlTimer()
+            {
+                const int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - mStart)
+                                   .count();
+                if (ms > 50)
+                {
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "[Unload] (%d,%d) %dms", mCell->getCell()->getGridX(),
+                        mCell->getCell()->getGridY(), ms);
+                    Vita::breadcrumb(buf);
+                }
+            }
+        } ulTimer{ ul0, cell };
 #ifdef __vita__
         VitaMerge::onCellUnload(cell);
 #endif
@@ -1568,6 +1688,9 @@ namespace MWWorld
         MWBase::Environment::get().getSoundManager()->stopSound(cell);
         mActiveCells.erase(cell);
 #ifdef __vita__
+        mVitaActorDomain.erase(cell);
+        mVitaPhysDomain.erase(cell);
+        mVitaIcoPending.erase(cell);
         mCellLoadTiers.erase(cell);
         // Cancel any pending deferred load for this cell
         mPendingCellLoads.erase(
@@ -1623,136 +1746,145 @@ namespace MWWorld
 
     void Scene::vitaBatchCell(CellStore& cell)
     {
-        // Merge sub-geometries within each NIF to reduce draw calls.
-        // Uses a safety callback to skip animated/tracked nodes.
+        // Measured verdict (2026-08): geometry merging cost 60-185ms per
+        // cell, RAISED draw counts, and skipping it left fps unchanged.
+        // Only the cheap, proven pieces remain.
         if (osg::Group* cellRoot = mRendering.getObjects().getCellRoot(&cell))
         {
-            // Pre-pass: each per-object PAT under the cell root carries a
-            // PtrHolder via osg::UserDataContainer. The optimizer's
-            // FLATTEN_STATIC_TRANSFORMS bails on any node with a userdata
-            // container, so it leaves every static under its own PAT — and
-            // MergeGeometry only merges siblings of the SAME group, so it
-            // can never combine across two PATs. Net result: vitaBatchCell
-            // was a near-no-op for cross-object batching.
-            //
-            // Strip the container from STAT-only PATs so flatten + merge can
-            // collapse them into shared-StateSet supergeometries. Doors and
-            // activators (interactive — script can disable/move them) keep
-            // their PtrHolder so they remain individually addressable.
-            std::vector<std::pair<osg::Node*, osg::ref_ptr<osg::UserDataContainer>>> stripped;
-            for (unsigned int i = 0; i < cellRoot->getNumChildren(); ++i)
-            {
-                osg::Node* child = cellRoot->getChild(i);
-                osg::UserDataContainer* udc = child->getUserDataContainer();
-                if (!udc || udc->getNumUserObjects() == 0)
-                    continue;
-                auto* holder = dynamic_cast<MWRender::PtrHolder*>(udc->getUserObject(0));
-                if (!holder)
-                    continue;
-                unsigned int t = holder->mPtr.getType();
-                // Only liberate truly static refs. Doors and activators stay
-                // pinned because gameplay needs to find them by Ptr.
-                if (t == ESM::REC_STAT || t == ESM::REC_STAT4)
-                {
-                    stripped.emplace_back(child, udc);
-                    child->setUserDataContainer(nullptr);
-                }
-            }
-
-            struct VitaCanOptimize : public SceneUtil::Optimizer::IsOperationPermissibleForObjectCallback
-            {
-                const osg::Group* mCellRoot;
-                explicit VitaCanOptimize(const osg::Group* cr) : mCellRoot(cr) {}
-
-                bool isOperationPermissibleForObjectImplementation(
-                    const SceneUtil::Optimizer*, const osg::Drawable*, unsigned int) const override
-                {
-                    return true;
-                }
-                bool isOperationPermissibleForObjectImplementation(
-                    const SceneUtil::Optimizer*, const osg::Node* node, unsigned int opt) const override
-                {
-                    if (node == mCellRoot)
-                        return false;
-                    if (node->getDataVariance() == osg::Object::DYNAMIC)
-                        return false;
-                    // Doors/activators still carry the PtrHolder; respect that.
-                    if (node->getUserDataContainer())
-                        return false;
-                    if (node->getUpdateCallback())
-                        return false;
-                    if ((opt & SceneUtil::Optimizer::REMOVE_REDUNDANT_NODES)
-                        && node->getNodeMask() != 0xffffffff)
-                        return false;
-                    return true;
-                }
-            };
-
-            SceneUtil::Optimizer optimizer;
-            optimizer.setIsOperationPermissibleForObjectCallback(new VitaCanOptimize(cellRoot));
-            // VERTEX_POSTTRANSFORM (Tipsify-style triangle reorder for vertex-cache
-            // locality) is dropped on Vita: SGX543 is a tile-based deferred renderer
-            // whose vertex throughput is dominated by tile-binning bandwidth, not
-            // post-transform cache locality. The reorder pass is O(triangles) per
-            // geometry — measurable cost for a benefit the hardware barely sees.
-            optimizer.optimize(cellRoot,
-                SceneUtil::Optimizer::FLATTEN_STATIC_TRANSFORMS
-                    | SceneUtil::Optimizer::REMOVE_REDUNDANT_NODES
-                    | SceneUtil::Optimizer::SHARE_DUPLICATE_STATE
-                    | SceneUtil::Optimizer::MERGE_GEOMETRY);
-
-            // Best-effort restore: if a stripped PAT survived flattening (e.g.
-            // because it carried a non-flattenable transform), reattach its
-            // userdata so any still-valid Ptr lookup keeps working. PATs that
-            // got flattened away are no longer in the graph; the ref_ptr to
-            // their old userdata simply releases.
-            for (auto& [node, udc] : stripped)
-            {
-                if (node->getNumParents() > 0)
-                    node->setUserDataContainer(udc);
-            }
-
             MWBase::Environment::get().getSoundManager()->vitaWarmCellSounds(cell.getCell()->getRegion());
             MWBase::Environment::get().getSoundManager()->vitaWarmActorSounds(cell);
 
-            if (Settings::general().mVitaCellFlatten)
-                VitaMerge::flattenCell(cell, cellRoot);
-
-            if (Settings::general().mVitaCellMerge)
-                VitaMerge::mergeCell(cell, cellRoot);
-
-            BatchCensusVisitor postCensus;
-            cellRoot->accept(postCensus);
+            BatchCensusVisitor census;
+            cellRoot->accept(census);
             {
-                std::vector<int> counts;
-                counts.reserve(postCensus.mCombos.size());
-                for (const auto& [h, c] : postCensus.mCombos)
-                    counts.push_back(c);
-                std::sort(counts.rbegin(), counts.rend());
-                char top[64] = {};
-                size_t off = 0;
-                for (size_t i = 0; i < counts.size() && i < 6 && off + 8 < sizeof(top); ++i)
-                    off += snprintf(top + off, sizeof(top) - off, "%s%d", i ? "," : "", counts[i]);
                 const std::string desc(cell.getCell()->getDescription());
-                char buf[192];
-                snprintf(buf, sizeof(buf), "[BatchCensus] %s draw=%d combos=%d verts=%uk top=%s", desc.c_str(),
-                    postCensus.mDrawables, (int)postCensus.mCombos.size(),
-                    (unsigned)(postCensus.mVertices / 1000), top);
+                char buf[112];
+                snprintf(buf, sizeof(buf), "[BatchCensus] %s draws=%d verts=%uk", desc.c_str(), census.mDrawables,
+                    (unsigned)(census.mVertices / 1000));
                 Vita::breadcrumb(buf);
             }
 
-            // Replace OSG's loose bounding-sphere cull with a tight AABB.
+            // Tight AABB cull beats OSG's loose bounding sphere.
             osg::BoundingBox cellAABB = Vita::computeCellAABB(cellRoot);
             if (cellAABB.valid())
                 cellRoot->addCullCallback(new Vita::CellCullCallback(cellAABB));
         }
 
-        // Submit batched cell to ICO for GL compilation during loading screen
+        // GL compilation during loading screens.
         if (auto* ico = mRendering.getIncrementalCompileOperation())
         {
             if (osg::Group* root = mRendering.getObjects().getCellRoot(&cell))
                 ico->add(root);
         }
+    }
+
+    std::set<CellStore*, std::less<>> Scene::vitaProtectedCells() const
+    {
+        auto cells = mActiveCells;
+        for (const auto& pcl : mPendingCellLoads)
+            cells.insert(pcl.cell);
+        for (const auto& pp : mPendingPromotions)
+            cells.insert(pp.cell);
+        for (const auto& pd : mPendingDemotions)
+            cells.insert(pd.cell);
+        mPreloader->vitaCollectHeldCells(cells);
+        return cells;
+    }
+
+    float Scene::vitaCellEdge2(CellStore& cell, const osg::Vec3f& pp)
+    {
+        // Distance to the union of the cell's square and its refs' true
+        // bounding box: record ownership crosses cell borders (Pelagiad's
+        // fort gateway lives in (0,-6)'s record at (0,-7) positions).
+        constexpr float cSz = 8192.f;
+        const int gx = cell.getCell()->getGridX();
+        const int gy = cell.getCell()->getGridY();
+        float nx = std::clamp(pp.x(), gx * cSz, (gx + 1) * cSz);
+        float ny = std::clamp(pp.y(), gy * cSz, (gy + 1) * cSz);
+        float ex = nx - pp.x();
+        float ey = ny - pp.y();
+        float edge2 = ex * ex + ey * ey;
+        auto it = mVitaCellRefBox.find(&cell);
+        if (it == mVitaCellRefBox.end())
+        {
+            if (cell.getState() != CellStore::State_Loaded)
+                return edge2; // box unknowable yet; square-only, uncached
+            const float inf = std::numeric_limits<float>::max();
+            osg::Vec4f box(inf, inf, -inf, -inf);
+            cell.forEach([&](const MWWorld::Ptr& p2) {
+                const osg::Vec3f rp = p2.getRefData().getPosition().asVec3();
+                box.x() = std::min(box.x(), rp.x());
+                box.y() = std::min(box.y(), rp.y());
+                box.z() = std::max(box.z(), rp.x());
+                box.w() = std::max(box.w(), rp.y());
+                return true;
+            });
+            it = mVitaCellRefBox.emplace(&cell, box).first;
+        }
+        const osg::Vec4f& b = it->second;
+        if (b.x() <= b.z())
+        {
+            nx = std::clamp(pp.x(), b.x(), b.z());
+            ny = std::clamp(pp.y(), b.y(), b.w());
+            ex = nx - pp.x();
+            ey = ny - pp.y();
+            edge2 = std::min(edge2, ex * ex + ey * ey);
+        }
+        return edge2;
+    }
+
+    void Scene::vitaStoreEvictPass(bool pressure)
+    {
+        // Time-boxed so a frame never visibly pays; pressure widens the box
+        // and reaches closer in.
+        const auto protectedCells = vitaProtectedCells();
+        const auto deadline
+            = std::chrono::steady_clock::now() + std::chrono::milliseconds(pressure ? 12 : 4);
+        const int cap = pressure ? 24 : 3;
+        int n = 0;
+        while (n < cap && std::chrono::steady_clock::now() < deadline
+            && mWorld.getWorldModel().vitaEvictOneDistant(protectedCells, mCurrentGridCenter.x(),
+                mCurrentGridCenter.y(), pressure ? 2 : 4,
+                [this](CellStore& store) { mWorld.purgeCellRefs(store); }))
+            ++n;
+        if (std::chrono::steady_clock::now() < deadline)
+            mWorld.getWorldModel().vitaEvictInteriors(
+                protectedCells, pressure ? 8 : 1, [this](CellStore& store) { mWorld.purgeCellRefs(store); });
+    }
+
+    void Scene::vitaScreenHousekeeping()
+    {
+        // A loading screen is the safe, free moment for deep cleanup:
+        // world draw is quiescent (simFence ran) and the hitch is hidden.
+        const int beforeMB = Vita::getHeapUsedMBFresh();
+        mRendering.flushUnrefQueueImmediate();
+        mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());
+        mRendering.getResourceSystem()->clearCache();
+        const auto protectedCells = vitaProtectedCells();
+        int evicted = 0;
+        while (mWorld.getWorldModel().vitaEvictOneDistant(protectedCells, mCurrentGridCenter.x(),
+            mCurrentGridCenter.y(), 2, [this](CellStore& store) { mWorld.purgeCellRefs(store); }))
+            ++evicted;
+        int interiors = (int)mWorld.getWorldModel().vitaEvictInteriors(
+            protectedCells, 1000, [this](CellStore& store) { mWorld.purgeCellRefs(store); });
+        mRendering.flushUnrefQueueImmediate();
+        char buf[112];
+        std::size_t evRam = 0;
+        int evCount = 0;
+        mWorld.getWorldModel().vitaEvictedStats(evRam, evCount);
+        snprintf(buf, sizeof(buf), "[Housekeep] evicted=%d interiors=%d heap %dMB->%dMB evbuf=%dKB/%d", evicted,
+            interiors, beforeMB, Vita::getHeapUsedMBFresh(), (int)(evRam / 1024), evCount);
+        Vita::breadcrumb(buf);
+    }
+
+    void Scene::vitaLoadPurge()
+    {
+        // Loads are a fresh world: carry nothing across. Contiguous
+        // headroom beats warm refs the destination may invalidate.
+        mPreloader->clear();
+        mPreloader->vitaDropRegionRefs();
+        vitaScreenHousekeeping();
+        malloc_trim(0);
     }
 
     void Scene::insertCellLite(
@@ -1762,11 +1894,22 @@ namespace MWWorld
         InsertVisitorFiltered insertVisitor(cell, loadingListener,
             [](unsigned int type) { return isLiteType(type); });
         cell.forEach(insertVisitor);
+        using Clock = std::chrono::steady_clock;
+        const auto t0 = Clock::now();
         insertVisitor.insert(
             [&](const MWWorld::Ptr& ptr) { addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering); });
+        const auto t1 = Clock::now();
         insertVisitor.insert([&](const MWWorld::Ptr& ptr) {
             addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, navigatorUpdateGuard);
         });
+        const auto t2 = Clock::now();
+        auto msf = [](auto a, auto b) {
+            return (int)std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+        };
+        char buf[112];
+        snprintf(buf, sizeof(buf), "[LoadProf] (%d,%d) rend=%d phys=%d", cell.getCell()->getGridX(),
+            cell.getCell()->getGridY(), msf(t0, t1), msf(t1, t2));
+        Vita::breadcrumb(buf);
     }
 
     void Scene::loadCellLite(CellStore& cell, Loading::Listener* loadingListener,
@@ -1774,6 +1917,9 @@ namespace MWWorld
     {
         using DetourNavigator::HeightfieldShape;
 
+#ifdef __vita__
+        mWorld.getWorldModel().vitaApplyEvictedState(cell.getCell()->getId());
+#endif
         assert(mActiveCells.find(&cell) == mActiveCells.end());
         mActiveCells.insert(&cell);
 
@@ -1873,6 +2019,17 @@ namespace MWWorld
 
         mPreloader->notifyLoaded(&cell);
 
+        {
+            std::set<std::string> models;
+            cell.forEach([&](const MWWorld::Ptr& ptr) {
+                const VFS::Path::Normalized m = getModel(ptr);
+                if (!m.empty())
+                    models.insert(std::string(m.value()));
+                return true;
+            });
+            mPreloader->vitaLearnModels(std::vector<std::string>(models.begin(), models.end()));
+        }
+
         mCellLoadTiers[&cell] = CellLoadTier::Lite;
 
         {
@@ -1887,8 +2044,8 @@ namespace MWWorld
     {
         using DetourNavigator::HeightfieldShape;
 
-        assert(mActiveCells.find(&cell) == mActiveCells.end());
-        mActiveCells.insert(&cell);
+        if (mActiveCells.find(&cell) == mActiveCells.end())
+            mActiveCells.insert(&cell);
 
         const int cellX = cell.getCell()->getGridX();
         const int cellY = cell.getCell()->getGridY();
@@ -1897,6 +2054,25 @@ namespace MWWorld
         ESM::ExteriorCellLocation cellIndex(cellX, cellY, worldspace);
 
         Log(Debug::Info) << "Preparing deferred cell " << cell.getCell()->getDescription();
+        const auto prep0 = std::chrono::steady_clock::now();
+        struct PrepTimer
+        {
+            std::chrono::steady_clock::time_point mStart;
+            CellStore& mCell;
+            ~PrepTimer()
+            {
+                const int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - mStart)
+                                   .count();
+                if (ms > 50)
+                {
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "[Prep] (%d,%d) %dms", mCell.getCell()->getGridX(),
+                        mCell.getCell()->getGridY(), ms);
+                    Vita::breadcrumb(buf);
+                }
+            }
+        } prepTimer{ prep0, cell };
 
         // Heightfield (terrain collision)
         if (cellVariant.isExterior())
@@ -1978,10 +2154,7 @@ namespace MWWorld
 
         mPreloader->notifyLoaded(&cell);
 
-        // Queue for incremental object insertion
-        PendingCellLoad pending;
-        pending.cell = &cell;
-        mPendingCellLoads.push_back(std::move(pending));
+
 
         {
             char buf[128];
@@ -1991,124 +2164,790 @@ namespace MWWorld
         }
     }
 
-    void Scene::processPendingCellLoads()
+    void Scene::finishPendingCellLoad(PendingCellLoad& pending)
     {
-        if (mPendingCellLoads.empty())
-            return;
-
-        int budget = kObjectsPerFrame;
-        auto it = mPendingCellLoads.begin();
-
-        while (it != mPendingCellLoads.end() && budget > 0)
+        CellStore& cell = *pending.cell;
+        if (!pending.objectsCollected)
         {
-            PendingCellLoad& pending = *it;
-            CellStore& cell = *pending.cell;
-
-            // Memory check — pause if under pressure
-            if (Vita::isMemoryPressure(getVitaCellBudgetMB()))
+            cell.forEach([&](const MWWorld::Ptr& p2) {
+                if (isLiteType(p2.getType()))
+                    pending.objectsToInsert.push_back(p2);
+                return true;
+            });
+            pending.objectsCollected = true;
+        }
+        if (!pending.renderingDone)
+        {
+            for (int i = pending.nextObject; i < (int)pending.objectsToInsert.size(); ++i)
             {
-                Vita::breadcrumb("[DeferredLoad] Paused: memory pressure");
-                break;
-            }
-
-            // Step 1: Collect the object list once
-            if (!pending.objectsCollected)
-            {
-                cell.forEach([&](const MWWorld::Ptr& ptr) {
-                    if (isLiteType(ptr.getType()))
-                        pending.objectsToInsert.push_back(ptr);
-                    return true;
-                });
-                pending.objectsCollected = true;
-            }
-
-            // Step 2: Insert objects (rendering pass) incrementally
-            if (!pending.renderingDone)
-            {
-                while (pending.nextObject < (int)pending.objectsToInsert.size() && budget > 0)
+                MWWorld::Ptr& ptr = pending.objectsToInsert[i];
+                if (!ptr.mRef->isDeleted() && ptr.getRefData().isEnabled() && !ptr.getRefData().getBaseNode())
                 {
-                    // Per-object recheck: bursts can blow the per-frame budget.
-                    if (Vita::isMemoryPressure(getVitaCellBudgetMB()))
+                    try
                     {
-                        Vita::breadcrumb("[DeferredLoad] Mid-burst pause: memory pressure");
-                        break;
+                        addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
                     }
-                    MWWorld::Ptr& ptr = pending.objectsToInsert[pending.nextObject];
-                    if (!ptr.mRef->isDeleted() && ptr.getRefData().isEnabled()
-                        && !ptr.getRefData().getBaseNode())
+                    catch (const std::exception& e)
                     {
+                        Log(Debug::Error) << "deferred insert fail '" << ptr.getCellRef().getRefId()
+                                          << "': " << e.what();
+                    }
+                }
+            }
+            pending.renderingDone = true;
+            pending.nextObject = 0;
+        }
+        vitaFinalizeDeferredCell(cell);
+        pending.batchingDone = true;
+        mCellLoadTiers[&cell] = CellLoadTier::Lite;
+        pending.objectsToInsert.clear();
+        pending.objectsToInsert.shrink_to_fit();
+    }
+
+    bool Scene::vitaCellStreamable(CellStore& cell, const osg::Vec3f& pos, int x, int y)
+    {
+        // One rule routes every ring cell: stream it only if its estimated
+        // insert work fits in the time before the player can see it.
+        if (!Settings::general().mVitaSeamlessCrossing)
+            return false;
+        constexpr float cellSz = 8192.f;
+        const float nx = std::clamp(pos.x(), x * cellSz, (x + 1) * cellSz);
+        const float ny = std::clamp(pos.y(), y * cellSz, (y + 1) * cellSz);
+        const float dx = nx - pos.x();
+        const float dy = ny - pos.y();
+        const float beyond
+            = std::sqrt(dx * dx + dy * dy) - (mRendering.getViewDistance() + 1024.f);
+        if (beyond <= 0.f)
+            return false; // visible-soon: sync
+        if (cell.getState() != CellStore::State_Loaded)
+            return false; // cold store: pay it under the crossing/screen
+        // Far-tier economics: only the structural silhouette must beat the
+        // visibility clock. Clutter and physics stream later on approach.
+        int coldC = 0;
+        std::size_t structRefs = 0;
+        cell.forEach([&](const MWWorld::Ptr& ptr) {
+            switch (ptr.getType())
+            {
+                case ESM::REC_STAT:
+                case ESM::REC_STAT4:
+                case ESM::REC_ACTI:
+                case ESM::REC_DOOR:
+                case ESM::REC_CONT:
+                    break;
+                default:
+                    return true; // clutter: no cost at the crossing horizon
+            }
+            ++structRefs;
+            const VFS::Path::Normalized m = getModel(ptr);
+            if (!m.empty() && !mPreloader->vitaIsCommonWarm(std::string(m.value())))
+                ++coldC;
+            return true;
+        });
+        const int estMs = coldC * 14 + (int)structRefs * 3 / 2;
+        const int budgetMs = (int)(beyond / 500.f * 150.f); // sprint speed x chunker capacity
+        return estMs < budgetMs;
+    }
+
+    void Scene::vitaFinalizeDeferredCell(CellStore& cell)
+    {
+        // Deferred cells skip the census walk: one graph traversal (AABB),
+        // sound enqueue, and GL precompile only.
+        if (osg::Group* cellRoot = mRendering.getObjects().getCellRoot(&cell))
+        {
+            MWBase::Environment::get().getSoundManager()->vitaWarmCellSounds(cell.getCell()->getRegion());
+            MWBase::Environment::get().getSoundManager()->vitaWarmActorSounds(cell);
+            osg::BoundingBox cellAABB = Vita::computeCellAABB(cellRoot);
+            if (cellAABB.valid())
+                cellRoot->addCullCallback(new Vita::CellCullCallback(cellAABB));
+            if (auto* ico = mRendering.getIncrementalCompileOperation())
+                ico->add(cellRoot);
+        }
+    }
+
+    static int sVitaLiveObjects = 0;
+    static int sVitaLivePhys = 0;
+    static int sVitaCostN = 0;
+    static long sVitaCostKB = 0;
+
+    int Scene::vitaBubbleTick(int maxMs)
+    {
+        int vitaOps = 0;
+        std::set<std::string> vitaTickCold; // per-tick memo: one consult per model
+        // THE HYDRATOR: the whole scene is radial. Lane A (always):
+        // structural render (in 6500/out 7000, inner 3000 first),
+        // structural collision (3700/6000), items+lights (3000/3500),
+        // all dehydration. Lane B: one actor composite per healthy tick,
+        // nearest first. Cost tracks the fog disc, not the cell grid.
+        if (!Settings::general().mVitaSeamlessCrossing || !mCurrentCell || !mCurrentCell->isExterior())
+            return 0;
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point sLastTick{};
+        const auto tick0 = Clock::now();
+        const int frameDt = sLastTick.time_since_epoch().count() == 0
+            ? 33
+            : (int)std::chrono::duration_cast<std::chrono::milliseconds>(tick0 - sLastTick).count();
+        sLastTick = tick0;
+        const bool bigBudget = maxMs > 100;
+        // Throttle with a floor: rough frames stream less, never zero.
+        if (!bigBudget)
+        {
+            if (frameDt > 45)
+                maxMs = 4; // genuinely bad frame: minimum viable slice
+            else if (frameDt < 25)
+                maxMs = 16; // headroom: fill fast
+            else
+                maxMs = 10; // normal 30-40ms frames still make progress
+        }
+        struct TickTimer
+        {
+            Clock::time_point mStart;
+            ~TickTimer()
+            {
+                const int ms
+                    = (int)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - mStart).count();
+                if (ms > 400)
+                {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "[Hydrate] tick %dms", ms);
+                    Vita::breadcrumb(buf);
+                }
+            }
+        } tickTimer{ tick0 };
+        const auto deadline = tick0 + std::chrono::milliseconds(maxMs);
+        const osg::Vec3f pp = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
+        constexpr float rIn = 3000.f;
+        constexpr float rItemOut = 3500.f;
+        constexpr float rActorOut = 4800.f;
+        constexpr float rPhysIn = 3700.f;
+        constexpr float rPhysOut = 6000.f;
+        constexpr float rStructIn = 2600.f; // small-object floor
+        constexpr float rStructMax = 5000.f; // size-scaled reach cap (pre-stretch)
+        constexpr float rHeadStretch = 2800.f; // sprint lead, heading only
+        const osg::Vec2f moveDir(mSmoothedMoveDir.x(), mSmoothedMoveDir.y());
+        constexpr float cSz = 8192.f;
+        const bool isInterior = false;
+        const auto isActorType = [](unsigned int t) {
+            return t == ESM::REC_NPC_ || t == ESM::REC_CREA || t == ESM::REC_LEVC;
+        };
+        // THE INVARIANT: the main thread never loads cold templates. Cold
+        // models enter the demand ledger; objects hydrate when Ready.
+        const auto warmPath = [&](std::string path, float neederD2) {
+            if (path.empty())
+                return true;
+            if (vitaTickCold.count(path) > 0)
+                return false;
+            if (mPreloader->vitaIsCommonWarm(path))
+                return true;
+            // Salience priority: a tower at 4000 outranks a pitcher at 600.
+            const float sbr = std::max(60.f, mPreloader->vitaKnownBoundRadius(path));
+            if (mPreloader->vitaDemandTouch(path, neederD2 / (sbr * sbr))
+                == CellPreloader::VitaDemandState::Ready)
+                return true;
+            vitaTickCold.insert(std::move(path));
+            return false;
+        };
+        const auto warmOrRequest = [&](const MWWorld::Ptr& ptr, float neederD2) {
+            const VFS::Path::Normalized wm = getModel(ptr);
+            if (wm.empty())
+                return true; // no model: nothing to load
+            return warmPath(std::string(wm.value()), neederD2);
+        };
+        // Time-to-need: request only what arrival will need within the
+        // measured load window. Speed-scaled; slow worker widens the lead.
+        static osg::Vec2f sLastPP(0.f, 0.f);
+        static std::chrono::steady_clock::time_point sLastPPT{};
+        const auto nowTtn = std::chrono::steady_clock::now();
+        float vitaPlayerSpeed = 0.f;
+        if (sLastPPT.time_since_epoch().count() != 0)
+        {
+            const float dtS = std::chrono::duration<float>(nowTtn - sLastPPT).count();
+            if (dtS > 1e-3f && dtS < 2.f)
+                vitaPlayerSpeed
+                    = std::min(2400.f, (osg::Vec2f(pp.x(), pp.y()) - sLastPP).length() / dtS);
+        }
+        static float sPrevSpeed = 0.f;
+        if (sPrevSpeed > 1500.f && vitaPlayerSpeed < 300.f)
+            mPreloader->vitaDrainWarmSync(400); // touchdown after superhuman travel
+        sPrevSpeed = vitaPlayerSpeed;
+        sLastPP = osg::Vec2f(pp.x(), pp.y());
+        sLastPPT = nowTtn;
+        const float vitaWindowUnits = vitaPlayerSpeed
+            * std::clamp(mPreloader->vitaDemandLatencyMs() * 2.f / 1000.f, 1.5f, 6.f);
+
+        static std::size_t sStartRot = 0;
+        ++sStartRot;
+        std::vector<CellStore*> cells(mActiveCells.begin(), mActiveCells.end());
+        if (cells.empty())
+            return 0;
+        const std::size_t n = cells.size();
+
+        // ---- Shell passes: the closest missing structure ANYWHERE wins.
+        // Budget exhausts in the nearest unfinished shell, so catch-up under
+        // sprint fills as a wave from the player outward, not by cell.
+        {
+            // Shells take at most 2/3 of the box: the outer band (4500 to
+            // rStructIn+stretch) must always make progress or the visible
+            // stream edge collapses to the last shell under movement.
+            const auto shellDeadline
+                = bigBudget ? deadline : tick0 + std::chrono::milliseconds(std::max(1, maxMs * 2 / 3));
+            const float shellEdges[2] = { 1500.f, 2600.f };
+            float shellPrev = 0.f;
+            for (float shellMax : shellEdges)
+            {
+                if (Clock::now() >= shellDeadline)
+                    break;
+                for (std::size_t ci = 0; ci < n; ++ci)
+                {
+                    if (Clock::now() >= shellDeadline)
+                        break;
+                    CellStore& cell = *cells[(ci + sStartRot) % n];
+                    if (!cell.getCell()->isExterior())
+                        continue;
+                    {
+                        auto cs = mVitaCleanSweep.find(&cell);
+                        if (cs != mVitaCleanSweep.end()
+                            && (cs->second - osg::Vec2f(pp.x(), pp.y())).length2() < 512.f * 512.f)
+                            continue; // fully serviced near here; skip the scan
+                    }
+                    bool shellColdSkip = false;
+                    if (vitaCellEdge2(cell, pp) > shellMax * shellMax)
+                        continue; // cell cannot contain this shell
+                    cell.forEach([&](const MWWorld::Ptr& ptr) {
+                        if (Clock::now() >= shellDeadline)
+                            return false;
+                        if (!isLiteType(ptr.getType()) || isPagedRef(ptr))
+                            return true;
+                        if (ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                            return true;
+                        if (ptr.getRefData().getBaseNode() != nullptr)
+                            return true;
+                        const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
+                        const float dx = op.x() - pp.x();
+                        const float dy = op.y() - pp.y();
+                        const float d2 = dx * dx + dy * dy;
+                        if (d2 < shellPrev * shellPrev || d2 >= shellMax * shellMax)
+                            return true;
+                        if (!warmOrRequest(ptr, d2))
+                        {
+                            shellColdSkip = true;
+                            return true;
+                        }
                         try
                         {
                             addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
+                            addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
+                            mVitaIcoPending[&cell] += 1;
+                            ++vitaOps;
+                            ++sVitaLiveObjects;
+                            ++sVitaLivePhys;
+                            mVitaCleanSweep.erase(&cell);
                         }
                         catch (const std::exception& e)
                         {
-                            Log(Debug::Error) << "deferred insert fail '" << ptr.getCellRef().getRefId()
-                                              << "': " << e.what();
+                            Log(Debug::Error)
+                                << "hydrate fail '" << ptr.getCellRef().getRefId() << "': " << e.what();
                         }
-                        --budget;
-                    }
-                    ++pending.nextObject;
+                        return true;
+                    });
+                    if (shellMax == shellEdges[1] && !shellColdSkip && Clock::now() < shellDeadline)
+                        mVitaCleanSweep[&cell] = osg::Vec2f(pp.x(), pp.y()); // completed both shells here
                 }
-
-                if (pending.nextObject >= (int)pending.objectsToInsert.size())
-                {
-                    pending.renderingDone = true;
-                    pending.nextObject = 0; // reset for physics pass
-                }
-                ++it;
-                continue;
+                shellPrev = shellMax;
             }
+        }
 
-            // Step 3: Physics/navigator pass
-            if (!pending.physicsDone)
+        // ---- Lane A ----
+        for (std::size_t ci = 0; ci < n; ++ci)
+        {
+            if (Clock::now() >= deadline)
+                break;
+            CellStore& cell = *cells[(ci + sStartRot) % n];
+            if (!cell.getCell()->isExterior())
+                continue;
+            const float edge2 = vitaCellEdge2(cell, pp);
+            const bool wantFull = edge2 < rIn * rIn;
+            const bool wantStruct = edge2 < rStructIn * rStructIn;
+            const bool inActorDomain = mVitaActorDomain.count(&cell) > 0;
+            const bool inSceneDomain = mVitaPhysDomain.count(&cell) > 0;
+            if (!wantFull && !inActorDomain && !wantStruct && !inSceneDomain)
+                continue;
+            if (wantFull && !inActorDomain)
             {
-                const bool isInterior = !cell.isExterior();
-                auto navigatorUpdateGuard = mNavigator.makeUpdateGuard();
-                while (pending.nextObject < (int)pending.objectsToInsert.size() && budget > 0)
+                mVitaActorDomain.insert(&cell);
+                mWorld.getLocalScripts().addCell(&cell);
+                cell.respawn();
+                MWBase::Environment::get().getSoundManager()->vitaWarmCellSounds(cell.getCell()->getRegion());
+                MWBase::Environment::get().getSoundManager()->vitaWarmActorSounds(cell);
+            }
+            const bool domainNow = wantFull || inActorDomain;
+            bool aborted = false;
+            bool anyResident = false;
+            int icoAdds = 0;
+            const auto hydrateRender = [&](const MWWorld::Ptr& ptr) {
+                const bool sample = (sVitaLiveObjects & 31) == 0;
+                const long kbBefore = sample ? (long)(mallinfo().uordblks / 1024) : 0;
+                try
                 {
-                    MWWorld::Ptr& ptr = pending.objectsToInsert[pending.nextObject];
-                    if (!ptr.mRef->isDeleted() && ptr.getRefData().isEnabled()
-                        && ptr.getRefData().getBaseNode())
+                    addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
+                    ++icoAdds;
+                    ++vitaOps;
+                    ++sVitaLiveObjects;
+                    if (sample)
                     {
-                        addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior,
-                            mNavigator, navigatorUpdateGuard.get());
-                        --budget;
+                        const int dkb = (int)((long)(mallinfo().uordblks / 1024) - kbBefore);
+                        ++sVitaCostN;
+                        sVitaCostKB += dkb;
+                        if (dkb >= 24)
+                        {
+                            const VFS::Path::Normalized sm = getModel(ptr);
+                            char cb[144];
+                            snprintf(cb, sizeof(cb), "[ObjCost] %s %dKB", std::string(sm.value()).c_str(), dkb);
+                            Vita::breadcrumb(cb);
+                        }
+                        if (sVitaCostN % 64 == 0)
+                        {
+                            char cb[96];
+                            snprintf(cb, sizeof(cb), "[ObjCost] avg=%ldKB n=%d", sVitaCostKB / sVitaCostN,
+                                sVitaCostN);
+                            Vita::breadcrumb(cb);
+                        }
                     }
-                    ++pending.nextObject;
                 }
-
-                if (pending.nextObject >= (int)pending.objectsToInsert.size())
-                    pending.physicsDone = true;
-
-                ++it;
-                continue;
-            }
-
-            // Step 4: Batch and finalize
-            if (!pending.batchingDone)
-            {
-                vitaBatchCell(cell);
-                pending.batchingDone = true;
-                mCellLoadTiers[&cell] = CellLoadTier::Lite;
-
-                // Free collected object list
-                pending.objectsToInsert.clear();
-                pending.objectsToInsert.shrink_to_fit();
-
+                catch (const std::exception& e)
                 {
-                    char buf[128];
-                    snprintf(buf, sizeof(buf), "DeferredLoad cell (%d,%d) complete, heap %dMB",
-                        cell.getCell()->getGridX(), cell.getCell()->getGridY(),
-                        Vita::getHeapUsedMB());
-                    Vita::breadcrumb(buf);
+                    Log(Debug::Error) << "hydrate fail '" << ptr.getCellRef().getRefId() << "': " << e.what();
                 }
-
-                it = mPendingCellLoads.erase(it);
-                continue;
+            };
+            if (!aborted)
+            {
+                cell.forEach([&](const MWWorld::Ptr& ptr) {
+                    if (Clock::now() >= deadline)
+                    {
+                        aborted = true;
+                        return false;
+                    }
+                    const unsigned int t = ptr.getType();
+                    if (isLiteType(t))
+                    {
+                        if (isPagedRef(ptr))
+                            return true;
+                        if (ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                        {
+                            return true;
+                        }
+                        const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
+                        const float dx = op.x() - pp.x();
+                        const float dy = op.y() - pp.y();
+                        const float d2 = dx * dx + dy * dy;
+                        const bool live = ptr.getRefData().getBaseNode() != nullptr;
+                        if (!live)
+                        {
+                            // Size-scaled reach: a shrub matters at 2600, a
+                            // castle IS the landscape at 8000. Heading
+                            // stretch buys sprint lead on top.
+                            float rEff = rStructIn;
+                            if (d2 > 1.f)
+                            {
+                                const float invD = 1.f / std::sqrt(d2);
+                                const float toward = (dx * invD) * moveDir.x() + (dy * invD) * moveDir.y();
+                                if (toward > 0.2f)
+                                    rEff += rHeadStretch * toward;
+                            }
+                            if (d2 < rEff * rEff)
+                            {
+                                if (warmOrRequest(ptr, d2))
+                                {
+                                    hydrateRender(ptr);
+                                    anyResident = true;
+                                }
+                            }
+                            else if (d2 < (rStructMax + rHeadStretch + 4608.f) * (rStructMax + rHeadStretch + 4608.f))
+                            {
+                                const VFS::Path::Normalized m = getModel(ptr);
+                                if (!m.empty())
+                                {
+                                    float br = mPreloader->vitaKnownBoundRadius(std::string(m.value()));
+                                    if (br <= 0.f)
+                                        br = 300.f; // unlearned: modest until first load teaches
+                                    // Salience reach: eligible while apparent
+                                    // size br*scale/d exceeds ~0.1.
+                                    const float reach
+                                        = std::min(rStructMax - rStructIn + 4608.f,
+                                              10.f * br * ptr.getCellRef().getScale());
+                                    const float dEff = std::sqrt(d2) - reach;
+                                    if (dEff < rEff)
+                                    {
+                                        if (warmOrRequest(ptr, d2))
+                                        {
+                                            hydrateRender(ptr);
+                                            anyResident = true;
+                                            mVitaIcoPending[&cell] += 25; // compile now: frees images
+                                        }
+                                    }
+                                    else if (vitaWindowUnits > 0.f && d2 > 1.f
+                                        && dEff - rEff < vitaWindowUnits
+                                        && ((dx / std::sqrt(d2)) * moveDir.x()
+                                                   + (dy / std::sqrt(d2)) * moveDir.y()
+                                               > 0.2f))
+                                    {
+                                        // Arriving within the load window:
+                                        // warm now, place on arrival.
+                                        const float pbr = std::max(60.f, br * ptr.getCellRef().getScale());
+                                        mPreloader->vitaDemandTouch(std::string(m.value()), d2 / (pbr * pbr));
+                                    }
+                                }
+                            }
+                            return true;
+                        }
+                        anyResident = true;
+                        // Directional retention mirrors eligibility (+500
+                        // hysteresis); allowance capped so a canton cannot
+                        // pin itself resident from 10k out.
+                        float rEffOut = rStructIn + 500.f;
+                        if (d2 > 1.f)
+                        {
+                            const float invD = 1.f / std::sqrt(d2);
+                            const float toward = (dx * invD) * moveDir.x() + (dy * invD) * moveDir.y();
+                            if (toward > 0.2f)
+                                rEffOut += rHeadStretch * toward;
+                        }
+                        if (d2 > rEffOut * rEffOut)
+                        {
+                            const VFS::Path::Normalized mo = getModel(ptr);
+                            const float bro
+                                = mo.empty() ? 0.f : mPreloader->vitaKnownBoundRadius(std::string(mo.value()));
+                            const float broBase = bro > 0.f ? 10.f * bro : 2400.f; // unknown: keep generously
+                            const float reach = std::min(rStructMax - rStructIn + 4608.f,
+                                broBase * ptr.getCellRef().getScale());
+                            if (std::sqrt(d2) - reach > rEffOut)
+                            {
+                                removeNonLiteObject(ptr, nullptr);
+                                sVitaLiveObjects = std::max(0, sVitaLiveObjects - 1);
+                                sVitaLivePhys = std::max(0, sVitaLivePhys - 1);
+                                return true;
+                            }
+                        }
+                        const bool hasPhys = mPhysics->getObject(ptr) != nullptr;
+                        if (!hasPhys && d2 < rPhysIn * rPhysIn)
+                        {
+                            try
+                            {
+                                addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
+                                ++vitaOps;
+                                ++sVitaLivePhys;
+                            }
+                            catch (const std::exception& e)
+                            {
+                                Log(Debug::Error)
+                                    << "phys hydrate fail '" << ptr.getCellRef().getRefId() << "': " << e.what();
+                            }
+                        }
+                        else if (hasPhys && d2 > rPhysOut * rPhysOut)
+                        {
+                            vitaRemovePhysicsOnly(ptr, nullptr);
+                            sVitaLivePhys = std::max(0, sVitaLivePhys - 1);
+                        }
+                        return true;
+                    }
+                    if (!domainNow)
+                        return true;
+                    if (ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                        return true;
+                    const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
+                    const float dx = op.x() - pp.x();
+                    const float dy = op.y() - pp.y();
+                    const float d2 = dx * dx + dy * dy;
+                    const bool live = ptr.getRefData().getBaseNode() != nullptr;
+                    const bool actor = isActorType(t);
+                    if (!live && !actor && wantFull && d2 < rIn * rIn)
+                    {
+                        if (!warmOrRequest(ptr, d2))
+                            return true;
+                        try
+                        {
+                            addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
+                            addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
+                            ++vitaOps;
+                            ++sVitaLiveObjects;
+                            ++sVitaLivePhys;
+                        }
+                        catch (const std::exception& e)
+                        {
+                            Log(Debug::Error)
+                                << "hydrate fail '" << ptr.getCellRef().getRefId() << "': " << e.what();
+                        }
+                        anyResident = true;
+                    }
+                    else if (live)
+                    {
+                        anyResident = true;
+                        if (!isPagedRef(ptr))
+                        {
+                            const float outR = actor ? rActorOut : rItemOut;
+                            if (d2 > outR * outR)
+                            {
+                                removeNonLiteObject(ptr, nullptr);
+                                sVitaLiveObjects = std::max(0, sVitaLiveObjects - 1);
+                                sVitaLivePhys = std::max(0, sVitaLivePhys - 1);
+                            }
+                        }
+                    }
+                    return true;
+                });
             }
+            if (icoAdds > 0)
+                mVitaIcoPending[&cell] += icoAdds;
+            if (anyResident)
+                mVitaPhysDomain.insert(&cell);
+            else if (inSceneDomain && !wantStruct)
+                mVitaPhysDomain.erase(&cell);
+            if (aborted)
+                break;
+        }
 
-            ++it;
+        {
+            static Clock::time_point sLastMap{};
+            if (std::chrono::duration_cast<std::chrono::seconds>(tick0 - sLastMap).count() >= 10)
+            {
+                sLastMap = tick0;
+                char mm[144];
+                int dw = 0, dl = 0, dr = 0;
+                mPreloader->vitaDemandStats(dw, dl, dr);
+                snprintf(mm, sizeof(mm), "[MemMap] heap=%dMB objs=%d phys=%d stores=%d dmd=%d/%d/%d",
+                    Vita::getHeapUsedMB(), (int)mRendering.getObjects().getObjectCount(),
+                    (int)mPhysics->getObjectCount(), (int)mWorld.getWorldModel().vitaCellStoreCount(), dw, dl,
+                    dr);
+                Vita::breadcrumb(mm);
+            }
+        }
+
+
+        // GL precompile in bursts; no per-cell "complete" moment exists.
+        for (auto ico = mVitaIcoPending.begin(); ico != mVitaIcoPending.end();)
+        {
+            if (ico->second >= 25 || bigBudget)
+            {
+                if (osg::Group* root = mRendering.getObjects().getCellRoot(ico->first))
+                    if (auto* op = mRendering.getIncrementalCompileOperation())
+                        op->add(root);
+                ico = mVitaIcoPending.erase(ico);
+            }
+            else
+                ++ico;
+        }
+
+        // ---- Lane B: one actor per healthy tick, nearest wins globally ----
+        if (!bigBudget && frameDt >= 30)
+            return vitaOps;
+        int actorBudget = bigBudget ? 1000 : 1;
+        while (actorBudget > 0)
+        {
+            if (bigBudget && Clock::now() >= deadline)
+                return vitaOps;
+            MWWorld::Ptr best;
+            float bestD2 = rIn * rIn;
+            for (std::size_t ci = 0; ci < n; ++ci)
+            {
+                CellStore& cell = *cells[ci];
+                if (!cell.getCell()->isExterior() || mVitaActorDomain.count(&cell) == 0)
+                    continue;
+                {
+                    const int gx = cell.getCell()->getGridX();
+                    const int gy = cell.getCell()->getGridY();
+                    const float nx = std::clamp(pp.x(), gx * cSz, (gx + 1) * cSz);
+                    const float ny = std::clamp(pp.y(), gy * cSz, (gy + 1) * cSz);
+                    const float ex = nx - pp.x();
+                    const float ey = ny - pp.y();
+                    if (ex * ex + ey * ey > (rIn + 512.f) * (rIn + 512.f))
+                        continue; // out of actor reach; scan cost stays bounded
+                }
+                cell.forEach([&](const MWWorld::Ptr& ptr) {
+                    if (!isActorType(ptr.getType()))
+                        return true;
+                    if (ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                        return true;
+                    if (ptr.getRefData().getBaseNode() != nullptr)
+                        return true;
+                    const osg::Vec3f op = ptr.getRefData().getPosition().asVec3();
+                    const float dx = op.x() - pp.x();
+                    const float dy = op.y() - pp.y();
+                    const float d2 = dx * dx + dy * dy;
+                    if (d2 < bestD2)
+                    {
+                        bestD2 = d2;
+                        best = ptr;
+                    }
+                    return true;
+                });
+            }
+            if (best.isEmpty())
+                return vitaOps;
+            if (!warmOrRequest(best, bestD2))
+                return vitaOps; // skeleton warming; try next tick
+            if (best.getType() == ESM::REC_NPC_)
+            {
+                // The invariant covers parts: composite assembly must never
+                // cold-load head/hair/gear on the main thread.
+                bool partsWarm = true;
+                const ESM::NPC* npc = best.get<ESM::NPC>()->mBase;
+                const auto& bodyParts = mWorld.getStore().get<ESM::BodyPart>();
+                for (const ESM::RefId& bpId : { npc->mHead, npc->mHair })
+                    if (const ESM::BodyPart* bp = bodyParts.search(bpId))
+                        partsWarm
+                            = warmPath(Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(bp->mModel))
+                                           .value(),
+                                  bestD2)
+                            && partsWarm;
+                {
+                    // Race skin parts (chest/arms/legs): same invariant.
+                    const bool female = !npc->isMale();
+                    static std::map<std::pair<ESM::RefId, bool>, std::vector<std::string>> sRaceParts;
+                    const auto key = std::make_pair(npc->mRace, female);
+                    auto rit = sRaceParts.find(key);
+                    if (rit == sRaceParts.end())
+                    {
+                        std::vector<std::string> paths;
+                        for (const ESM::BodyPart& part : bodyParts)
+                        {
+                            if (part.mRace != npc->mRace || part.mData.mType != ESM::BodyPart::MT_Skin
+                                || part.mModel.empty())
+                                continue;
+                            if (((part.mData.mFlags & ESM::BodyPart::BPF_Female) != 0) != female)
+                                continue;
+                            paths.push_back(
+                                Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(part.mModel)).value());
+                        }
+                        rit = sRaceParts.emplace(key, std::move(paths)).first;
+                    }
+                    for (const std::string& pmodel : rit->second)
+                        partsWarm = warmPath(pmodel, bestD2) && partsWarm;
+                }
+                if (best.getClass().hasInventoryStore(best))
+                {
+                    MWWorld::InventoryStore& inv = best.getClass().getInventoryStore(best);
+                    for (int slot = 0; slot < MWWorld::InventoryStore::Slots; ++slot)
+                    {
+                        auto sit = inv.getSlot(slot);
+                        if (sit != inv.end())
+                        {
+                            const VFS::Path::Normalized im = getModel(*sit);
+                            if (!im.empty())
+                                partsWarm = warmPath(std::string(im.value()), bestD2) && partsWarm;
+                        }
+                    }
+                }
+                if (!partsWarm)
+                    return vitaOps; // parts streaming; assemble next tick
+            }
+            try
+            {
+                addObject(best, mWorld, mPagedRefs, *mPhysics, mRendering);
+                addObject(best, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
+                ++vitaOps;
+                ++sVitaLiveObjects;
+                ++sVitaLivePhys;
+            }
+            catch (const std::exception& e)
+            {
+                Log(Debug::Error) << "actor hydrate fail '" << best.getCellRef().getRefId() << "': " << e.what();
+            }
+            --actorBudget;
+        }
+        return vitaOps;
+    }
+
+    void Scene::vitaRetirePump()
+    {
+        // Crossings never tear down; one far cell retires per healthy
+        // frame. The hydrator has usually drained it to a husk already.
+        if (!Settings::general().mVitaSeamlessCrossing || !mCurrentCell || !mCurrentCell->isExterior())
+            return;
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point sLast{};
+        const auto now = Clock::now();
+        const int frameDt = sLast.time_since_epoch().count() == 0
+            ? 33
+            : (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - sLast).count();
+        sLast = now;
+        if (frameDt > 45)
+            return; // only skip genuinely awful frames; 30-40ms is our normal
+        CellStore* victims[2] = { nullptr, nullptr };
+        int nv = 0;
+        for (CellStore* cell : mActiveCells)
+        {
+            if (!cell->getCell()->isExterior())
+                continue;
+            const int dx = std::abs(cell->getCell()->getGridX() - mCurrentGridCenter.x());
+            const int dy = std::abs(cell->getCell()->getGridY() - mCurrentGridCenter.y());
+            if (dx > mHalfGridSize + 1 || dy > mHalfGridSize + 1)
+            {
+                victims[nv++] = cell;
+                if (nv == 2)
+                    break;
+            }
+        }
+        for (int i = 0; i < nv; ++i)
+            unloadCell(victims[i], nullptr);
+    }
+
+    void Scene::processPendingCellLoads()
+    {
+        // Radial era: this queue only staggers infrastructure prep
+        // (terrain/water/navmesh), one cell per healthy frame. Content is
+        // the hydrator's job.
+        if (mPendingCellLoads.empty())
+            return;
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point sLastPrep{};
+        const auto now = Clock::now();
+        const int frameDt = sLastPrep.time_since_epoch().count() == 0
+            ? 33
+            : (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - sLastPrep).count();
+        sLastPrep = now;
+        if (frameDt > 40)
+            return;
+        if (mPendingCellLoads.size() > 1)
+        {
+            // Ahead-of-movement preps first: they are terrain-preloaded and
+            // imminent; lateral/behind cells can wait for slack frames.
+            const osg::Vec3f pp = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
+            auto headingKey = [&](const PendingCellLoad& pc) {
+                constexpr float cSz = 8192.f;
+                osg::Vec2f toCell((pc.cell->getCell()->getGridX() + 0.5f) * cSz - pp.x(),
+                    (pc.cell->getCell()->getGridY() + 0.5f) * cSz - pp.y());
+                toCell.normalize();
+                return -(mSmoothedMoveDir.x() * toCell.x() + mSmoothedMoveDir.y() * toCell.y());
+            };
+            std::stable_sort(mPendingCellLoads.begin(), mPendingCellLoads.end(),
+                [&](const PendingCellLoad& a, const PendingCellLoad& b) { return headingKey(a) < headingKey(b); });
+        }
+        for (auto it = mPendingCellLoads.begin(); it != mPendingCellLoads.end();)
+        {
+            if (Vita::isMemoryPressure(getVitaCellBudgetMB()))
+            {
+                Vita::breadcrumb("[DeferredLoad] Paused: memory pressure");
+                return;
+            }
+            if (!it->prepared)
+            {
+                const osg::Vec3f prepPos = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
+                CellStore& prepCell = *it->cell;
+                prepareCellForDeferredLoad(prepCell, prepPos, nullptr);
+                if (prepCell.getState() == CellStore::State_Loaded)
+                {
+                    std::vector<std::string> cold;
+                    prepCell.forEach([&](const MWWorld::Ptr& cp) {
+                        const VFS::Path::Normalized m = getModel(cp);
+                        if (!m.empty())
+                            cold.emplace_back(m.value());
+                        return true;
+                    });
+                    mPreloader->vitaPrefetchModels(cold);
+                }
+                mPendingCellLoads.erase(it);
+                return; // one prep per frame
+            }
+            it = mPendingCellLoads.erase(it); // legacy entry: radial owns content
         }
     }
 
@@ -2139,6 +2978,12 @@ namespace MWWorld
     void Scene::promoteCellToFull(CellStore& cell, Loading::Listener* loadingListener,
         const DetourNavigator::UpdateGuard* navigatorUpdateGuard)
     {
+        if (Settings::general().mVitaSeamlessCrossing && cell.isExterior())
+        {
+            // Radial full-tier bubble owns actors/items; promotion is moot.
+            mCellLoadTiers[&cell] = CellLoadTier::Full;
+            return;
+        }
         VITA_CRUMB("promoteCellToFull() enter");
         // If this cell was waiting to be demoted, the demote is now moot —
         // the cell is becoming Full again. Just drop the pending entry.
@@ -2186,6 +3031,16 @@ namespace MWWorld
         mPendingPromotions.push_back(std::move(pp));
     }
 
+    void Scene::vitaRemovePhysicsOnly(const Ptr& ptr, const DetourNavigator::UpdateGuard* guard)
+    {
+        if (const auto object = mPhysics->getObject(ptr))
+        {
+            if (object->getShapeInstance()->mVisualCollisionType == Resource::VisualCollisionType::None)
+                mNavigator.removeObject(DetourNavigator::ObjectId(object), guard);
+            mPhysics->remove(ptr);
+        }
+    }
+
     void Scene::removeNonLiteObject(const MWWorld::Ptr& ptr,
         const DetourNavigator::UpdateGuard* navigatorUpdateGuard)
     {
@@ -2223,6 +3078,8 @@ namespace MWWorld
                 [&cell](const PendingPromotion& pp) { return pp.cell == &cell; }),
             mPendingPromotions.end());
 
+        if (Settings::general().mVitaSeamlessCrossing && cell.isExterior())
+            return; // bubble dehydrates by distance instead
         VITA_CRUMB("demoteCellToLite() enter");
         {
             char buf[128];
@@ -2493,6 +3350,7 @@ namespace MWWorld
 
     void Scene::flushPendingPromotion(CellStore* cell)
     {
+        const auto fpp0 = std::chrono::steady_clock::now();
         auto it = std::find_if(mPendingPromotions.begin(), mPendingPromotions.end(),
             [cell](const PendingPromotion& pp) { return pp.cell == cell; });
         if (it == mPendingPromotions.end())
@@ -2608,9 +3466,12 @@ namespace MWWorld
         {
             const int heapEndMB = Vita::getHeapUsedMB();
             char buf[160];
+            const int fppMs = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - fpp0)
+                                  .count();
             snprintf(buf, sizeof(buf),
-                "flushPendingPromotion: done, %d objects, heap end %dMB",
-                static_cast<int>(it->toInsert.size()), heapEndMB);
+                "flushPendingPromotion: done, %d objects %dms, heap end %dMB",
+                static_cast<int>(it->toInsert.size()), fppMs, heapEndMB);
             Vita::breadcrumb(buf);
         }
         mPendingPromotions.erase(it);
@@ -2622,6 +3483,9 @@ namespace MWWorld
     {
         using DetourNavigator::HeightfieldShape;
 
+#ifdef __vita__
+        mWorld.getWorldModel().vitaApplyEvictedState(cell.getCell()->getId());
+#endif
         assert(mActiveCells.find(&cell) == mActiveCells.end());
         mActiveCells.insert(&cell);
 
@@ -2734,6 +3598,11 @@ namespace MWWorld
     void Scene::clear()
     {
 #ifdef __vita__
+        mVitaActorDomain.clear();
+        mVitaPhysDomain.clear();
+        mVitaIcoPending.clear();
+        mVitaCleanSweep.clear();
+        mVitaCellRefBox.clear();
         mPendingCellLoads.clear();
         // Pending demotions/promotions reference cells that are about to be
         // unloaded by the loop below. Drop them now to avoid stale
@@ -2828,9 +3697,13 @@ namespace MWWorld
         Vita::simFence(); // Scene teardown; wait out overlapped draw.
         Vita::breadcrumb("changeCellGrid() enter");
         const auto vitaCrossT0 = std::chrono::steady_clock::now();
+        auto vitaM1 = vitaCrossT0; // after entry flush
+        auto vitaM2 = vitaCrossT0; // after load loop + end flush
+        auto vitaM3 = vitaCrossT0; // after navigator update
         bool vitaSeamless = Settings::general().mVitaSeamlessCrossing && mCurrentCell
             && mCurrentCell->isExterior() && std::abs(playerCellIndex.mX - mCurrentGridCenter.x()) <= 1
             && std::abs(playerCellIndex.mY - mCurrentGridCenter.y()) <= 1;
+        int vitaPredictedMs = 0;
         if (vitaSeamless)
         {
             // Screen anything predicted heavy: actor-dense center, dense
@@ -2852,35 +3725,27 @@ namespace MWWorld
             // Predict crossing duration; screen only when it's genuinely
             // long. Cold store loads dominate (~1.3s each, measured).
             int coldCells = 0;
-            int warmMs = 0;
-            std::size_t loadedRingRefs = 0;
             iterateOverCellsAround(playerCellIndex.mX, playerCellIndex.mY, mHalfGridSize, [&](int x, int y) {
                 const ESM::ExteriorCellLocation loc(x, y, playerCellIndex.mWorldspace);
                 if (isCellInCollection(loc, mActiveCells))
                     return;
-                CellStore& rc = mWorld.getWorldModel().getExterior(loc, false);
-                if (rc.getState() != CellStore::State_Loaded)
-                {
+                if (mWorld.getWorldModel().getExterior(loc, false).getState() != CellStore::State_Loaded)
                     ++coldCells;
-                    return;
-                }
-                loadedRingRefs += rc.count();
-                // Cold ASSETS dominate insert cost even with a warm store.
-                warmMs += (int)rc.count() * (mPreloader->isCellPreloaded(rc) ? 1 : 8);
             });
-            const int predictedMs = coldCells * 1300 + warmMs + actorCount * 20
-                + ((centerCell.getState() != CellStore::State_Loaded)
-                        ? 800
-                        : (mPreloader->isCellPreloaded(centerCell) ? 0 : (int)centerRefs * 4));
+            // Radial world: a crossing syncs only ESM store parses; all
+            // content streams by radius. Screens = cold frontiers/teleports.
+            const int predictedMs = coldCells * 1300;
+            vitaPredictedMs = predictedMs;
             constexpr int kScreenThresholdMs = 2000;
-            if (predictedMs >= kScreenThresholdMs)
             {
-                vitaSeamless = false;
                 char buf[128];
-                snprintf(buf, sizeof(buf), "[Crossing] predicted %dms (cold=%d refs=%u actors=%d): screened",
-                    predictedMs, coldCells, (unsigned)loadedRingRefs, actorCount);
+                snprintf(buf, sizeof(buf), "[Crossing] predicted %dms (cold=%d actors=%d): %s", predictedMs,
+                    coldCells, actorCount,
+                    predictedMs >= kScreenThresholdMs ? "screened" : "seamless");
                 Vita::breadcrumb(buf);
             }
+            if (predictedMs >= kScreenThresholdMs)
+                vitaSeamless = false;
         }
         Vita::logMemoryStatus("Pre-changeCellGrid");
         // Drain any in-flight async physics worker before we start removing
@@ -2904,6 +3769,11 @@ namespace MWWorld
             {
                 const auto dx = std::abs(playerCellX - cell->getCell()->getGridX());
                 const auto dy = std::abs(playerCellY - cell->getCell()->getGridY());
+                // Trailing ring: keep just-departed cells one extra grid
+                // step; the hydrator drains them radially so the eventual
+                // unload is a fraction of the boundary-frame cost.
+                if (Settings::general().mVitaSeamlessCrossing)
+                    continue; // retire pump unloads amortized, off this frame
                 if (dx > halfGridSize || dy > halfGridSize)
                     unloadCell(cell, navigatorUpdateGuard.get());
             }
@@ -2918,20 +3788,26 @@ namespace MWWorld
         mRendering.flushUnrefQueueImmediate();
         // Full clear only under pressure — keeps caches warm across cell
         // boundaries (less SD re-reading). Watchdog remains the backstop.
-        if (Vita::getHeapUsedMB() > Settings::general().mVitaFlushThresholdMb)
-            mRendering.getResourceSystem()->clearCache();
-        mRendering.flushUnrefQueueImmediate();
-        mRendering.flushUnrefQueueImmediate();
-        mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());
-        // Coalesce free chunks left behind by the bulk unref. See the
-        // matching malloc_trim() in the MemWatchdog block for rationale.
-        malloc_trim(0);
+        // Unconditional: this is the texture-release settle point (cold
+        // template images free here after their first draw). 7-35ms.
+        {
+            if (Vita::getHeapUsedMB() > Settings::general().mVitaFlushThresholdMb)
+                mRendering.getResourceSystem()->clearCache();
+            mRendering.flushUnrefQueueImmediate();
+            mRendering.flushUnrefQueueImmediate();
+            mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());
+        }
+        // Trim only under real pressure: 40-95ms on a 200MB heap is a
+        // per-crossing stutter otherwise.
+        if (Vita::getHeapUsedMBFresh() > getVitaCellBudgetMB() - 16)
+            malloc_trim(0);
         // After the largest single bulk-free event in the engine, also
         // try replenishing the emergency reserve. If a previous OOM
         // released it and we never dipped below the watchdog re-arm
         // threshold to retry, this is the next-best moment.
         Vita::replenishEmergencyReserve();
         Vita::logMemoryStatus("Post-flush");
+        vitaM1 = std::chrono::steady_clock::now();
 #endif
 
         const DetourNavigator::CellGridBounds cellGridBounds{
@@ -2990,7 +3866,29 @@ namespace MWWorld
                 {
                     // Cell is active but has no tier — it was a deferred cell that
                     // never finished loading objects. Now we need to decide:
-                    if (isCenter)
+                    if (isCenter && Settings::general().mVitaSeamlessCrossing)
+                    {
+                        // Stream the center at urgent priority instead of a
+                        // one-frame sync lump; terrain physics guarantees
+                        // footing while structure fills in (<1-2s).
+                        bool queued = false;
+                        for (auto& pcl : mPendingCellLoads)
+                            if (pcl.cell == activeCell)
+                            {
+                                pcl.urgent = true;
+                                queued = true;
+                                break;
+                            }
+                        if (!queued)
+                        {
+                            PendingCellLoad pending;
+                            pending.cell = activeCell;
+                            pending.queuedAt = std::chrono::steady_clock::now();
+                            pending.urgent = true;
+                            mPendingCellLoads.push_back(std::move(pending));
+                        }
+                    }
+                    else if (isCenter)
                     {
                         // Became center cell: do immediate lite load + promote
                         // Terrain/water/pathgrid already set up by prepareCellForDeferredLoad.
@@ -3055,7 +3953,46 @@ namespace MWWorld
 #endif
         loadingListener->setLabel("#{OMWEngine:LoadingExterior}");
         loadingListener->setProgressRange(refsToLoad);
+#ifdef __vita__
+        if (!vitaSeamless
+            && (Vita::getHeapUsedMB() > getVitaCellBudgetMB() - 40
+                || mWorld.getWorldModel().vitaCellStoreCount() > 120))
+            vitaScreenHousekeeping();
+        else if (vitaSeamless && Vita::getHeapUsedMBFresh() > getVitaCellBudgetMB() - 12)
+        {
+            // Same post-fence safe point as screened housekeeping. Play
+            // accumulates ~20MB of transients that only unwind here; a
+            // saturated allocator triples warm insert cost (measured).
+            const int hb = Vita::getHeapUsedMBFresh();
+            mRendering.flushUnrefQueueImmediate();
+            mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());
+            mRendering.getResourceSystem()->clearCache();
+            mRendering.flushUnrefQueueImmediate();
+            vitaStoreEvictPass(true);
+            char hkbuf[80];
+            snprintf(hkbuf, sizeof(hkbuf), "[Housekeep] lite %dMB->%dMB", hb, Vita::getHeapUsedMBFresh());
+            Vita::breadcrumb(hkbuf);
+        }
+#endif
 
+#ifdef __vita__
+        if (!vitaSeamless)
+        {
+            // Release the outgoing ring before loading the incoming one;
+            // the peak otherwise holds both at once (measured 15-25MB).
+            const int ur0 = Vita::getHeapUsedMBFresh();
+            while (!mPendingDemotions.empty())
+                flushPendingDemotion(mPendingDemotions.front().cell);
+            mRendering.flushUnrefQueueImmediate();
+            const int ur1 = Vita::getHeapUsedMBFresh();
+            if (ur0 - ur1 >= 3)
+            {
+                char urbuf[64];
+                snprintf(urbuf, sizeof(urbuf), "[Housekeep] preload %dMB->%dMB", ur0, ur1);
+                Vita::breadcrumb(urbuf);
+            }
+        }
+#endif
         sortCellsToLoad(playerCellX, playerCellY, cellsPositionsToLoad);
 
         for (const auto& [x, y] : cellsPositionsToLoad)
@@ -3064,6 +4001,21 @@ namespace MWWorld
             if (!isCellInCollection(indexToLoad, mActiveCells))
             {
 #ifdef __vita__
+                // Loads add transients; past ~budget-16 the allocator
+                // multiplies insert cost 3-15x (measured). Screened path is
+                // GL-quiescent, so flushing between cells is safe.
+                if (!vitaSeamless && Vita::getHeapUsedMBFresh() > getVitaCellBudgetMB() - 16)
+                {
+                    const int mf0 = Vita::getHeapUsedMBFresh();
+                    mRendering.flushUnrefQueueImmediate();
+                    mRendering.getResourceSystem()->updateCache(mRendering.getReferenceTime());
+                    mRendering.getResourceSystem()->clearCache();
+                    mRendering.flushUnrefQueueImmediate();
+                    char mfbuf[80];
+                    snprintf(mfbuf, sizeof(mfbuf), "[Housekeep] midload %dMB->%dMB", mf0,
+                        Vita::getHeapUsedMBFresh());
+                    Vita::breadcrumb(mfbuf);
+                }
                 const bool isCenter = (x == playerCellX && y == playerCellY);
 
 #endif
@@ -3071,7 +4023,16 @@ namespace MWWorld
 #ifdef __vita__
                 if (isCenter)
                 {
+                    const auto c0 = std::chrono::steady_clock::now();
                     loadCell(cell, loadingListener, changeEvent, pos, navigatorUpdateGuard.get());
+                    {
+                        const int cms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - c0)
+                                            .count();
+                        char buf[96];
+                        snprintf(buf, sizeof(buf), "[LoadProf] center (%d,%d) %dms", x, y, cms);
+                        Vita::breadcrumb(buf);
+                    }
                     {
                         struct mallinfo mi = mallinfo();
                         char buf[128];
@@ -3079,6 +4040,27 @@ namespace MWWorld
                             x, y, mi.uordblks / 1024);
                         Vita::breadcrumb(buf);
                     }
+                }
+                else if (vitaSeamless)
+                {
+                    // Prep (terrain/water/nav) staggers one-per-frame in the
+                    // chunker instead of stacking in the boundary frame.
+                    mActiveCells.insert(&cell);
+                    PendingCellLoad pendingPrep;
+                    pendingPrep.cell = &cell;
+                    pendingPrep.queuedAt = std::chrono::steady_clock::now();
+                    pendingPrep.prepared = false;
+                    mPendingCellLoads.push_back(std::move(pendingPrep));
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "Loaded cell (%d,%d) DEFERRED (beyond fog)", x, y);
+                    Vita::breadcrumb(buf);
+                }
+                else if (Settings::general().mVitaSeamlessCrossing)
+                {
+                    // Screened radial load: prep now; the big-budget
+                    // hydrator tick below fills the discs under the screen.
+                    // (Hydrator counts its own adds.)
+                    prepareCellForDeferredLoad(cell, pos, navigatorUpdateGuard.get());
                 }
                 else
                 {
@@ -3108,9 +4090,11 @@ namespace MWWorld
         }
 #endif
 
+        vitaM2 = std::chrono::steady_clock::now();
         mNavigator.update(pos, navigatorUpdateGuard.get());
 
         navigatorUpdateGuard.reset();
+        vitaM3 = std::chrono::steady_clock::now();
 
 #ifdef __vita__
         {
@@ -3143,9 +4127,19 @@ namespace MWWorld
                 }
                 else if (tierIt == mCellLoadTiers.end())
                 {
-                    insertCellLite(*center, loadingListener, rescueGuard.get());
-                    mCellLoadTiers[center] = CellLoadTier::Lite;
-                    promoteCellToFull(*center, loadingListener, rescueGuard.get());
+                    if (Settings::general().mVitaSeamlessCrossing)
+                    {
+                        // Radial cells carry no tier; content is the
+                        // hydrator's. This "rescue" was sync-loading the
+                        // whole center every crossing (tail= 0.4-2.7s).
+                        mCellLoadTiers[center] = CellLoadTier::Full;
+                    }
+                    else
+                    {
+                        insertCellLite(*center, loadingListener, rescueGuard.get());
+                        mCellLoadTiers[center] = CellLoadTier::Lite;
+                        promoteCellToFull(*center, loadingListener, rescueGuard.get());
+                    }
                 }
                 else
                 {
@@ -3210,9 +4204,8 @@ namespace MWWorld
             loadingListener->increaseProgress(1);
         }
 
-        // Eviction is pressure-only; evicting here re-scans ESM from disk.
-        Vita::auditWorldModel(mWorld.getWorldModel());
-        Vita::auditResourceCaches(mRendering.getResourceSystem());
+        // Audits live in the MemWatchdog now: walking every store's refs
+        // cost 0.5-2s per crossing as pure telemetry (measured via tail=).
 #endif
 
 #ifdef __vita__
@@ -3221,7 +4214,81 @@ namespace MWWorld
                 std::chrono::steady_clock::now() - vitaCrossT0)
                                .count();
             char buf[96];
-            snprintf(buf, sizeof(buf), "[Crossing] seamless=%d total=%dms", (int)vitaSeamless, ms);
+            mVitaLastCrossing = std::chrono::steady_clock::now();
+            {
+                std::map<std::string, int> regionCells;
+                for (auto* ac : mActiveCells)
+                    if (ac->getCell()->isExterior())
+                    {
+                        ++regionCells[ac->getCell()->getRegion().serializeText()];
+                        mPreloader->vitaQueueHotspot(ac->getCell()->getGridX(), ac->getCell()->getGridY());
+                    }
+                std::vector<std::pair<int, std::string>> ranked;
+                for (const auto& [r, n] : regionCells)
+                    if (!r.empty())
+                        ranked.push_back({ n, r });
+                std::sort(ranked.rbegin(), ranked.rend());
+                std::vector<std::string> top;
+                for (const auto& [n, r] : ranked)
+                {
+                    // A second region must hold a ring majority; one border
+                    // cell must not trigger a package load.
+                    if (!top.empty() && n < 4)
+                        break;
+                    top.push_back(r);
+                    if (top.size() >= 2)
+                        break;
+                }
+                mPreloader->vitaSetWarmRegions(top);
+                {
+                    std::string ringDesc;
+                    for (const auto& [n, r] : ranked)
+                    {
+                        if (!ringDesc.empty())
+                            ringDesc += '+';
+                        ringDesc += r + ":" + std::to_string(n);
+                    }
+                    char rbuf[128];
+                    snprintf(rbuf, sizeof(rbuf), "[CommonWarm] ring: %s", ringDesc.c_str());
+                    Vita::breadcrumb(rbuf);
+                }
+            }
+            mPreloader->vitaReleaseDistantHotspots(mCurrentGridCenter.x(), mCurrentGridCenter.y(), 2);
+        // The screen is free warming time: drain warm backlogs while it
+        // shows so the cells ahead load hot.
+        if (!vitaSeamless && Vita::getHeapUsedMBFresh() < getVitaCellBudgetMB() - 12)
+        {
+            // Piggyback on the screen, never dominate it: drain time scales
+            // with the load the screen already covers. Teleports/saves (no
+            // prediction) are long screens anyway - give them the full cap.
+            const int drainMs = vitaPredictedMs > 0 ? std::clamp(vitaPredictedMs, 1500, 4000) : 4000;
+            mPreloader->vitaDrainWarmSync(drainMs);
+        }
+        if (!vitaSeamless)
+        {
+            // Hydrate to QUIESCENCE under the screen: it lifts onto a
+            // finished disc. Ticks register their own demand (cold models,
+            // actor parts) — drain it between passes or "quiescence" lies.
+            const auto qStart = std::chrono::steady_clock::now();
+            for (int pass = 0; pass < 40; ++pass)
+            {
+                if (std::chrono::steady_clock::now() - qStart > std::chrono::seconds(10))
+                    break;
+                const int qOps = vitaBubbleTick(2000);
+                if (mPreloader->vitaDemandWantedCount() > 0
+                    && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                    mPreloader->vitaDrainWarmSync(1500);
+                else if (qOps == 0)
+                    break;
+            }
+        }
+            const auto segMs = [&](std::chrono::steady_clock::time_point a,
+                                 std::chrono::steady_clock::time_point b) {
+                return (int)std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+            };
+            snprintf(buf, sizeof(buf), "[Crossing] seamless=%d total=%dms flush=%d load=%d nav=%d tail=%d",
+                (int)vitaSeamless, ms, segMs(vitaCrossT0, vitaM1), segMs(vitaM1, vitaM2), segMs(vitaM2, vitaM3),
+                segMs(vitaM3, std::chrono::steady_clock::now()));
             Vita::breadcrumb(buf);
         }
 #endif
@@ -3887,25 +4954,8 @@ namespace MWWorld
                     incoming.push_back({ cx + dx, cy + 2 * ay });
             if (ax != 0 && ay != 0)
                 incoming.push_back({ cx + 2 * ax, cy + 2 * ay });
-            const ESM::RefId ws = mCurrentCell->getCell()->getWorldSpace();
             for (auto [gx, gy] : incoming)
-            {
-                CellStore& c
-                    = mWorld.getWorldModel().getExterior(ESM::ExteriorCellLocation(gx, gy, ws), false);
-                if (c.getState() != CellStore::State_Loaded)
-                    continue; // stores load at the crossing; workers stay out
-                if (c.count() >= 250)
-                    continue; // heavy cells get a screen anyway; warming them costs fps + MBs
-                mPreloader->vitaPreloadPinned(c, mRendering.getReferenceTime());
-                if (std::find(mVitaAnticipatedPins.begin(), mVitaAnticipatedPins.end(), &c)
-                    == mVitaAnticipatedPins.end())
-                    mVitaAnticipatedPins.push_back(&c);
-            }
-            while (mVitaAnticipatedPins.size() > 4)
-            {
-                mPreloader->vitaReleasePinned(mVitaAnticipatedPins.front());
-                mVitaAnticipatedPins.erase(mVitaAnticipatedPins.begin());
-            }
+                mPreloader->vitaQueueHotspot(gx, gy);
         }
 #endif
         mPreloader->setTerrainPreloadPositions(exteriorPositions);

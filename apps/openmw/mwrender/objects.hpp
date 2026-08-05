@@ -61,6 +61,11 @@ namespace MWRender
         typedef std::map<const MWWorld::CellStore*, osg::ref_ptr<osg::Group>> CellMap;
         CellMap mCellSceneNodes;
         PtrAnimationMap mObjects;
+
+    public:
+        std::size_t getObjectCount() const { return mObjects.size(); }
+
+    private:
         osg::ref_ptr<osg::Group> mRootNode;
         Resource::ResourceSystem* mResourceSystem;
         SceneUtil::UnrefQueue& mUnrefQueue;

@@ -262,15 +262,16 @@ namespace MWSound
 #ifdef __vita__
     void SoundManager::vitaWarmCellSounds(const ESM::RefId& regionId)
     {
-        // Cold one-shots: SD read + decode at trigger = 100-570ms stalls.
-        int loaded = 0;
+        // Cold one-shots stall 100-570ms at trigger; queue for the
+        // per-frame trickle loader instead of loading here.
         const auto warm = [&](const ESM::RefId& id) {
             if (id.empty())
                 return;
             SoundBuffer* sfx = mSoundBuffers.lookup(id);
-            const bool wasCold = sfx == nullptr || sfx->getHandle() == nullptr;
-            if (mSoundBuffers.load(id) != nullptr && wasCold)
-                ++loaded;
+            if (sfx != nullptr && sfx->getHandle() != nullptr)
+                return;
+            if (mVitaSoundWarmQueued.insert(id).second)
+                mVitaSoundWarmQueue.push_back(id);
         };
 
         static const char* weatherNames[] = { "Clear", "Cloudy", "Foggy", "Overcast", "Rain", "Thunderstorm",
@@ -286,25 +287,19 @@ namespace MWSound
             for (const ESM::Region::SoundRef& soundRef : region->mSoundList)
                 warm(soundRef.mSound);
 
-        if (loaded > 0)
-        {
-            char buf[96];
-            snprintf(buf, sizeof(buf), "[SoundWarm] loaded %d cold buffer(s)", loaded);
-            vitaBreadcrumb(buf);
-        }
     }
 
     void SoundManager::vitaWarmActorSounds(MWWorld::CellStore& cell)
     {
         // SNDG records for creatures present here plus the generic set.
-        int loaded = 0;
         const auto warm = [&](const ESM::RefId& id) {
             if (id.empty())
                 return;
             SoundBuffer* sfx = mSoundBuffers.lookup(id);
-            const bool wasCold = sfx == nullptr || sfx->getHandle() == nullptr;
-            if (mSoundBuffers.load(id) != nullptr && wasCold)
-                ++loaded;
+            if (sfx != nullptr && sfx->getHandle() != nullptr)
+                return;
+            if (mVitaSoundWarmQueued.insert(id).second)
+                mVitaSoundWarmQueue.push_back(id);
         };
 
         std::set<ESM::RefId> creatureIds;
@@ -319,12 +314,21 @@ namespace MWSound
                 warm(sndGen.mSound);
         }
 
-        if (loaded > 0)
+    }
+
+    void SoundManager::vitaPumpSoundWarm(int maxLoads)
+    {
+        int loaded = 0;
+        while (!mVitaSoundWarmQueue.empty() && loaded < maxLoads)
         {
-            char buf[96];
-            snprintf(buf, sizeof(buf), "[SoundWarm] loaded %d creature buffer(s)", loaded);
-            vitaBreadcrumb(buf);
+            const ESM::RefId id = mVitaSoundWarmQueue.front();
+            mVitaSoundWarmQueue.erase(mVitaSoundWarmQueue.begin());
+            mVitaSoundWarmQueued.erase(id);
+            if (mSoundBuffers.load(id) != nullptr)
+                ++loaded;
         }
+        if (loaded > 0 && mVitaSoundWarmQueue.empty())
+            vitaBreadcrumb("[SoundWarm] queue drained");
     }
 #endif
 
@@ -1172,6 +1176,9 @@ namespace MWSound
     {
         if (!mOutput->isInitialized() || mPlaybackPaused)
             return;
+#ifdef __vita__
+        vitaPumpSoundWarm(1);
+#endif
 
         MWBase::StateManager::State state = MWBase::Environment::get().getStateManager()->getState();
         bool isMainMenu = MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_MainMenu)

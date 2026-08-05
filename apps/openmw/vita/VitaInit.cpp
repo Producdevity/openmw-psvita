@@ -1149,6 +1149,7 @@ namespace Vita
         sceIoMkdir("ux0:data/openmw/data", 0777);
         sceIoMkdir("ux0:data/openmw/saves", 0777);
         sceIoMkdir("ux0:data/openmw/cache", 0777);
+        sceIoMkdir("ux0:data/openmw/cache/evict", 0777);
         sceIoMkdir("ux0:data/openmw/screenshots", 0777);
         sceIoMkdir("ux0:data/openmw/mods", 0777);
 
@@ -1432,6 +1433,12 @@ namespace Vita
     void breadcrumb(const char* msg)
     {
         vitaBreadcrumb(msg);
+    }
+
+    int getHeapUsedMBFresh()
+    {
+        struct mallinfo mi = mallinfo();
+        return mi.uordblks / (1024 * 1024);
     }
 
     int getHeapUsedMB()

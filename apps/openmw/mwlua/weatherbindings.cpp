@@ -52,9 +52,9 @@ namespace
     template <class Cell>
     bool hasWeather(const Cell& cell, bool requireExterior)
     {
-        if (requireExterior && !cell.mStore->isQuasiExterior() && !cell.mStore->isExterior())
+        if (requireExterior && !cell.store()->isQuasiExterior() && !cell.store()->isExterior())
             return false;
-        return MWBase::Environment::get().getWorldScene()->isCellActive(*cell.mStore);
+        return MWBase::Environment::get().getWorldScene()->isCellActive(*cell.store());
     }
 
     template <class Getter>

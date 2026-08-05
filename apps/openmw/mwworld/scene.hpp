@@ -2,6 +2,7 @@
 #define GAME_MWWORLD_SCENE_H
 
 #include <osg/Vec2i>
+#include <osg/Vec4f>
 #include <osg/Vec4i>
 #include <osg/ref_ptr>
 
@@ -9,6 +10,7 @@
 #include "ptr.hpp"
 
 #include <map>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <set>
@@ -151,6 +153,11 @@ namespace MWWorld
 
         struct PendingCellLoad {
             CellStore* cell;
+            std::chrono::steady_clock::time_point queuedAt{};
+            bool urgent = false;
+            bool prepared = true;  // terrain/water/nav registered
+            int firstClutter = 0;  // objects [0, firstClutter) are structural
+            bool farCompiled = false;
             bool objectsCollected = false;  // whether we've collected the object list
             std::vector<Ptr> objectsToInsert;  // filtered lite-type objects to insert
             int nextObject = 0;  // index into objectsToInsert
@@ -159,7 +166,22 @@ namespace MWWorld
             bool batchingDone = false;
         };
         std::vector<PendingCellLoad> mPendingCellLoads;
-        std::vector<CellStore*> mVitaAnticipatedPins;
+        std::chrono::steady_clock::time_point mVitaLastCrossing{};
+        void vitaScreenHousekeeping();
+        void vitaStoreEvictPass(bool pressure);
+        void finishPendingCellLoad(PendingCellLoad& pending);
+        void vitaFinalizeDeferredCell(CellStore& cell);
+        bool vitaCellStreamable(CellStore& cell, const osg::Vec3f& pos, int x, int y);
+        int vitaBubbleTick(int maxMs); // returns hydration ops performed
+        std::set<CellStore*, std::less<>> mVitaActorDomain;
+        std::set<CellStore*, std::less<>> mVitaPhysDomain;
+        std::map<CellStore*, int> mVitaIcoPending;
+        std::map<CellStore*, osg::Vec2f> mVitaCleanSweep;
+        std::map<CellStore*, osg::Vec4f> mVitaCellRefBox;
+        float vitaCellEdge2(CellStore& cell, const osg::Vec3f& pp);
+        void vitaRemovePhysicsOnly(const Ptr& ptr, const DetourNavigator::UpdateGuard* guard);
+        void vitaRetirePump();
+        std::set<CellStore*, std::less<>> vitaProtectedCells() const;
         // Per-frame deferred-load budget. Each addObject call costs 0.4-3 ms;
         // 3 keeps worst-case at ~9 ms (≈30% of a 30 fps budget) instead of
         // the 24 ms burst that 8 produced. Slower load tail, smoother frames.
@@ -231,6 +253,8 @@ namespace MWWorld
 #endif
 
     public:
+        void vitaLoadPurge();
+
         Scene(MWWorld::World& world, MWRender::RenderingManager& rendering, MWPhysics::PhysicsSystem* physics,
             DetourNavigator::Navigator& navigator);
 

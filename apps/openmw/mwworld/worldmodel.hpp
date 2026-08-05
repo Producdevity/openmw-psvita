@@ -99,7 +99,7 @@ namespace MWWorld
         /// getExteriorPtrs): preloaded or unloaded, no game state, not in the Ptr
         /// cache. They are recreated on demand; keeping them pins an mIds vector
         /// for every cell in the game. Returns the number evicted.
-        std::size_t evictSweptCellStores();
+        std::size_t evictSweptCellStores(const std::set<CellStore*, std::less<>>& protectedCells);
 
         /// Destroy fully-loaded CellStores that were materialized by ID lookups
         /// but never activated: not in \a activeCells, no game state, not in the
@@ -109,6 +109,19 @@ namespace MWWorld
         /// (door states, projectile casters) can drop Ptrs into it.
         std::size_t evictInactiveLoadedCellStores(
             const std::set<CellStore*, std::less<>>& activeCells, const std::function<void(CellStore&)>& onEvict);
+        bool vitaEvictOneDistant(const std::set<CellStore*, std::less<>>& protectedCells, int centerX, int centerY,
+            int minDist, const std::function<void(CellStore&)>& onEvict);
+        bool vitaApplyEvictedState(const ESM::RefId& id);
+        std::size_t vitaCellStoreCount() const { return mCells.size(); }
+        void vitaEvictedStats(std::size_t& ramBytes, int& count) const
+        {
+            ramBytes = 0;
+            count = (int)mVitaEvictedState.size();
+            for (const auto& [id, data] : mVitaEvictedState)
+                ramBytes += data.size();
+        }
+        std::size_t vitaEvictInteriors(const std::set<CellStore*, std::less<>>& protectedCells, std::size_t maxCount,
+            const std::function<void(CellStore&)>& onEvict);
 #endif
 
         /// Get all Ptrs referencing \a name in exterior cells
@@ -136,6 +149,10 @@ namespace MWWorld
         mutable std::map<ESM::ExteriorCellLocation, CellStore*> mExteriors;
         ESM::Cell mDraftCell;
         std::vector<std::pair<ESM::RefId, CellStore*>> mIdCache;
+#ifdef __vita__
+        std::map<ESM::RefId, std::string> mVitaEvictedState;
+        void vitaApplyBuffer(const std::string& data);
+#endif
         std::size_t mIdCacheIndex = 0;
 
         CellStore& getOrInsertCellStore(const ESM::Cell& cell);
@@ -145,6 +162,7 @@ namespace MWWorld
         Ptr getPtrAndCache(const ESM::RefId& name, CellStore& cellStore);
 
         void writeCell(ESM::ESMWriter& writer, CellStore& cell) const;
+        void vitaLoadWithState(CellStore& store) const;
     };
 }
 

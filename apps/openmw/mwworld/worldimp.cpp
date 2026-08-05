@@ -2049,6 +2049,17 @@ namespace MWWorld
         catch (std::exception& e)
         {
             Log(Debug::Error) << "Error updating focus object: " << e.what();
+#ifdef __vita__
+            static std::chrono::steady_clock::time_point sLastFocusErr{};
+            const auto nowFe = std::chrono::steady_clock::now();
+            if (nowFe - sLastFocusErr > std::chrono::seconds(5))
+            {
+                sLastFocusErr = nowFe;
+                char fe[192];
+                snprintf(fe, sizeof(fe), "[FocusErr] %s", e.what());
+                Vita::breadcrumb(fe);
+            }
+#endif
         }
     }
 
@@ -2082,7 +2093,8 @@ namespace MWWorld
 
             const MWRender::RenderingManager::RayResult scene = mRendering->castCameraToViewportRay(
                 0.5f, 0.5f, maxDistance, ignorePlayer,
-                MWRender::Mask_Scene | MWRender::Mask_Object | MWRender::Mask_VitaPick);
+                MWRender::Mask_Scene | MWRender::Mask_Object | MWRender::Mask_VitaPick
+                    | MWRender::Mask_Static); // doors are remasked Static (door.cpp)
             float sceneDist = -1.f;
             MWWorld::Ptr sceneObject = scene.mHitObject;
             if (scene.mHit)
@@ -2093,7 +2105,15 @@ namespace MWWorld
                     sceneDist = scene.mRatio * maxDistance;
             }
 
-            if (physDist >= 0.f && (sceneDist < 0.f || physDist <= sceneDist))
+            // Nameless scenery must not eat the prompt of a named object
+            // the crosshair visibly rests on (recessed door leaves sit
+            // behind their frame's collision on one side).
+            const bool physNamed = phys.mHit && !phys.mHitObject.isEmpty()
+                && !phys.mHitObject.getClass().getName(phys.mHitObject).empty();
+            const bool sceneNamed = !sceneObject.isEmpty()
+                && !sceneObject.getClass().getName(sceneObject).empty();
+            if (physDist >= 0.f && (sceneDist < 0.f || physDist <= sceneDist)
+                && (physNamed || !sceneNamed))
             {
                 mDistanceToFocusObject = physDist - camDist;
                 return phys.mHitObject;

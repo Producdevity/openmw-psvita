@@ -41,6 +41,9 @@ namespace Vita
     bool isMemoryPressure(int thresholdMB);
     int getHeapFreeMB();
 
+    // Uncached mallinfo read; for accurate before/after crumbs.
+    int getHeapUsedMBFresh();
+
     // Replenish emergency reserve after OOM recovery.
     void replenishEmergencyReserve();
 
