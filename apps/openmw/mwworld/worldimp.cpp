@@ -1578,6 +1578,21 @@ namespace MWWorld
         {
             float height = static_cast<float>(ESM::getCellSize(ptr.getCell()->getCell()->getWorldSpace()));
             osg::Vec3f traced = mPhysics->traceDown(ptr, pos, height);
+#ifdef __vita__
+            // This snap only ever moves an actor down, and exists to free ones
+            // stuck in geometry — always a small correction. A large drop means
+            // a deliberate airborne placement (Tarhiel), and taking it cancels
+            // the fall along with its damage.
+            constexpr float kMaxSnapDrop = 256.f;
+            if (!force && ptr.getClass().isActor() && pos.z() - traced.z() > kMaxSnapDrop)
+            {
+                char sbuf[128];
+                snprintf(sbuf, sizeof(sbuf), "[Airborne] kept %s %d units up",
+                    ptr.getCellRef().getRefId().toDebugString().c_str(), (int)(pos.z() - traced.z()));
+                Vita::breadcrumb(sbuf);
+                traced.z() = pos.z();
+            }
+#endif
             pos.z() = std::min(pos.z(), traced.z());
         }
 

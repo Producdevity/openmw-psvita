@@ -1960,10 +1960,19 @@ namespace MWWorld
             osg::Vec4f box(inf, inf, -inf, -inf);
             cell.forEach([&](const MWWorld::Ptr& p2) {
                 const osg::Vec3f rp = p2.getRefData().getPosition().asVec3();
-                box.x() = std::min(box.x(), rp.x());
-                box.y() = std::min(box.y(), rp.y());
-                box.z() = std::max(box.z(), rp.x());
-                box.w() = std::max(box.w(), rp.y());
+                // Extent, not pivot: a fort wall's origin sits at one end,
+                // so a point-box hides how close its geometry reaches.
+                float br = 0.f;
+                const VFS::Path::Normalized bm = getModel(p2);
+                if (!bm.empty())
+                    br = mPreloader->vitaKnownBoundRadius(std::string(bm.value()))
+                        * p2.getCellRef().getScale();
+                if (br < 0.f)
+                    br = 0.f;
+                box.x() = std::min(box.x(), rp.x() - br);
+                box.y() = std::min(box.y(), rp.y() - br);
+                box.z() = std::max(box.z(), rp.x() + br);
+                box.w() = std::max(box.w(), rp.y() + br);
                 return true;
             });
             it = mVitaCellRefBox.emplace(&cell, box).first;
@@ -2656,6 +2665,9 @@ namespace MWWorld
         const auto deadline = tick0 + std::chrono::milliseconds(maxMs);
         const osg::Vec3f pp = mWorld.getPlayerPtr().getRefData().getPosition().asVec3();
         constexpr float rIn = 3000.f;
+        // Actors are the costliest add; give them the closest tier of their
+        // own rather than riding the items+lights radius.
+        constexpr float rActorIn = 2000.f;
         constexpr float rItemOut = 3500.f;
         constexpr float rActorOut = 4800.f;
         constexpr float rPhysIn = 3700.f;
@@ -2719,6 +2731,73 @@ namespace MWWorld
         if (cells.empty())
             return 0;
         const std::size_t n = cells.size();
+
+        // Innermost guarantee: anything unloaded this close jumps every
+        // budget. Change-gated -- the answer only moves when the player does
+        // or the active set changes, so the common tick costs nothing.
+        // Actors are excluded: their composite is Lane B's job, warm-gated,
+        // and too large a lump for a budget-exempt path.
+        {
+            constexpr float rGuard = 1100.f;
+            constexpr int kGuardAdds = 4;
+            static osg::Vec3f sGuardPos(1e9f, 1e9f, 0.f);
+            static std::size_t sGuardCells = 0;
+            const float gmx = pp.x() - sGuardPos.x();
+            const float gmy = pp.y() - sGuardPos.y();
+            if (gmx * gmx + gmy * gmy > 200.f * 200.f || cells.size() != sGuardCells)
+            {
+                sGuardPos = pp;
+                sGuardCells = cells.size();
+                int guardAdds = 0;
+                for (CellStore* gc : cells)
+                {
+                    if (guardAdds >= kGuardAdds)
+                        break;
+                    if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, pp) > rGuard * rGuard)
+                        continue;
+                    gc->forEach([&](const MWWorld::Ptr& ptr) {
+                        if (guardAdds >= kGuardAdds)
+                            return false;
+                        if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                            return true;
+                        if (ptr.getRefData().getBaseNode() != nullptr)
+                            return true;
+                        const unsigned int gty = ptr.getType();
+                        if (gty == ESM::REC_NPC_ || gty == ESM::REC_CREA || gty == ESM::REC_LEVC)
+                            return true;
+                        const osg::Vec3f gop = ptr.getRefData().getPosition().asVec3();
+                        const float gdx = gop.x() - pp.x();
+                        const float gdy = gop.y() - pp.y();
+                        const float gd2 = gdx * gdx + gdy * gdy;
+                        if (gd2 > rGuard * rGuard)
+                            return true;
+                        if (!warmOrRequest(ptr, gd2))
+                            return true; // requested; adds once warm
+                        try
+                        {
+                            addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
+                            addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
+                            ++vitaOps;
+                            ++sVitaLiveObjects;
+                            ++sVitaLivePhys;
+                            ++guardAdds;
+                        }
+                        catch (const std::exception& e)
+                        {
+                            Log(Debug::Error) << "guard hydrate fail '" << ptr.getCellRef().getRefId()
+                                              << "': " << e.what();
+                        }
+                        return true;
+                    });
+                }
+                if (guardAdds > 0)
+                {
+                    char gbuf[64];
+                    snprintf(gbuf, sizeof(gbuf), "[GuardDisc] %d adds", guardAdds);
+                    Vita::breadcrumb(gbuf);
+                }
+            }
+        }
 
         // ---- Contact ring: solid ground where the player IS, before any
         // visible streaming. Targets rendered-but-collider-less objects
@@ -3143,7 +3222,11 @@ namespace MWWorld
         // share its GL objects — so per-instance submission was redundant.
         // ---- Lane B: one actor per healthy tick, nearest wins globally ----
         sSegLaneAUs = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - laneA0).count();
-        if (!bigBudget && frameDt >= 30)
+        // Bar tracks the frame target: a hardcoded 30 skipped every tick
+        // once the controller settled frames at 34-35ms.
+        const float actorFps = Settings::cells().mTargetFramerate;
+        const int actorHealthyMs = actorFps > 1.f ? (int)(1000.f / actorFps) * 3 / 2 : 45;
+        if (!bigBudget && frameDt >= actorHealthyMs)
             return vitaOps;
         SegTimer segActor(&sSegActorUs);
         int actorBudget = bigBudget ? 1000 : 1;
@@ -3152,7 +3235,7 @@ namespace MWWorld
             if (bigBudget && Clock::now() >= deadline)
                 return vitaOps;
             MWWorld::Ptr best;
-            float bestD2 = rIn * rIn;
+            float bestD2 = rActorIn * rActorIn;
             for (std::size_t ci = 0; ci < n; ++ci)
             {
                 CellStore& cell = *cells[ci];
@@ -3271,7 +3354,11 @@ namespace MWWorld
             ? 33
             : (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - sLastPrep).count();
         sLastPrep = now;
-        if (frameDt > 40)
+        // Bar tracks the frame target; a fixed 40 skipped most ticks once
+        // the controller settled frames above it, starving the far ring.
+        const float prepFps = Settings::cells().mTargetFramerate;
+        const int prepHealthyMs = prepFps > 1.f ? (int)(1000.f / prepFps) * 3 / 2 : 45;
+        if (frameDt > prepHealthyMs)
             return;
         if (mPendingCellLoads.size() > 1)
         {
@@ -4154,15 +4241,17 @@ namespace MWWorld
         }
 
 #ifdef __vita__
-        // Single tree-walk flush: walking clearCache twice mutates Rb_trees
-        // while destructors run and corrupted heap metadata. Trailing flushes
-        // let layered refs (statesets → textures) cascade without re-walking.
-        mRendering.flushUnrefQueueImmediate();
-        // Full clear only under pressure — keeps caches warm across cell
-        // boundaries (less SD re-reading). Watchdog remains the backstop.
-        // Unconditional: this is the texture-release settle point (cold
-        // template images free here after their first draw). 7-35ms.
+        // A radial crossing unloaded nothing above, so there is nothing to
+        // settle; the watchdog reclaims on its own cadence. Screened
+        // crossings and real pressure still pay it.
+        const bool vitaCrossSettle
+            = !vitaSeamless || Vita::getHeapUsedMB() > getVitaCellBudgetMB() - 16;
+        if (vitaCrossSettle)
         {
+            // Single tree-walk flush: walking clearCache twice mutates Rb_trees
+            // while destructors run and corrupted heap metadata. Trailing flushes
+            // let layered refs (statesets → textures) cascade without re-walking.
+            mRendering.flushUnrefQueueImmediate();
             if (Vita::getHeapUsedMB() > Settings::general().mVitaFlushThresholdMb)
                 mRendering.getResourceSystem()->clearCache();
             mRendering.flushUnrefQueueImmediate();
@@ -4741,7 +4830,7 @@ namespace MWWorld
                             return false;
                         const unsigned int gt = ptr.getType();
                         if (gt == ESM::REC_NPC_ || gt == ESM::REC_CREA || gt == ESM::REC_LEVC)
-                            return d2 < 3000.f * 3000.f; // actors keep their own ring
+                            return d2 < 2000.f * 2000.f; // actors keep their own ring
                         const float reach = salienceReach(ptr);
                         return d2 <= reach * reach;
                     };
