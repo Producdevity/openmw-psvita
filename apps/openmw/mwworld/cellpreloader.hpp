@@ -119,8 +119,12 @@ namespace MWWorld
             Loading,
             Ready
         };
+        // Live salience prios land well under 1e5; anticipatory wants sit
+        // exactly here; default touches above. Order defines urgency.
+        static constexpr float kVitaAnticipatoryPrio = 1e8f;
         VitaDemandState vitaDemandTouch(const std::string& path, float prio = 1e12f);
         int vitaDemandWantedCount() const { return mVitaWantedCount; }
+        int vitaDemandUrgentCount() const;
         void vitaDemandWant(const std::string& path);
         void vitaStoreDemandRef(const std::string& path, osg::ref_ptr<const osg::Referenced> tmpl,
             osg::ref_ptr<const osg::Referenced> shape);

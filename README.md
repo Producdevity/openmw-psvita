@@ -1,28 +1,13 @@
-OpenMW
-======
-
-OpenMW is an open-source open-world RPG game engine that supports playing Morrowind by Bethesda Softworks. You need to own the game for OpenMW to play Morrowind.
-
-OpenMW also comes with OpenMW-CS, a replacement for Bethesda's Construction Set.
-
-* Version: 0.51.0
-* License: GPLv3 (see [LICENSE](https://gitlab.com/OpenMW/openmw/-/raw/master/LICENSE) for more information)
-* Website: https://www.openmw.org
-* IRC: #openmw on irc.libera.chat
-* Discord: https://discord.gg/bWuqq2e
-
-
-Font Licenses:
-* DejaVuLGCSansMono.ttf: custom (see [files/data/fonts/DejaVuFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DejaVuFontLicense.txt) for more information)
-* DemonicLetters.ttf: SIL Open Font License (see [files/data/fonts/DemonicLettersFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DemonicLettersFontLicense.txt) for more information)
-* MysticCards.ttf: SIL Open Font License (see [files/data/fonts/MysticCardsFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/MysticCardsFontLicense.txt) for more information)
-
 PS Vita Port
 ------------
 
-Full port of OpenMW to PS Vita via [vitaGL](https://github.com/Rinnegatamante/vitaGL). Runs Morrowind, Tribunal, and Bloodmoon at 20–30 FPS at native 960x544 with controller input, front touchscreen cursor, and a dynamic fog system that auto-scales draw distance to hold target framerate. Ships with the Morrowind Optimization Patch and Project Atlas baked in for better out-of-the-box performance, plus a dynamic memory-management layer (heap defrag, texture-quality tier-down, cell-demotion under pressure) tuned to the Vita's 357 MB user-RAM budget.
+Full port of OpenMW to PS Vita via [vitaGL](https://github.com/Rinnegatamante/vitaGL). Runs Morrowind, Tribunal, and Bloodmoon at 20–30 FPS with controller input and a front touchscreen cursor.
 
-AI Usage: AI Assisted (Dependency/Build system detangling, other odds ends and analysis.)
+Exterior cells stream in seamlessly around you — no loading screens at cell borders. The world hydrates by distance (structures first, then clutter, actors, and physics as you approach), paced against a target framerate so streaming spends spare frame time instead of causing hitches. A warm-asset system keeps commonly used models, body parts, and weather assets preloaded per region so things appear when they should. Loading screens remain for interiors, teleports, and fast travel.
+
+Ships with the Morrowind Optimization Patch and Project Atlas baked in, a dynamic fog system that scales draw distance to hold framerate, and a memory-management layer (heap defrag, texture tier-down, cache pressure relief) tuned to the Vita's RAM budget.
+
+AI Usage: AI Assisted (build system detangling, streaming/performance investigation and tuning, analysis.)
 
 ### Installation
 
@@ -34,9 +19,9 @@ AI Usage: AI Assisted (Dependency/Build system detangling, other odds ends and a
   - `meshes/`, `textures/`, `sound/`, `music/`, `fonts/`, `splash/`, `video/`, etc.
 
 - Copy your Morrowind.ini `ux0:data/openmw/`:
-- Launch from the home screen (first boot is slow while shaders compile)
+- Launch from the home screen (first boot is slow while shaders compile and mods are scanned)
 
-- Note to Mac OS users. 
+- Note to Mac OS users.
   - Double check your file transfers dont auto add an '_' to the beginning of a file name.
   - If they do please delete that file or you will have errors on boot
 
@@ -67,16 +52,6 @@ AI Usage: AI Assisted (Dependency/Build system detangling, other odds ends and a
 
 A dedicated Vita tab is available under Options in the game menu:
 
-- Dynamic Fog — auto-shrinks draw distance to hold target FPS
-- Dynamic Fog Target FPS — 15 (max distance), 18 (long), or 20 (balanced)
-- Dynamic Fog Aggression — Normal, Aggressive, or Very Aggressive (how hard fog reacts to FPS dips)
-- View Distance — manual draw distance when dynamic fog is off
-- Field of View
-- Font Size
-- Preload Cell Cache — 1 (default) or 2 (smoother cell transitions, more RAM)
-- Render Resolution — 480x272 / 512x288 / 640x368 (default). Higher = sharper but heavier on the GPU. Restart required.
-- Texture Detail — Performance / Balanced (default) / High / Off. Caps the max texture edge size at load time. Lower settings reduce VRAM and improve cell-load speed. Restart required. Engine also auto-clamps to a lower tier under sustained memory pressure to avoid OOMs.
-
 ### Bundled Optimization Mods
 
 The VPK ships with [Morrowind Optimization Patch](https://www.nexusmods.com/morrowind/mods/45384) and [Project Atlas](https://www.nexusmods.com/morrowind/mods/45399) pre-baked as read-only BSAs at `app0:/resources/baked-mods/`. They're auto-detected at boot and load on top of vanilla Morrowind, but BELOW any user mods in `ux0:data/openmw/mods/` — so you can still override individual baked files with your own. No action needed to enable them.
@@ -93,14 +68,6 @@ Both mods are distributed under their original Nexus license terms — please se
 
 Mods are not a priority in support at the moment, but are technically supported. (Results can drastically vary - Expect issues)
 Drop full mod folders into `ux0:data/openmw/mods/<name>/`. Plugin files (`.esm`, `.esp`, `.omwaddon`, `.omwscripts`) and `.bsa` archives inside are auto-detected and added to the load order on next boot. Loose meshes/textures can also go directly under `Data Files/`. Saves live in `ux0:data/openmw/saves/` and are interchangeable with PC OpenMW saves.
-
-### Notes
-
-- Video plays without audio
-- Shadows, post-processing, water shaders, distant terrain, and groundcover are disabled for performance
-- Water and Video tabs are removed from Settings
-- Text input fields (character name, custom class name, spell name, enchantment name, class description, console) open the Vita IME automatically when the dialog opens, and tapping a name field also re-opens it
-- Memory: heap is bumped to 312 MB via ATTRIBUTE2 extra-memory mode, with a periodic cache flush, automatic heap-defragmentation pass, and dynamic texture-quality tier-down under sustained pressure. If you still hit OOMs, lower Texture Detail or Render Resolution in the Vita tab
 
 ### Building for Vita
 
@@ -122,6 +89,26 @@ $ make -j$(nproc) openmw.vpk-vpk
 ```
 
 The build automatically bakes [Morrowind Optimization Patch](https://www.nexusmods.com/morrowind/mods/45384) and [Project Atlas](https://www.nexusmods.com/morrowind/mods/45399) into the VPK as BSA archives if their extracted folders are present under `<repo>/mods/`. If the `mods/` folder is missing the bake step silently no-ops and produces a vanilla VPK. Set `-DOPENMW_VITA_BAKE_MODS=OFF` to disable explicitly.
+
+
+OpenMW
+======
+
+OpenMW is an open-source open-world RPG game engine that supports playing Morrowind by Bethesda Softworks. You need to own the game for OpenMW to play Morrowind.
+
+OpenMW also comes with OpenMW-CS, a replacement for Bethesda's Construction Set.
+
+* Version: 0.51.0
+* License: GPLv3 (see [LICENSE](https://gitlab.com/OpenMW/openmw/-/raw/master/LICENSE) for more information)
+* Website: https://www.openmw.org
+* IRC: #openmw on irc.libera.chat
+* Discord: https://discord.gg/bWuqq2e
+
+
+Font Licenses:
+* DejaVuLGCSansMono.ttf: custom (see [files/data/fonts/DejaVuFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DejaVuFontLicense.txt) for more information)
+* DemonicLetters.ttf: SIL Open Font License (see [files/data/fonts/DemonicLettersFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DemonicLettersFontLicense.txt) for more information)
+* MysticCards.ttf: SIL Open Font License (see [files/data/fonts/MysticCardsFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/MysticCardsFontLicense.txt) for more information)
 
 Current Status
 --------------

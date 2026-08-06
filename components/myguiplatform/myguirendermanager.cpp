@@ -1,6 +1,9 @@
 #include "myguirendermanager.hpp"
 
 #include <MyGUI_Timer.h>
+#ifdef __vita__
+#include <MyGUI_LayerManager.h>
+#endif
 
 #include <osg/Drawable>
 #include <osg/TexMat>
@@ -239,6 +242,20 @@ namespace MyGUIPlatform
             mWriteTo = (mWriteTo + 1) % sNumBuffers;
             mBatchVector[mWriteTo].clear();
         }
+
+#ifdef __vita__
+        // Clean-frame skip: the draw side advances mReadFrom every frame
+        // regardless, so a skipped rebuild must still advance the ring and
+        // fill the new slot -- copying the previous slot's batches (ref_ptr
+        // members keep every VBO/array/texture/state alive). Freezing the
+        // ring instead would desync read from write.
+        void repeatLastBatches()
+        {
+            const int prev = mWriteTo;
+            mWriteTo = (mWriteTo + 1) % sNumBuffers;
+            mBatchVector[mWriteTo] = mBatchVector[prev];
+        }
+#endif
 
 
         osg::StateSet* getDrawableStateSet() { return mStateSet; }
@@ -495,8 +512,42 @@ namespace MyGUIPlatform
         lastLime = nowTime;
     }
 
+#ifdef __vita__
+    uint32_t g_vitaGuiWalks = 0;
+    uint32_t g_vitaGuiSkips = 0;
+#endif
+
     void RenderManager::collectDrawCalls()
     {
+#ifdef __vita__
+        // The full layer walk + batch rebuild costs ~3.3ms on the sim worker
+        // (main joins it: this is critical-path). MyGUI tracks widget
+        // dirtiness per layer node; when nothing changed, re-emit last
+        // frame's batches instead of rebuilding them. mUpdate (resize/theme)
+        // still forces a walk, as does any layer type without dirty tracking
+        // (ILayer::isOutOfDate defaults true).
+        if (!mUpdate)
+        {
+            bool anyDirty = false;
+            MyGUI::LayerManager::EnumeratorLayer layers
+                = MyGUI::LayerManager::getInstance().getEnumerator();
+            while (layers.next())
+            {
+                if (layers.current()->isOutOfDate())
+                {
+                    anyDirty = true;
+                    break;
+                }
+            }
+            if (!anyDirty)
+            {
+                mDrawable->repeatLastBatches();
+                ++g_vitaGuiSkips;
+                return;
+            }
+        }
+        ++g_vitaGuiWalks;
+#endif
         begin();
         onRenderToTarget(this, mUpdate);
         end();

@@ -2436,8 +2436,6 @@ namespace MWWorld
 
     static int sVitaLiveObjects = 0;
     static int sVitaLivePhys = 0;
-    static int sVitaCostN = 0;
-    static long sVitaCostKB = 0;
     static unsigned sVitaContactAdds = 0;
 
     void Scene::vitaActorWarmPaths(const Ptr& ptr, std::vector<std::string>& out) const
@@ -2644,10 +2642,14 @@ namespace MWWorld
                 // superhuman travel, the seconds after a crossing, or a deep
                 // backlog. Steady play and ordinary movement protect the
                 // frame rate instead.
+                // Backlog term counts URGENT (live-demand) wants only:
+                // anticipatory wants from guarantee sweeps and door preloads
+                // were tripping the >48 bar and sacrificing frames for
+                // background work.
                 vitaCatchUp = sLastSpeed > 1200.f
                     || (mVitaLastCrossing.time_since_epoch().count() != 0
                         && tick0 - mVitaLastCrossing < std::chrono::seconds(2))
-                    || mPreloader->vitaDemandWantedCount() > 48;
+                    || mPreloader->vitaDemandUrgentCount() > 48;
                 if (vitaCatchUp)
                     maxMs = kCeilMs;
                 else
@@ -3068,35 +3070,16 @@ namespace MWWorld
             bool aborted = false;
             bool anyResident = false;
             int icoAdds = 0;
+            // ObjCost mallinfo sampling removed: the free-list walk cost
+            // 1-4ms per sampled add during streaming bursts. Findings kept
+            // in memory: avg ~26KB/object, worst offenders logged.
             const auto hydrateRender = [&](const MWWorld::Ptr& ptr) {
-                const bool sample = (sVitaLiveObjects & 31) == 0;
-                const long kbBefore = sample ? (long)(mallinfo().uordblks / 1024) : 0;
                 try
                 {
                     addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
                     ++icoAdds;
                     ++vitaOps;
                     ++sVitaLiveObjects;
-                    if (sample)
-                    {
-                        const int dkb = (int)((long)(mallinfo().uordblks / 1024) - kbBefore);
-                        ++sVitaCostN;
-                        sVitaCostKB += dkb;
-                        if (dkb >= 24)
-                        {
-                            const VFS::Path::Normalized sm = getModel(ptr);
-                            char cb[144];
-                            snprintf(cb, sizeof(cb), "[ObjCost] %s %dKB", std::string(sm.value()).c_str(), dkb);
-                            Vita::breadcrumb(cb);
-                        }
-                        if (sVitaCostN % 64 == 0)
-                        {
-                            char cb[96];
-                            snprintf(cb, sizeof(cb), "[ObjCost] avg=%ldKB n=%d", sVitaCostKB / sVitaCostN,
-                                sVitaCostN);
-                            Vita::breadcrumb(cb);
-                        }
-                    }
                 }
                 catch (const std::exception& e)
                 {
@@ -3308,11 +3291,12 @@ namespace MWWorld
                 mPreloader->vitaDemandStats(dw, dl, dr);
                 unsigned rigH = 0, rigM = 0, rigN = 0;
                 SceneUtil::getRigCacheStats(rigH, rigM, rigN);
-                snprintf(mm, sizeof(mm), "[MemMap] heap=%dMB objs=%d phys=%d stores=%d dmd=%d/%d/%d rig=%u/%u/%u ct=%u bud=%d/%d%s",
+                snprintf(mm, sizeof(mm),
+                    "[MemMap] heap=%dMB objs=%d phys=%d stores=%d dmd=%du%d/%d/%d rig=%u/%u/%u ct=%u bud=%d/%d%s",
                     Vita::getHeapUsedMB(), (int)mRendering.getObjects().getObjectCount(),
-                    (int)mPhysics->getObjectCount(), (int)mWorld.getWorldModel().vitaCellStoreCount(), dw, dl,
-                    dr, rigH, rigM, rigN, sVitaContactAdds, maxMs, vitaOtherMs,
-                    vitaCatchUp ? "C" : "");
+                    (int)mPhysics->getObjectCount(), (int)mWorld.getWorldModel().vitaCellStoreCount(), dw,
+                    mPreloader->vitaDemandUrgentCount(), dl, dr, rigH, rigM, rigN, sVitaContactAdds, maxMs,
+                    vitaOtherMs, vitaCatchUp ? "C" : "");
                 sVitaContactAdds = 0;
                 Vita::breadcrumb(mm);
             }
@@ -5081,6 +5065,20 @@ namespace MWWorld
                     snprintf(sb, sizeof(sb), "[SummonWarm] %d models", (int)summonModels.size());
                     Vita::breadcrumb(sb);
                     mPreloader->vitaPrefetchModels(summonModels);
+                }
+                // Weather flips with the region and its assets load
+                // synchronously in setWeather (sky.cpp: cloud getImage,
+                // particle getInstance). Measured 1.8-4.5s at a region
+                // boundary with the allocator starved. Small fixed set --
+                // warm it all once, same policy as summons.
+                std::vector<std::string> weatherAssets;
+                mWorld.vitaWeatherWarmPaths(weatherAssets);
+                if (!weatherAssets.empty())
+                {
+                    char wbuf[64];
+                    snprintf(wbuf, sizeof(wbuf), "[WeatherWarm] %d assets", (int)weatherAssets.size());
+                    Vita::breadcrumb(wbuf);
+                    mPreloader->vitaPrefetchModels(weatherAssets);
                 }
             }
             // Post-screen grace: small worker batches while first visible

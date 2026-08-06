@@ -32,6 +32,7 @@ extern "C"
     uint32_t phase_pre_us = 0, phase_pace_us = 0;
     uint32_t phase_fin_us = 0, phase_inp_us = 0, phase_unref_us = 0, phase_stats_us = 0;
     uint32_t phase_snd_us = 0, phase_lsync_us = 0, phase_state_us = 0;
+    uint32_t phase_world_us = 0, phase_wm_us = 0;
     unsigned int vita_bin2_graphs = 0, vita_bin2_leaves = 0;
     uint32_t gl_draw_us = 0, gl_swap_us = 0, gl_draw_max = 0, gl_swap_max = 0;
     extern uint32_t osgprof_dyn_leaves, osgprof_dyn_verts, osgprof_dyn_us;
@@ -43,6 +44,12 @@ extern "C"
     extern uint32_t osgapply_unif_rup;
     extern uint32_t osgapply_push, osgapply_pop;
     int osgapply_unif_hist_report(char* buf, unsigned int buflen);
+}
+
+namespace MyGUIPlatform
+{
+    extern uint32_t g_vitaGuiWalks;
+    extern uint32_t g_vitaGuiSkips;
 }
 
 #include <cstdint>
@@ -346,6 +353,7 @@ namespace Vita
         static double s_worstPre = 0, s_worstPace = 0;
         static double s_worstFin = 0, s_worstInp = 0, s_worstUnref = 0, s_worstStats = 0;
         static double s_worstSnd = 0, s_worstLsync = 0, s_worstState = 0;
+        static double s_worstWorld = 0, s_worstWm = 0;
         static uint64_t s_sumEvt = 0, s_sumUpd = 0, s_sumFoc = 0, s_sumLua = 0, s_sumPre = 0, s_sumPace = 0,
             s_sumRnd = 0;
         static unsigned s_over40 = 0;
@@ -377,6 +385,8 @@ namespace Vita
                     s_worstSnd = phase_snd_us / 1000.0;
                     s_worstLsync = phase_lsync_us / 1000.0;
                     s_worstState = phase_state_us / 1000.0;
+                    s_worstWorld = phase_world_us / 1000.0;
+                    s_worstWm = phase_wm_us / 1000.0;
                 }
             }
             s_prevFrameUs = nowF;
@@ -421,15 +431,18 @@ namespace Vita
         Vita::gWorkerWaitUs = 0;
         snprintf(buf, sizeof(buf),
             "[Worst] dt=%.0fms rnd=%.1f wt=%.1f evt=%.1f upd=%.1f foc=%.1f lua=%.1f pre=%.1f "
-            "(inp=%.1f snd=%.1f lsync=%.1f state=%.1f) pace=%.1f n40=%u",
+            "(inp=%.1f snd=%.1f lsync=%.1f state=%.1f wld=%.1f wm=%.1f) pace=%.1f fin=%.1f unref=%.1f stats=%.1f "
+            "n40=%u",
             s_worstMs, s_worstRender, s_worstWait, s_worstEvt, s_worstUpd, s_worstFocus,
-            s_worstLua, s_worstPre, s_worstInp, s_worstSnd, s_worstLsync, s_worstState, s_worstPace, s_over40);
+            s_worstLua, s_worstPre, s_worstInp, s_worstSnd, s_worstLsync, s_worstState, s_worstWorld, s_worstWm,
+            s_worstPace, s_worstFin, s_worstUnref, s_worstStats, s_over40);
         auditLog(buf);
         s_worstMs = s_worstRender = s_worstDraw = s_worstCull = s_worstWait = 0;
         s_worstEvt = s_worstUpd = s_worstFocus = s_worstLua = 0;
         s_worstPre = s_worstPace = 0;
         s_worstFin = s_worstInp = s_worstUnref = s_worstStats = 0;
         s_worstSnd = s_worstLsync = s_worstState = 0;
+        s_worstWorld = s_worstWm = 0;
         {
             const double n = kReportEveryFrames * 1000.0;
             snprintf(buf, sizeof(buf), "[PhaseAvg] rnd=%.1f evt=%.1f upd=%.1f foc=%.1f lua=%.1f pre=%.1f pace=%.1f",
@@ -463,7 +476,7 @@ namespace Vita
         }
         snprintf(buf, sizeof(buf),
             "[Scene] drawables=%.0f fast=%.0f lights=%.0f bins=%.0f tris=%.0f strips=%.0f lightCb=%u/%.2fms "
-            "glmemo=%u/%u vprog=%u/%u bin2=%u/%u",
+            "glmemo=%u/%u vprog=%u/%u bin2=%u/%u gui=%u/%u",
             countOf(camStats, "Visible number of drawables"), countOf(camStats, "Visible number of fast drawables"),
             countOf(camStats, "Visible number of lights"), countOf(camStats, "Visible number of render bins"),
             countOf(camStats, "Visible number of GL_TRIANGLES"),
@@ -472,12 +485,14 @@ namespace Vita
             SceneUtil::gLightCbUs / 1000.0 / kReportEveryFrames,
             vgl_memo_hits / kReportEveryFrames, vgl_memo_miss / kReportEveryFrames,
             vgl_vprog_hits / kReportEveryFrames, vgl_vprog_miss / kReportEveryFrames,
-            vita_bin2_graphs / kReportEveryFrames, vita_bin2_leaves / kReportEveryFrames);
+            vita_bin2_graphs / kReportEveryFrames, vita_bin2_leaves / kReportEveryFrames,
+            MyGUIPlatform::g_vitaGuiSkips, MyGUIPlatform::g_vitaGuiWalks);
         SceneUtil::gLightCbCalls = 0;
         SceneUtil::gLightCbUs = 0;
         vgl_memo_hits = vgl_memo_miss = 0;
         vgl_vprog_hits = vgl_vprog_miss = 0;
         vita_bin2_graphs = vita_bin2_leaves = 0;
+        MyGUIPlatform::g_vitaGuiSkips = MyGUIPlatform::g_vitaGuiWalks = 0;
         auditLog(buf);
 
         // Per-leaf OSG draw-dispatch cost (probes in RenderLeaf.cpp).

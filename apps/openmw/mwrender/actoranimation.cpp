@@ -110,10 +110,10 @@ namespace MWRender
                 std::chrono::steady_clock::now() - tmpl0)
                                     .count();
             gVitaPartTemplateUs += us;
-            // The actor gate blocks until every path it knows about is warm,
-            // yet getTemplate still costs 280ms. Name the meshes that are
-            // actually cold rather than guessing which path helper mismatches.
-            if (us > 20000)
+            // Names any mesh that cold-loads despite the warm gates.
+            // 40ms bar: quiet during ordinary screened loads, loud on the
+            // gate holes this probe exists to catch.
+            if (us > 40000)
             {
                 char cb[192];
                 snprintf(cb, sizeof(cb), "[PartCold] %ums %.150s", us / 1000, std::string(model.value()).c_str());

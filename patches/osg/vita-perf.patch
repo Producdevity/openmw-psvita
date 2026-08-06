@@ -443,13 +443,11 @@
 +        return fs->usable ? fs : 0;
 +    }
 +}
-+#define OSGPROF_T() sceKernelGetProcessTimeLow()
-+#define OSGPROF_ACC(a, b, c, d, e) \
-+    osgprof_mat_us += (b) - (a); \
-+    osgprof_state_us += (c) - (b); \
-+    osgprof_unif_us += (d) - (c); \
-+    osgprof_draw_us += (e) - (d); \
-+    osgprof_leaves++;
++// Timers compiled out (counts kept): 4 syscalls per leaf ~= 400/frame on
++// the dispatch path, and they inflate every us/leaf reading -- same lesson
++// as the CullProf timers. Re-enable locally when sizing leaf-cost work.
++#define OSGPROF_T() 0
++#define OSGPROF_ACC(a, b, c, d, e) osgprof_leaves++;
 +#else
 +#define OSGPROF_T() 0
 +#define OSGPROF_ACC(a, b, c, d, e)

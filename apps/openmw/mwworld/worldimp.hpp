@@ -193,6 +193,8 @@ namespace MWWorld
 #ifdef __vita__
         /// Drop registry Ptrs into \a store before eviction frees its refs.
         void purgeCellRefs(CellStore& store);
+        /// Every weather type's cloud texture + particle effect, for warming.
+        void vitaWeatherWarmPaths(std::vector<std::string>& out);
 #endif
 
         // FIXME

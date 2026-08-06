@@ -842,9 +842,6 @@ namespace MWRender
             }
         }
 
-#ifdef __vita__
-        logCompositeCensus();
-#endif
         if (wasArrowAttached)
             attachArrow();
     }

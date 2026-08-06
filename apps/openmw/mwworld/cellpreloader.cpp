@@ -25,6 +25,7 @@
 #include <components/resource/bulletshapemanager.hpp>
 #include <components/resource/keyframemanager.hpp>
 #include <components/resource/resourcesystem.hpp>
+#include <components/resource/imagemanager.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/terrain/view.hpp>
 #include <components/terrain/world.hpp>
@@ -609,6 +610,15 @@ namespace MWWorld
             tmpl = mResourceSystem->getKeyframeManager()->get(normalized);
             return;
         }
+        // Raw textures (weather cloud sets): warm the image cache. An
+        // osg::Image is a Referenced, so the ledger ref pins it like a model.
+        constexpr VFS::Path::ExtensionView ddsExt("dds");
+        constexpr VFS::Path::ExtensionView tgaExt("tga");
+        if (normalized.extension() == ddsExt || normalized.extension() == tgaExt)
+        {
+            tmpl = mResourceSystem->getImageManager()->getImage(normalized);
+            return;
+        }
         tmpl = mResourceSystem->getSceneManager()->getTemplate(normalized);
         // Body parts never provide collision -- actors use capsules -- so the
         // BVH build here was pure waste on exactly the meshes actor assembly
@@ -939,8 +949,23 @@ namespace MWWorld
             ++mVitaWantedCount;
             it->second.touch = std::chrono::steady_clock::now();
             it->second.requested = it->second.touch;
-            it->second.prio = 1e8f; // anticipatory: behind live demand
+            it->second.prio = kVitaAnticipatoryPrio; // behind live demand
         }
+    }
+
+    int CellPreloader::vitaDemandUrgentCount() const
+    {
+        // Live-demand Wanted only: anticipatory wants (guarantee sweeps, door
+        // preloads) are background work and must not flip the hydrator into
+        // its frame-sacrificing catch-up regime. Map is capped at 128, so the
+        // walk is bounded and beats conditional bookkeeping at every
+        // wanted-count mutation site.
+        const std::lock_guard<std::mutex> lock(mVitaCommonMutex);
+        int urgent = 0;
+        for (const auto& [path, e] : mVitaDemand)
+            if (e.state == VitaDemandState::Wanted && e.prio < kVitaAnticipatoryPrio)
+                ++urgent;
+        return urgent;
     }
 
     void CellPreloader::vitaStoreDemandRef(const std::string& path, osg::ref_ptr<const osg::Referenced> tmpl,

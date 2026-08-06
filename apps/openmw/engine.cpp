@@ -37,6 +37,7 @@ extern "C" void vglSetStaticVboRam(unsigned char enable);
 extern "C" uint32_t phase_evt_us, phase_upd_us, phase_focus_us, phase_lua_us, phase_pre_us, phase_pace_us;
 extern "C" uint32_t phase_fin_us, phase_inp_us, phase_unref_us, phase_stats_us;
 extern "C" uint32_t phase_snd_us, phase_lsync_us, phase_state_us;
+extern "C" uint32_t phase_world_us, phase_wm_us;
 extern "C" unsigned int vita_bin2_graphs, vita_bin2_leaves;
 extern "C" uint32_t gl_draw_us, gl_swap_us, gl_draw_max, gl_swap_max;
 
@@ -455,6 +456,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         phase_evt_us = phase_upd_us = phase_focus_us = phase_lua_us = phase_pre_us = 0;
         phase_fin_us = phase_inp_us = phase_unref_us = phase_stats_us = 0;
         phase_snd_us = phase_lsync_us = phase_state_us = 0;
+        phase_world_us = phase_wm_us = 0;
         vitaFrameT0 = sceKernelGetProcessTimeWide();
         // Finish overlapped sim before touching game state.
         if (mSimWorker && mSimOverlap && mSimPrimed)
@@ -552,16 +554,28 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         {
             ScopedProfile<UserStatsType::World> profile(frameStart, frameNumber, *timer, *stats);
 
+#ifdef __vita__
+            const uint64_t wldT0 = sceKernelGetProcessTimeWide();
+#endif
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
                 mWorld->update(frametime, paused);
             }
+#ifdef __vita__
+            phase_world_us = (uint32_t)(sceKernelGetProcessTimeWide() - wldT0);
+#endif
         }
 
         // update GUI
         {
             ScopedProfile<UserStatsType::Gui> profile(frameStart, frameNumber, *timer, *stats);
+#ifdef __vita__
+            const uint64_t wmT0 = sceKernelGetProcessTimeWide();
+#endif
             mWindowManager->update(frametime);
+#ifdef __vita__
+            phase_wm_us = (uint32_t)(sceKernelGetProcessTimeWide() - wmT0);
+#endif
         }
     }
     catch (const std::exception& e)

@@ -1848,6 +1848,19 @@ namespace MWWorld
         std::erase_if(mDoorStates, [&](const auto& entry) { return entry.first.mCell == &store; });
         mProjectileManager->purgeCasterHandles(&store);
     }
+
+    void World::vitaWeatherWarmPaths(std::vector<std::string>& out)
+    {
+        const VFS::Manager* vfs = mResourceSystem->getVFS();
+        for (const Weather& w : mWeatherManager->getAllWeather())
+        {
+            if (!w.mCloudTexture.empty())
+                out.push_back(Misc::ResourceHelpers::correctTexturePath(VFS::Path::toNormalized(w.mCloudTexture), *vfs)
+                        .value());
+            if (!w.mParticleEffect.empty())
+                out.push_back(VFS::Path::toNormalized(w.mParticleEffect).value());
+        }
+    }
 #endif
 
     void World::processDoors(float duration)
@@ -1931,19 +1944,56 @@ namespace MWWorld
         if (mPlayerInJail && !mGoToJail && !MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Jail))
             mPlayerInJail = false;
 
+#ifdef __vita__
+        // The 4.5s wld= stalls land in here with every existing probe
+        // silent. Name the span before fixing it.
+        uint64_t wsT[6];
+        wsT[0] = sceKernelGetProcessTimeWide();
+#endif
         updateWeather(duration, paused);
 
+#ifdef __vita__
+        wsT[1] = sceKernelGetProcessTimeWide();
+#endif
         updateNavigator();
 
+#ifdef __vita__
+        wsT[2] = sceKernelGetProcessTimeWide();
+#endif
         mPlayer->update();
 
         mPhysics->debugDraw();
 
+#ifdef __vita__
+        wsT[3] = sceKernelGetProcessTimeWide();
+#endif
         mWorldScene->update(duration);
 
+#ifdef __vita__
+        wsT[4] = sceKernelGetProcessTimeWide();
+#endif
         mRendering->update(duration, paused);
 
+#ifdef __vita__
+        wsT[5] = sceKernelGetProcessTimeWide();
+#endif
         updateSoundListener();
+
+#ifdef __vita__
+        {
+            const uint64_t wsEnd = sceKernelGetProcessTimeWide();
+            if (wsEnd - wsT[0] > 500000ULL)
+            {
+                char wb[160];
+                snprintf(wb, sizeof(wb), "[WorldSplit] %dms wthr=%d nav=%d plyr=%d scene=%d rend=%d snd=%d",
+                    (int)((wsEnd - wsT[0]) / 1000), (int)((wsT[1] - wsT[0]) / 1000),
+                    (int)((wsT[2] - wsT[1]) / 1000), (int)((wsT[3] - wsT[2]) / 1000),
+                    (int)((wsT[4] - wsT[3]) / 1000), (int)((wsT[5] - wsT[4]) / 1000),
+                    (int)((wsEnd - wsT[5]) / 1000));
+                Vita::breadcrumb(wb);
+            }
+        }
+#endif
 
         mSpellPreloadTimer -= duration;
         if (mSpellPreloadTimer <= 0.f)

@@ -278,20 +278,24 @@ void vitaTimedBreadcrumb(const char* msg)
 
 void vitaMemBreadcrumb(const char* msg)
 {
-    SceUID fd = sceIoOpen("ux0:data/openmw/boot.log",
-        SCE_O_WRONLY | SCE_O_APPEND | SCE_O_CREAT, 0777);
-    if (fd >= 0)
+    // RAM ring + background flusher like every other crumb. The old
+    // per-line sceIoOpen/Write/Close on ux0 -- twelve times per report
+    // window, each with its own mallinfo() free-list walk -- was the
+    // recurring ~200ms ghost frame no [Worst] bucket could name.
+    static SceUInt64 s_miAt = 0;
+    static unsigned s_usedKB = 0, s_freeKB = 0;
+    const SceUInt64 now = sceKernelGetProcessTimeWide();
+    if (now - s_miAt > 100000ULL) // one heap walk per dump burst
     {
         struct mallinfo mi = mallinfo();
-        unsigned int usedKB = (unsigned int)(mi.uordblks / 1024);
-        unsigned int freeKB = (unsigned int)(mi.fordblks / 1024);
-        char buf[300];
-        int len = snprintf(buf, sizeof(buf), "[VitaMem] %s | used: %uKB | free: %uKB\n",
-            msg, usedKB, freeKB);
-        if (len > 0)
-            sceIoWrite(fd, buf, (size_t)len);
-        sceIoClose(fd);
+        s_usedKB = (unsigned int)(mi.uordblks / 1024);
+        s_freeKB = (unsigned int)(mi.fordblks / 1024);
+        s_miAt = now;
     }
+    char buf[300];
+    int len = snprintf(buf, sizeof(buf), "[VitaMem] %s | used: %uKB | free: %uKB\n", msg, s_usedKB, s_freeKB);
+    if (len > 0)
+        logAppend(buf, (size_t)len);
 }
 
 // Vita newlib stubs for POSIX functions referenced at link time
