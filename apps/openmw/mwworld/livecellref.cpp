@@ -137,10 +137,16 @@ namespace MWWorld
 
         message << "Bad LiveCellRef cast to " << recordType << " from ";
 
-        if (value != nullptr)
-            message << value->getTypeDescription();
-        else
+        if (value == nullptr)
             message << "an empty object";
+#ifdef __vita__
+        // Stale refs reach here; the virtual call would fault.
+        else
+            message << "ref " << static_cast<const void*>(value);
+#else
+        else
+            message << value->getTypeDescription();
+#endif
 
         return message.str();
     }

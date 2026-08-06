@@ -527,6 +527,16 @@ namespace MWPhysics
         return nullptr;
     }
 
+#ifdef __vita__
+    void PhysicsSystem::vitaCollectBodyPtrs(const std::function<void(const MWWorld::Ptr&)>& sink) const
+    {
+        for (const auto& [ref, object] : mObjects)
+            sink(object->getPtr());
+        for (const auto& [ref, actor] : mActors)
+            sink(actor->getPtr());
+    }
+#endif
+
     const Object* PhysicsSystem::getObject(const MWWorld::ConstPtr& ptr) const
     {
         ObjectMap::const_iterator found = mObjects.find(ptr.mRef);

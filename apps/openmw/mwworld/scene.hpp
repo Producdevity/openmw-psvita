@@ -23,6 +23,7 @@ namespace osg
 {
     class Vec3f;
     class Stats;
+    class Node;
 }
 
 namespace ESM
@@ -180,7 +181,6 @@ namespace MWWorld
         int vitaBubbleTick(int maxMs); // returns hydration ops performed
         std::set<CellStore*, std::less<>> mVitaActorDomain;
         std::set<CellStore*, std::less<>> mVitaPhysDomain;
-        std::map<CellStore*, int> mVitaIcoPending;
         std::map<CellStore*, osg::Vec2f> mVitaCleanSweep;
         std::map<CellStore*, osg::Vec4f> mVitaCellRefBox;
         // Lane B targets whose add produced no base node (nothing-roll LEVC,

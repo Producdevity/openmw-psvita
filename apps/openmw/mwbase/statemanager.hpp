@@ -79,6 +79,13 @@ namespace MWBase
         /** Used for quickload **/
         virtual void quickLoad() = 0;
 
+#ifdef __vita__
+        /// Serialise / restore the world through RAM only — used to switch
+        /// the streaming architecture without touching the player's saves.
+        virtual void saveGameToMemory(std::string& out) = 0;
+        virtual void loadGameFromMemory(std::string&& data) = 0;
+#endif
+
         virtual MWState::Character* getCurrentCharacter() = 0;
         ///< @note May return null.
 

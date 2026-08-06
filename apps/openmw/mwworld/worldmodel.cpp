@@ -779,6 +779,7 @@ std::size_t MWWorld::WorldModel::evictInactiveLoadedCellStores(
     std::erase_if(mExteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
     return std::erase_if(mCells, [&](auto& entry) { return toEvict.count(&entry.second) > 0; });
 }
+
 #endif
 
 void MWWorld::WorldModel::getExteriorPtrs(const ESM::RefId& name, std::vector<MWWorld::Ptr>& out)

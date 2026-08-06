@@ -157,6 +157,14 @@ namespace MWRender
         void addCell(const MWWorld::CellStore* store);
         void removeCell(const MWWorld::CellStore* store);
 
+#ifdef __vita__
+        /// Visit every ref that currently owns a render node.
+        void vitaCollectObjectPtrs(const std::function<void(const MWWorld::Ptr&)>& sink) const
+        {
+            mObjects->vitaCollectObjectPtrs(sink);
+        }
+#endif
+
         void enableTerrain(bool enable, ESM::RefId worldspace);
 
         void updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& updated);

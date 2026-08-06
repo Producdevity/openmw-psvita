@@ -483,10 +483,33 @@ namespace MWRender
 
         mObjects = std::make_unique<Objects>(mResourceSystem, sceneRoot, unrefQueue);
 
-        if (getenv("OPENMW_DONT_PRECOMPILE") == nullptr)
+#ifdef __vita__
+        // A/B toggle without a rebuild: drop ux0:data/openmw/noprecompile.txt
+        // to disable GL precompile and see whether the draw spikes are the
+        // compiling or just the streaming burst they coincide with.
+        bool vitaNoPrecompile = false;
+        if (FILE* f = fopen("ux0:data/openmw/noprecompile.txt", "rb"))
+        {
+            vitaNoPrecompile = true;
+            fclose(f);
+            Vita::breadcrumb("[ICO] disabled by noprecompile.txt");
+        }
+#else
+        constexpr bool vitaNoPrecompile = false;
+#endif
+        if (getenv("OPENMW_DONT_PRECOMPILE") == nullptr && !vitaNoPrecompile)
         {
             mViewer->setIncrementalCompileOperation(new osgUtil::IncrementalCompileOperation);
             mViewer->getIncrementalCompileOperation()->setTargetFrameRate(Settings::cells().mTargetFramerate);
+#ifdef __vita__
+            // Compiling runs inside the GL worker's draw, where OSG's
+            // "time already spent this frame" reads ~0 — so it believed a
+            // whole 33ms frame was free and took it (28-90ms draws).
+            auto* vitaIco = mViewer->getIncrementalCompileOperation();
+            vitaIco->setTargetFrameRate(120.f);
+            vitaIco->setMaximumNumOfObjectsToCompilePerFrame(4);
+            vitaIco->setMinimumTimeAvailableForGLCompileAndDeletePerFrame(0.002);
+#endif
         }
 
 #ifndef __vita__

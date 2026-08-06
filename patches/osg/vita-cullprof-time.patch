@@ -1,6 +1,6 @@
 --- a/src/osgUtil/CullVisitor.cpp
 +++ b/src/osgUtil/CullVisitor.cpp
-@@ -39,16 +39,68 @@
+@@ -39,16 +39,71 @@
  using namespace osgUtil;
  
  #ifdef __vita__
@@ -58,9 +58,12 @@
 +    return written;
  }
  #define CULLPROF_INC(x) (++x)
-+#define CULLPROF_T() sceKernelGetProcessTimeLow()
-+#define CULLPROF_ADD(var, t0) var += sceKernelGetProcessTimeLow() - (t0);
-+#define CULLPROF_CB_NOTE(name, owner, us) cullprofCbNote(name, owner, us);
++// Timing probes cost ~4 kernel clock reads per node visit — about 4900 per
++// frame — so they inflated the very number they were measuring. Counts are
++// nearly free and stay; the timers are compiled out.
++#define CULLPROF_T() 0
++#define CULLPROF_ADD(var, t0)
++#define CULLPROF_CB_NOTE(name, owner, us)
  #else
  #define CULLPROF_INC(x) ((void)0)
 +#define CULLPROF_T() 0
@@ -69,7 +72,7 @@
  #endif
  
  inline float MAX_F(float a, float b)
-@@ -918,20 +970,43 @@
+@@ -918,20 +973,43 @@
  void CullVisitor::apply(osg::Drawable& drawable)
  {
      CULLPROF_INC(cullprof_drawable);
@@ -114,7 +117,7 @@
          }
      }
  
-@@ -1158,7 +1233,12 @@
+@@ -1158,7 +1236,12 @@
  void CullVisitor::apply(Group& node)
  {
      CULLPROF_INC(cullprof_group);
@@ -128,7 +131,7 @@
  
      // push the culling mode.
      pushCurrentMask();
-@@ -1167,13 +1247,16 @@
+@@ -1167,13 +1250,16 @@
      StateSet* node_state = node.getStateSet();
      if (node_state) pushStateSet(node_state);
  
@@ -145,7 +148,7 @@
  }
  
  void CullVisitor::apply(Transform& node)
-@@ -1183,7 +1266,12 @@
+@@ -1183,7 +1269,12 @@
      if (cullprof_in_skeleton)
          ++cullprof_xf_bone;
  #endif
@@ -159,7 +162,7 @@
  
      // push the culling mode.
      pushCurrentMask();
-@@ -1196,8 +1284,10 @@
+@@ -1196,8 +1287,10 @@
      node.computeLocalToWorldMatrix(*matrix,this);
      pushModelViewMatrix(matrix, node.getReferenceFrame());
  
@@ -170,7 +173,7 @@
      popModelViewMatrix();
  
      // pop the node's state off the render graph stack.
-@@ -1205,6 +1295,7 @@
+@@ -1205,6 +1298,7 @@
  
      // pop the culling mode.
      popCurrentMask();
@@ -178,7 +181,7 @@
  }
  
  void CullVisitor::apply(Projection& node)
-@@ -1774,3 +1865,4 @@
+@@ -1774,3 +1868,4 @@
      popCurrentMask();
  }
  

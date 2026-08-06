@@ -697,12 +697,55 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             if (Vita::GLWorker* glw = Vita::getGLWorker())
             {
                 osg::GraphicsContext* gc = mViewer->getCamera()->getGraphicsContext();
-                glw->run([renderer, gc] {
+                auto* icoProbe = mViewer->getIncrementalCompileOperation();
+                glw->run([renderer, gc, icoProbe] {
                     const uint64_t t0 = sceKernelGetProcessTimeWide();
+                    // Spike anatomy: is a long draw compiling new GL objects
+                    // (ICO), or is it dispatch/vitaGL itself?
+                    const unsigned int icoSets
+                        = icoProbe ? (unsigned int)icoProbe->getToCompile().size() : 0u;
+                    const bool icoBefore = icoSets > 0;
                     renderer->draw();
                     const uint64_t t1 = sceKernelGetProcessTimeWide();
                     gc->swapBuffers();
                     const uint64_t t2 = sceKernelGetProcessTimeWide();
+                    if ((uint32_t)(t1 - t0) > 25000)
+                    {
+                        // Name what compiled: a budget can only be checked
+                        // BETWEEN objects, so one huge texture blows through it.
+                        unsigned tex = 0, drw = 0, prog = 0;
+                        unsigned biggestKB = 0;
+                        char biggest[48] = "";
+                        if (icoProbe)
+                            for (const auto& cs : icoProbe->getToCompile())
+                                for (const auto& cm : cs->_compileMap)
+                                    for (const auto& opIt : cm.second._compileOps)
+                                    {
+                                        if (auto* t = dynamic_cast<osgUtil::IncrementalCompileOperation::
+                                                    CompileTextureOp*>(opIt.get()))
+                                        {
+                                            ++tex;
+                                            if (osg::Image* im = t->_texture->getImage(0))
+                                            {
+                                                const unsigned kb = (unsigned)(im->getTotalSizeInBytes() / 1024);
+                                                if (kb > biggestKB)
+                                                {
+                                                    biggestKB = kb;
+                                                    snprintf(biggest, sizeof(biggest), "%s", im->getFileName().c_str());
+                                                }
+                                            }
+                                        }
+                                        else if (dynamic_cast<osgUtil::IncrementalCompileOperation::
+                                                     CompileProgramOp*>(opIt.get()))
+                                            ++prog;
+                                        else
+                                            ++drw;
+                                    }
+                        char db[224];
+                        snprintf(db, sizeof(db), "[DrawSpike] draw=%ums sets=%u tex=%u drw=%u prog=%u big=%uKB %s",
+                            (unsigned)((t1 - t0) / 1000), icoSets, tex, drw, prog, biggestKB, biggest);
+                        Vita::breadcrumb(db);
+                    }
                     gl_draw_us += (uint32_t)(t1 - t0);
                     gl_swap_us += (uint32_t)(t2 - t1);
                     if ((uint32_t)(t1 - t0) > gl_draw_max)

@@ -6,6 +6,9 @@
 #endif
 
 #include <array>
+#include <mutex>
+
+#include <osgUtil/IncrementalCompileOperation>
 
 #include <osgViewer/Viewer>
 
@@ -184,10 +187,53 @@ namespace MWGui
         MWBase::Environment::get().getWindowManager()->pushGuiMode(mShowWallpaper ? GM_LoadingWallpaper : GM_Loading);
     }
 
+#ifdef __vita__
+    void LoadingScreen::vitaDrainCompileQueue()
+    {
+        osgUtil::IncrementalCompileOperation* ico = mViewer->getIncrementalCompileOperation();
+        if (ico == nullptr || Vita::isSimThread())
+            return;
+
+        constexpr double kMaxDrainMs = 4000.0;
+        const double start = mTimer.time_m();
+        std::size_t pending = 0;
+        std::size_t initial = 0;
+        int frames = 0;
+        for (;;)
+        {
+            {
+                std::lock_guard<OpenThreads::Mutex> lock(*ico->getToCompiledMutex());
+                pending = ico->getToCompile().size();
+            }
+            if (frames == 0)
+                initial = pending;
+            if (pending == 0 || mTimer.time_m() - start > kMaxDrainMs)
+                break;
+            draw();
+            ++frames;
+        }
+
+        if (initial > 0)
+        {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "[LoadDrain] %u sets, %d frames, %dms, left=%u", (unsigned)initial, frames,
+                (int)(mTimer.time_m() - start), (unsigned)pending);
+            vitaBreadcrumb(buf);
+        }
+    }
+#endif
+
     void LoadingScreen::loadingOff()
     {
         if (--mNestedLoadingCount > 0)
             return;
+
+#ifdef __vita__
+        // Land the pending compiles here instead of as draw spikes in the
+        // first seconds of play.
+        if (mLastRenderTime >= mLoadingOnTime)
+            vitaDrainCompileQueue();
+#endif
 
         if (mLastRenderTime < mLoadingOnTime)
         {

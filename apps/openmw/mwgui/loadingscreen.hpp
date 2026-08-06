@@ -90,6 +90,11 @@ namespace MWGui
         void changeWallpaper();
 
         void draw();
+
+#ifdef __vita__
+        // Compile queued GL objects while the screen still covers them.
+        void vitaDrainCompileQueue();
+#endif
     };
 
 }

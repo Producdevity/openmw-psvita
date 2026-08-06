@@ -177,6 +177,11 @@ namespace MWPhysics
 
         const Object* getObject(const MWWorld::ConstPtr& ptr) const;
 
+#ifdef __vita__
+        /// Visit every ref that currently owns a collision body.
+        void vitaCollectBodyPtrs(const std::function<void(const MWWorld::Ptr&)>& sink) const;
+#endif
+
         Projectile* getProjectile(int projectileId) const;
 
         // Object or Actor

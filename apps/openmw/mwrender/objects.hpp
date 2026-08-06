@@ -1,6 +1,7 @@
 #ifndef GAME_RENDER_OBJECTS_H
 #define GAME_RENDER_OBJECTS_H
 
+#include <functional>
 #include <map>
 #include <string>
 
@@ -60,10 +61,21 @@ namespace MWRender
 
         typedef std::map<const MWWorld::CellStore*, osg::ref_ptr<osg::Group>> CellMap;
         CellMap mCellSceneNodes;
+#ifdef __vita__
+        // Spatial tiles under each cell root. A flat cell meant cull ran one
+        // frustum test per hydrated object; a tile rejects ~20 at once.
+        typedef std::map<std::pair<int, int>, osg::ref_ptr<osg::Group>> BucketMap;
+        std::map<const MWWorld::CellStore*, BucketMap> mCellBuckets;
+        osg::Group* vitaInsertParent(const MWWorld::Ptr& ptr, osg::Group* cellnode);
+#endif
         PtrAnimationMap mObjects;
 
     public:
         std::size_t getObjectCount() const { return mObjects.size(); }
+#ifdef __vita__
+        /// Visit every ref that currently owns a render node.
+        void vitaCollectObjectPtrs(const std::function<void(const MWWorld::Ptr&)>& sink) const;
+#endif
 
     private:
         osg::ref_ptr<osg::Group> mRootNode;
