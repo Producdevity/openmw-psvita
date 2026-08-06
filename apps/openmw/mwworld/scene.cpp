@@ -141,6 +141,12 @@ namespace
     }
 #endif
 #ifdef __vita__
+    // Headroom below budget at which warming is switched off. Pressure relief
+    // must use the SAME bar: relief starting higher leaves a band where the
+    // loader is disabled and nothing is working to re-enable it -- which is
+    // exactly where the heap parks.
+    constexpr int kVitaWarmGateMB = 12;
+
     int getVitaCellBudgetMB()
     {
         // Heap size minus reserve. Reserve is configurable so the watchdog
@@ -716,7 +722,7 @@ namespace MWWorld
                 // Demand pending: the worker should not wait for the slow
                 // cadence. ~50 models/sec ceiling while content streams.
                 sFastTick = 0;
-                if (Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                if (Vita::getHeapUsedMB() < getVitaCellBudgetMB() - kVitaWarmGateMB)
                     mPreloader->vitaPumpWarm(false);
             }
             if (++sWarmTick >= 30)
@@ -727,7 +733,7 @@ namespace MWWorld
                     > std::chrono::seconds(2);
                 // Indoors nothing radial needs warming; skip the churn.
                 const bool indoors = mCurrentCell && !mCurrentCell->isExterior();
-                if (!indoors && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - 12)
+                if (!indoors && Vita::getHeapUsedMB() < getVitaCellBudgetMB() - kVitaWarmGateMB)
                     mPreloader->vitaPumpWarm(idle);
 
                 // Neighborhood-bound the resident cell stores: distant
@@ -837,7 +843,7 @@ namespace MWWorld
                 // Warm sets are the payload, not the luxury: only severe
                 // pressure drops them, or the drop/re-warm churn taxes
                 // every screen.
-                if (usedMB > budget - 8)
+                if (usedMB >= budget - kVitaWarmGateMB)
                 {
                     const auto pressureProtected = vitaProtectedCells();
                     int freed = 0;
@@ -847,13 +853,19 @@ namespace MWWorld
                         ++freed;
                     freed += (int)mWorld.getWorldModel().vitaEvictInteriors(
                         pressureProtected, 5, [this](CellStore& store) { mWorld.purgeCellRefs(store); });
-                    if (freed > 0)
-                    {
-                        char pbuf[64];
-                        snprintf(pbuf, sizeof(pbuf), "[Pressure] evicted %d stores", freed);
-                        Vita::breadcrumb(pbuf);
-                    }
-                    else
+                    // Store eviction nearly always finds something and nearly
+                    // always reclaims nothing -- the memory is in the warm
+                    // pools, which sit outside every eviction path. Judging
+                    // by stores evicted meant relief never ran. Judge by MB
+                    // actually recovered instead.
+                    const int afterMB = Vita::getHeapUsedMBFresh();
+                    char pbuf[96];
+                    snprintf(pbuf, sizeof(pbuf), "[Pressure] evicted %d stores %dMB->%dMB", freed, usedMB,
+                        afterMB);
+                    Vita::breadcrumb(pbuf);
+                    // Still above the gate that disables warming: the pools
+                    // must yield, or the loader never runs again.
+                    if (afterMB >= budget - kVitaWarmGateMB)
                         mPreloader->vitaRelievePressure();
                 }
                 const auto wdFlush0 = std::chrono::steady_clock::now();
@@ -2683,13 +2695,24 @@ namespace MWWorld
         };
         // THE INVARIANT: the main thread never loads cold templates. Cold
         // models enter the demand ledger; objects hydrate when Ready.
-        const auto warmPath = [&](std::string path, float neederD2) {
+        // alwaysWarm distinguishes "was never cold" from "was cold, now
+        // Ready" without a second lookup -- the guard spends its budget on
+        // the latter.
+        const auto warmPath = [&](std::string path, float neederD2, bool* alwaysWarm = nullptr) {
             if (path.empty())
+            {
+                if (alwaysWarm)
+                    *alwaysWarm = true;
                 return true;
+            }
             if (vitaTickCold.count(path) > 0)
                 return false;
             if (mPreloader->vitaIsCommonWarm(path))
+            {
+                if (alwaysWarm)
+                    *alwaysWarm = true;
                 return true;
+            }
             // Salience priority: a tower at 4000 outranks a pitcher at 600.
             const float sbr = std::max(60.f, mPreloader->vitaKnownBoundRadius(path));
             if (mPreloader->vitaDemandTouch(path, neederD2 / (sbr * sbr))
@@ -2698,11 +2721,15 @@ namespace MWWorld
             vitaTickCold.insert(std::move(path));
             return false;
         };
-        const auto warmOrRequest = [&](const MWWorld::Ptr& ptr, float neederD2) {
+        const auto warmOrRequest = [&](const MWWorld::Ptr& ptr, float neederD2, bool* alwaysWarm = nullptr) {
             const VFS::Path::Normalized wm = getModel(ptr);
             if (wm.empty())
+            {
+                if (alwaysWarm)
+                    *alwaysWarm = true;
                 return true; // no model: nothing to load
-            return warmPath(std::string(wm.value()), neederD2);
+            }
+            return warmPath(std::string(wm.value()), neederD2, alwaysWarm);
         };
         // Time-to-need: request only what arrival will need within the
         // measured load window. Speed-scaled; slow worker widens the lead.
@@ -2733,67 +2760,114 @@ namespace MWWorld
         const std::size_t n = cells.size();
 
         // Innermost guarantee: anything unloaded this close jumps every
-        // budget. Change-gated -- the answer only moves when the player does
-        // or the active set changes, so the common tick costs nothing.
-        // Actors are excluded: their composite is Lane B's job, warm-gated,
-        // and too large a lump for a budget-exempt path.
+        // budget. Actors are excluded: their composite is Lane B's job,
+        // warm-gated, and too large a lump for a budget-exempt path.
+        //
+        // Arriving somewhere cold, every ref here is a miss: the pass adds
+        // nothing and only files demand. So the re-arm has to include "the
+        // ledger delivered something", or the guarantee spends its one
+        // firing before anything it wants exists. That edge is self-
+        // limiting -- it stops when deliveries stop -- and the interval
+        // floor keeps a busy ledger from making this per-tick.
         {
             constexpr float rGuard = 1100.f;
+            constexpr float rGuardReach = 1500.f; // big-static extension, to rStructIn
             constexpr int kGuardAdds = 4;
             static osg::Vec3f sGuardPos(1e9f, 1e9f, 0.f);
-            static std::size_t sGuardCells = 0;
+            static unsigned sGuardReadyEpoch = 0;
+            static Clock::time_point sGuardLast{};
+            const unsigned readyEpoch = mPreloader->vitaDemandReadyEpoch();
             const float gmx = pp.x() - sGuardPos.x();
             const float gmy = pp.y() - sGuardPos.y();
-            if (gmx * gmx + gmy * gmy > 200.f * 200.f || cells.size() != sGuardCells)
+            const bool guardStale = tick0 - sGuardLast >= std::chrono::milliseconds(500);
+            const bool guardArmed = gmx * gmx + gmy * gmy > 200.f * 200.f
+                || readyEpoch != sGuardReadyEpoch || guardStale;
+            if (guardArmed && tick0 - sGuardLast >= std::chrono::milliseconds(50))
             {
                 sGuardPos = pp;
-                sGuardCells = cells.size();
+                sGuardReadyEpoch = readyEpoch;
+                sGuardLast = tick0;
                 int guardAdds = 0;
+                const auto guardAdd = [&](const MWWorld::Ptr& ptr) {
+                    try
+                    {
+                        addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
+                        addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
+                        ++vitaOps;
+                        ++sVitaLiveObjects;
+                        ++sVitaLivePhys;
+                        ++guardAdds;
+                    }
+                    catch (const std::exception& e)
+                    {
+                        Log(Debug::Error) << "guard hydrate fail '" << ptr.getCellRef().getRefId()
+                                          << "': " << e.what();
+                    }
+                };
+                // Common clutter is warm on arrival, so it used to take every
+                // slot -- and the old budget break stopped the walk, so the
+                // cold buildings behind it never even got requested. Park the
+                // clutter, keep walking, and let it have whatever is left.
+                MWWorld::Ptr guardWarm[kGuardAdds];
+                int guardWarmN = 0;
                 for (CellStore* gc : cells)
                 {
-                    if (guardAdds >= kGuardAdds)
-                        break;
-                    if (!gc->getCell()->isExterior() || vitaCellEdge2(*gc, pp) > rGuard * rGuard)
+                    if (!gc->getCell()->isExterior()
+                        || vitaCellEdge2(*gc, pp) > (rGuard + rGuardReach) * (rGuard + rGuardReach))
                         continue;
                     gc->forEach([&](const MWWorld::Ptr& ptr) {
-                        if (guardAdds >= kGuardAdds)
-                            return false;
-                        if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
-                            return true;
+                        // Cheapest reject first: in the steady state almost
+                        // everything here is already live.
                         if (ptr.getRefData().getBaseNode() != nullptr)
                             return true;
                         const unsigned int gty = ptr.getType();
                         if (gty == ESM::REC_NPC_ || gty == ESM::REC_CREA || gty == ESM::REC_LEVC)
                             return true;
+                        if (isPagedRef(ptr) || ptr.mRef->isDeleted() || !ptr.getRefData().isEnabled())
+                            return true;
                         const osg::Vec3f gop = ptr.getRefData().getPosition().asVec3();
                         const float gdx = gop.x() - pp.x();
                         const float gdy = gop.y() - pp.y();
                         const float gd2 = gdx * gdx + gdy * gdy;
-                        if (gd2 > rGuard * rGuard)
+                        if (gd2 > (rGuard + rGuardReach) * (rGuard + rGuardReach))
                             return true;
-                        if (!warmOrRequest(ptr, gd2))
-                            return true; // requested; adds once warm
-                        try
+                        if (gd2 > rGuard * rGuard)
                         {
-                            addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering);
-                            addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, nullptr);
-                            ++vitaOps;
-                            ++sVitaLiveObjects;
-                            ++sVitaLivePhys;
-                            ++guardAdds;
+                            // A building's origin sits outside the disc while
+                            // its wall is in your face. Same salience reach
+                            // Lane A uses, paid for only in the annulus.
+                            const VFS::Path::Normalized gm = getModel(ptr);
+                            if (gm.empty())
+                                return true;
+                            float gbr = mPreloader->vitaKnownBoundRadius(std::string(gm.value()));
+                            if (gbr <= 0.f)
+                                gbr = 300.f;
+                            const float greach
+                                = std::min(rGuardReach, 10.f * gbr * ptr.getCellRef().getScale());
+                            if (std::sqrt(gd2) - greach >= rGuard)
+                                return true;
                         }
-                        catch (const std::exception& e)
+                        bool alwaysWarm = false;
+                        if (!warmOrRequest(ptr, gd2, &alwaysWarm))
+                            return true; // requested; adds when the ledger re-arms us
+                        if (alwaysWarm)
                         {
-                            Log(Debug::Error) << "guard hydrate fail '" << ptr.getCellRef().getRefId()
-                                              << "': " << e.what();
+                            if (guardWarmN < kGuardAdds)
+                                guardWarm[guardWarmN++] = ptr;
+                            return true;
                         }
+                        if (guardAdds < kGuardAdds)
+                            guardAdd(ptr); // a gap that just became fillable
                         return true;
                     });
                 }
+                const int guardGaps = guardAdds;
+                for (int i = 0; i < guardWarmN && guardAdds < kGuardAdds; ++i)
+                    guardAdd(guardWarm[i]);
                 if (guardAdds > 0)
                 {
                     char gbuf[64];
-                    snprintf(gbuf, sizeof(gbuf), "[GuardDisc] %d adds", guardAdds);
+                    snprintf(gbuf, sizeof(gbuf), "[GuardDisc] %d adds (%d gap)", guardAdds, guardGaps);
                     Vita::breadcrumb(gbuf);
                 }
             }
@@ -4708,7 +4782,14 @@ namespace MWWorld
                     if (top.size() >= 2)
                         break;
                 }
-                mPreloader->vitaSetWarmRegions(top);
+                // Keep at 2 cells, admit at 4: hysteresis wide enough that a
+                // border walk cannot thrash a package, narrow enough that a
+                // biome behind us stops costing tens of MB.
+                std::vector<std::string> retain;
+                for (const auto& [n, r] : ranked)
+                    if (n >= 2)
+                        retain.push_back(r);
+                mPreloader->vitaSetWarmRegions(top, retain);
                 {
                     std::string ringDesc;
                     for (const auto& [n, r] : ranked)

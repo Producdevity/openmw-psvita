@@ -473,7 +473,8 @@ namespace MWWorld
         Vita::breadcrumb(buf);
     }
 
-    void CellPreloader::vitaSetWarmRegions(const std::vector<std::string>& regions)
+    void CellPreloader::vitaSetWarmRegions(
+        const std::vector<std::string>& regions, const std::vector<std::string>& retain)
     {
         // MRU retention: hold up to two packages; release the stalest only
         // when a third biome arrives or pressure relief demands it.
@@ -494,6 +495,27 @@ namespace MWWorld
             else
                 changed = true;
             mVitaActiveRegions.insert(mVitaActiveRegions.begin(), *rit);
+        }
+        // A biome we have walked out of held its whole package -- tens of MB --
+        // until a third one happened to arrive. One cell out of eighteen is
+        // not a biome you are in. Admission stays at 4 cells, retention at 2,
+        // so a border walk still cannot thrash it.
+        if (!retain.empty())
+        {
+            for (auto it = mVitaActiveRegions.begin(); it != mVitaActiveRegions.end();)
+            {
+                if (std::find(regions.begin(), regions.end(), *it) == regions.end()
+                    && std::find(retain.begin(), retain.end(), *it) == retain.end())
+                {
+                    char buf[112];
+                    snprintf(buf, sizeof(buf), "[CommonWarm] left biome: released %s", it->c_str());
+                    Vita::breadcrumb(buf);
+                    it = mVitaActiveRegions.erase(it);
+                    changed = true;
+                }
+                else
+                    ++it;
+            }
         }
         while (mVitaActiveRegions.size() > 2)
         {
@@ -911,6 +933,7 @@ namespace MWWorld
         it->second.tmpl = std::move(tmpl);
         it->second.shape = std::move(shape);
         it->second.touch = std::chrono::steady_clock::now();
+        ++mVitaReadyEpoch;
         if (it->second.requested.time_since_epoch().count() != 0)
         {
             const int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(

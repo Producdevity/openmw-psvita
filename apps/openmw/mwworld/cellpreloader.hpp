@@ -104,7 +104,9 @@ namespace MWWorld
         void vitaLoadModelFreq();
         void vitaLoadRegionPackages();
         void vitaBootWarm();
-        void vitaSetWarmRegions(const std::vector<std::string>& regions);
+        // regions: promote to MRU. retain: still present enough to keep; any
+        // active region outside both is a biome we have left.
+        void vitaSetWarmRegions(const std::vector<std::string>& regions, const std::vector<std::string>& retain);
         void vitaQueueHotspot(int x, int y);
         float vitaWarmBoundRadius(const std::string& path) const;
 
@@ -127,6 +129,8 @@ namespace MWWorld
         void vitaReleaseDistantHotspots(int cx, int cy, int minDist);
         void vitaDropRegionRefs();
         unsigned vitaRegionEpoch() const { return mVitaRegionEpoch; }
+        // Bumped once per delivery; O(1) edge for "retry what was cold".
+        unsigned vitaDemandReadyEpoch() const { return mVitaReadyEpoch; }
         float vitaKnownBoundRadius(const std::string& path) const;
         bool vitaShapeCached(const std::string& path) const;
         int vitaDemandLatencyMs() const { return mVitaDemandLatencyMs; }
@@ -228,6 +232,7 @@ namespace MWWorld
         std::map<std::pair<int, int>, std::vector<std::string>> mVitaHotspotLoaded;
         std::set<std::string> mVitaRegionTargets;
         std::atomic<unsigned> mVitaRegionEpoch{ 0 };
+        std::atomic<unsigned> mVitaReadyEpoch{ 0 };
         std::string mVitaCooldownRegion;
         std::chrono::steady_clock::time_point mVitaCooldownUntil{};
         bool mVitaTier2Armed = false;
