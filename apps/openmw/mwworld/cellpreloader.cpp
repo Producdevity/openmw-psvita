@@ -610,6 +610,11 @@ namespace MWWorld
             return;
         }
         tmpl = mResourceSystem->getSceneManager()->getTemplate(normalized);
+        // Body parts never provide collision -- actors use capsules -- so the
+        // BVH build here was pure waste on exactly the meshes actor assembly
+        // waits for. Measured: the warm drain ran at ~103ms/model.
+        if (path.rfind("meshes/b/", 0) == 0)
+            return;
         shape = mBulletShapeManager->getShape(normalized);
     }
 
@@ -760,6 +765,11 @@ namespace MWWorld
         }
         if (candidates.empty())
             return;
+        // Body meshes first: they are what actor assembly blocks on, and they
+        // are now the cheapest to warm. A truncated drain then still covers
+        // every NPC rather than whatever happened to rank highest by cell freq.
+        std::stable_partition(candidates.begin(), candidates.end(),
+            [](const std::pair<std::string, unsigned>& c) { return c.first.rfind("meshes/b/", 0) == 0; });
         char buf[64];
         snprintf(buf, sizeof(buf), "[CommonWarm] boot backlog %d models", (int)candidates.size());
         Vita::breadcrumb(buf);
@@ -842,6 +852,8 @@ namespace MWWorld
                 mVitaDemand.erase(dpath);
             }
         }
+        int worstMs = 0;
+        char worstPath[96] = {};
         auto drain = [&](std::vector<std::pair<std::string, unsigned>>& backlog, bool regionTarget) {
             while (!backlog.empty() && Clock::now() < deadline)
             {
@@ -849,11 +861,19 @@ namespace MWWorld
                 backlog.erase(backlog.begin());
                 try
                 {
+                    const auto m0 = Clock::now();
                     osg::ref_ptr<const osg::Referenced> tmpl;
                     osg::ref_ptr<const osg::Referenced> shape;
                     vitaLoadWarmResource(path, tmpl, shape);
                     vitaStoreCommonRef(path, tmpl, shape, regionTarget);
                     ++warmed;
+                    const int ms
+                        = (int)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - m0).count();
+                    if (ms > worstMs)
+                    {
+                        worstMs = ms;
+                        snprintf(worstPath, sizeof(worstPath), "%.90s", path.c_str());
+                    }
                 }
                 catch (const std::exception&)
                 {
@@ -864,8 +884,9 @@ namespace MWWorld
         drain(mVitaCommonBacklog, false);
         if (warmed > 0)
         {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "[CommonWarm] screen-drained %d models", warmed);
+            char buf[160];
+            snprintf(buf, sizeof(buf), "[CommonWarm] screen-drained %d models worst=%dms %s", warmed, worstMs,
+                worstPath);
             Vita::breadcrumb(buf);
         }
     }

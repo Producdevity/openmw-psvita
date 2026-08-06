@@ -74,7 +74,9 @@ static void countDrawables(const osg::Node* node, unsigned int& drawableCount, u
 #include <components/misc/convert.hpp>
 #include <components/misc/resourcehelpers.hpp>
 
+#include <components/esm3/loadarmo.hpp>
 #include <components/esm3/loadbody.hpp>
+#include <components/esm3/loadclot.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/vfs/manager.hpp>
 #include <components/resource/scenemanager.hpp>
@@ -2466,11 +2468,10 @@ namespace MWWorld
                 if (const ESM::BodyPart* bp = bodyParts.search(bpId))
                     out.push_back(
                         Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(bp->mModel)).value());
-            // Race skin parts (chest/arms/legs), cached per race+sex.
+            // Race skin parts (chest/arms/legs), cached per race.
             const bool female = !npc->isMale();
-            static std::map<std::pair<ESM::RefId, bool>, std::vector<std::string>> sRaceParts;
-            const auto key = std::make_pair(npc->mRace, female);
-            auto rit = sRaceParts.find(key);
+            static std::map<ESM::RefId, std::vector<std::string>> sRaceParts;
+            auto rit = sRaceParts.find(npc->mRace);
             if (rit == sRaceParts.end())
             {
                 std::vector<std::string> paths;
@@ -2479,12 +2480,15 @@ namespace MWWorld
                     if (part.mRace != npc->mRace || part.mData.mType != ESM::BodyPart::MT_Skin
                         || part.mModel.empty())
                         continue;
-                    if (((part.mData.mFlags & ESM::BodyPart::BPF_Female) != 0) != female)
-                        continue;
+                    // No sex filter: NpcAnimation::getBodyParts falls back to
+                    // male parts wherever a female one is missing, so filtering
+                    // by sex left those cold. Warming both is a superset of
+                    // whatever it selects and costs a few small meshes --
+                    // cheaper than replicating its selection rules here.
                     paths.push_back(
                         Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(part.mModel)).value());
                 }
-                rit = sRaceParts.emplace(key, std::move(paths)).first;
+                rit = sRaceParts.emplace(npc->mRace, std::move(paths)).first;
             }
             out.insert(out.end(), rit->second.begin(), rit->second.end());
             if (ptr.getClass().hasInventoryStore(ptr))
@@ -2498,6 +2502,30 @@ namespace MWWorld
                         const VFS::Path::Normalized im = getModel(*sit);
                         if (!im.empty())
                             out.push_back(im.value());
+                        // Worn armour/clothing attaches BODY PART meshes, not
+                        // the item's own model -- a different mesh that was
+                        // never warmed, so updateParts paid a blocking
+                        // getTemplate() per worn part on the main thread.
+                        const std::vector<ESM::PartReference>* worn = nullptr;
+                        if (sit->getType() == ESM::Armor::sRecordId)
+                            worn = &sit->get<ESM::Armor>()->mBase->mParts.mParts;
+                        else if (sit->getType() == ESM::Clothing::sRecordId)
+                            worn = &sit->get<ESM::Clothing>()->mBase->mParts.mParts;
+                        if (worn != nullptr)
+                        {
+                            for (const ESM::PartReference& pr : *worn)
+                            {
+                                const ESM::BodyPart* bp = nullptr;
+                                if (female && !pr.mFemale.empty())
+                                    bp = bodyParts.search(pr.mFemale);
+                                if (bp == nullptr && !pr.mMale.empty())
+                                    bp = bodyParts.search(pr.mMale);
+                                if (bp != nullptr && !bp->mModel.empty())
+                                    out.push_back(Misc::ResourceHelpers::correctMeshPath(
+                                        VFS::Path::Normalized(bp->mModel))
+                                                      .value());
+                            }
+                        }
                     }
                 }
             }
@@ -3393,8 +3421,13 @@ namespace MWWorld
             ? 33
             : (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - sLast).count();
         sLast = now;
-        if (frameDt > 45)
-            return; // only skip genuinely awful frames; 30-40ms is our normal
+        // Bar tracks the frame target, like the Lane B and prep gates: a
+        // hardcoded 45 is "awful" only against the frame times it was
+        // calibrated on.
+        const float retireFps = Settings::cells().mTargetFramerate;
+        const int retireHealthyMs = retireFps > 1.f ? (int)(1000.f / retireFps) * 3 / 2 : 45;
+        if (frameDt > retireHealthyMs)
+            return; // only skip genuinely awful frames
         CellStore* victims[2] = { nullptr, nullptr };
         int nv = 0;
         for (CellStore* cell : mActiveCells)

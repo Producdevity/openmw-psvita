@@ -38,8 +38,19 @@
 #include "actorutil.hpp"
 #include "vismask.hpp"
 
+#ifdef __vita__
+#include "../vita/VitaInit.h"
+#include <chrono>
+#endif
+
 namespace MWRender
 {
+#ifdef __vita__
+    // Split the two halves of an actor part attach: the resource fetch (which
+    // blocks on a cold template) and the rig assembly.
+    thread_local uint32_t gVitaPartTemplateUs = 0;
+#endif
+
 
     ActorAnimation::ActorAnimation(
         const MWWorld::Ptr& ptr, osg::ref_ptr<osg::Group> parentNode, Resource::ResourceSystem* resourceSystem)
@@ -89,7 +100,27 @@ namespace MWRender
     osg::ref_ptr<osg::Node> ActorAnimation::attach(
         VFS::Path::NormalizedView model, std::string_view bonename, std::string_view bonefilter, bool isLight)
     {
+#ifdef __vita__
+        const auto tmpl0 = std::chrono::steady_clock::now();
+#endif
         osg::ref_ptr<const osg::Node> templateNode = mResourceSystem->getSceneManager()->getTemplate(model);
+#ifdef __vita__
+        {
+            const uint32_t us = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - tmpl0)
+                                    .count();
+            gVitaPartTemplateUs += us;
+            // The actor gate blocks until every path it knows about is warm,
+            // yet getTemplate still costs 280ms. Name the meshes that are
+            // actually cold rather than guessing which path helper mismatches.
+            if (us > 20000)
+            {
+                char cb[192];
+                snprintf(cb, sizeof(cb), "[PartCold] %ums %.150s", us / 1000, std::string(model.value()).c_str());
+                Vita::breadcrumb(cb);
+            }
+        }
+#endif
 
         const NodeMap& nodeMap = getNodeMap();
         auto found = nodeMap.find(std::string(bonename));
