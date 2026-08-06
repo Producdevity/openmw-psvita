@@ -7,6 +7,10 @@
 
 #include <algorithm>
 
+#ifdef __vita__
+extern "C" int cullprof_in_skeleton;
+#endif
+
 namespace SceneUtil
 {
 
@@ -138,7 +142,16 @@ namespace SceneUtil
                 return;
         }
         else if (nv.getVisitorType() == osg::NodeVisitor::CULL_VISITOR)
+        {
             mLastCullFrameNumber = nv.getTraversalNumber();
+#ifdef __vita__
+            // Marks bone transform visits for [CullProf].
+            ++cullprof_in_skeleton;
+            osg::Group::traverse(nv);
+            --cullprof_in_skeleton;
+            return;
+#endif
+        }
 
         osg::Group::traverse(nv);
     }

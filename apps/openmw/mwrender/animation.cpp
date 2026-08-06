@@ -444,6 +444,20 @@ namespace
     }
 }
 
+#ifdef __vita__
+#include <chrono>
+extern "C" {
+uint32_t vita_anim_inst_us = 0, vita_anim_tribip_us = 0, vita_anim_kf_us = 0, vita_anim_wire_us = 0;
+}
+#define VITA_ANIM_T0(name) const auto name = std::chrono::steady_clock::now();
+#define VITA_ANIM_ADD(var, name)                                                                                       \
+    var += (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - name)    \
+               .count();
+#else
+#define VITA_ANIM_T0(name)
+#define VITA_ANIM_ADD(var, name)
+#endif
+
 namespace MWRender
 {
     std::map<std::string, osg::ref_ptr<osg::Node>> sAnimationModelCache;
@@ -695,12 +709,26 @@ namespace MWRender
             return nullptr;
 
         auto animsrc = std::make_shared<AnimSource>();
+        VITA_ANIM_T0(kfT0)
         animsrc->mKeyframes = mResourceSystem->getKeyframeManager()->get(VFS::Path::toNormalized(kfname));
+        VITA_ANIM_ADD(vita_anim_kf_us, kfT0)
 
         if (!animsrc->mKeyframes || animsrc->mKeyframes->mTextKeys.empty()
             || animsrc->mKeyframes->mKeyframeControllers.empty())
             return nullptr;
 
+#ifdef __vita__
+        struct WireTimer
+        {
+            std::chrono::steady_clock::time_point mT0;
+            ~WireTimer()
+            {
+                vita_anim_wire_us += (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - mT0)
+                                         .count();
+            }
+        } wireTimer{ std::chrono::steady_clock::now() };
+#endif
         const NodeMap& nodeMap = getNodeMap();
         const auto& controllerMap = animsrc->mKeyframes->mKeyframeControllers;
         for (SceneUtil::KeyframeHolder::KeyframeControllerMap::const_iterator it = controllerMap.begin();
@@ -1626,8 +1654,10 @@ namespace MWRender
 
         if (!forceskeleton)
         {
+            VITA_ANIM_T0(instT0)
             osg::ref_ptr<osg::Node> created
                 = getModelInstance(mResourceSystem, model, baseonly, inject, defaultSkeleton);
+            VITA_ANIM_ADD(vita_anim_inst_us, instT0)
             mInsert->addChild(created);
             mObjectRoot = created->asGroup();
             if (!mObjectRoot)
@@ -1643,8 +1673,10 @@ namespace MWRender
         }
         else
         {
+            VITA_ANIM_T0(instT0)
             osg::ref_ptr<osg::Node> created
                 = getModelInstance(mResourceSystem, model, baseonly, inject, defaultSkeleton);
+            VITA_ANIM_ADD(vita_anim_inst_us, instT0)
             osg::ref_ptr<SceneUtil::Skeleton> skel = dynamic_cast<SceneUtil::Skeleton*>(created.get());
             if (!skel)
             {
@@ -1665,9 +1697,11 @@ namespace MWRender
 
         if (isCreature)
         {
+            VITA_ANIM_T0(tribipT0)
             SceneUtil::RemoveTriBipVisitor removeTriBipVisitor;
             mObjectRoot->accept(removeTriBipVisitor);
             removeTriBipVisitor.remove();
+            VITA_ANIM_ADD(vita_anim_tribip_us, tribipT0)
         }
 
         if (!mLightListCallback)

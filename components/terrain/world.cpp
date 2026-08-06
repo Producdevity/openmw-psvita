@@ -13,6 +13,29 @@
 #include "storage.hpp"
 #include "texturemanager.hpp"
 
+#ifdef __vita__
+#include <psp2/kernel/processmgr.h>
+extern "C" uint32_t cullprof_terr_us;
+namespace
+{
+    // Times terrain subtree cull for [CullProf].
+    struct TerrainCullTimer : osg::NodeCallback
+    {
+        void operator()(osg::Node* node, osg::NodeVisitor* nv) override
+        {
+            if (nv->getVisitorType() != osg::NodeVisitor::CULL_VISITOR)
+            {
+                traverse(node, nv);
+                return;
+            }
+            const uint32_t t0 = sceKernelGetProcessTimeLow();
+            traverse(node, nv);
+            cullprof_terr_us += sceKernelGetProcessTimeLow() - t0;
+        }
+    };
+}
+#endif
+
 namespace Terrain
 {
 
@@ -28,6 +51,9 @@ namespace Terrain
         mTerrainRoot = new osg::Group;
         mTerrainRoot->setNodeMask(nodeMask);
         mTerrainRoot->setName("Terrain Root");
+#ifdef __vita__
+        mTerrainRoot->setCullCallback(new TerrainCullTimer);
+#endif
 
         osg::ref_ptr<osg::Camera> compositeCam = new osg::Camera;
         compositeCam->setRenderOrder(osg::Camera::PRE_RENDER, -1);
@@ -70,6 +96,9 @@ namespace Terrain
     {
         mTerrainRoot = new osg::Group;
         mTerrainRoot->setNodeMask(nodeMask);
+#ifdef __vita__
+        mTerrainRoot->setCullCallback(new TerrainCullTimer);
+#endif
 
         mParent->addChild(mTerrainRoot);
     }

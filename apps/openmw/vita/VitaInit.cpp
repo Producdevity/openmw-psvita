@@ -1,8 +1,12 @@
 #ifdef __vita__
 
 #include "VitaInit.h"
+#include "VitaGLWorker.h"
 
+#include <cxxabi.h>
 #include <pthread.h>
+#include <system_error>
+#include <typeinfo>
 
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
@@ -26,6 +30,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <cstring>
 #include <ctime>
 #include <exception>
@@ -48,7 +53,13 @@ extern "C" {
 // previously affected 312 are mitigated by malloc_trim coalescing and
 // dynamic texture tier-down (imagemanager.cpp), so 312 today gives
 // meaningfully more usable working set than 312 originally did.
-unsigned int _newlib_heap_size_user = 312 * 1024 * 1024;
+// 288: 312 starved thread stacks (video EAGAIN).
+// 268: funds vgl RAM pool 16->36 for static VBOs.
+unsigned int _newlib_heap_size_user = 268 * 1024 * 1024;
+// Segment-gap pad: vita-elf-create needs slack after segment 0 for SCE
+// data; unlucky link layouts overlap segment 1 without this.
+__attribute__((used)) extern const char g_vitaSegPad[8192];
+__attribute__((used)) const char g_vitaSegPad[8192] = { 1 };
 unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 
 // Default pthread stack is 32KB; Bullet's EPA solver alone needs ~30KB.
@@ -57,12 +68,35 @@ int __real_pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), v
 int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg)
 {
     if (attr)
-        return __real_pthread_create(thread, attr, fn, arg);
+    {
+        const int rc = __real_pthread_create(thread, attr, fn, arg);
+        if (rc != 0)
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[pthread] create (with attr) failed rc=%d", rc);
+            vitaBreadcrumb(buf);
+        }
+        return rc;
+    }
     pthread_attr_t big;
     pthread_attr_init(&big);
     pthread_attr_setstacksize(&big, 256 * 1024);
-    const int result = __real_pthread_create(thread, &big, fn, arg);
+    int result = __real_pthread_create(thread, &big, fn, arg);
     pthread_attr_destroy(&big);
+    if (result != 0)
+    {
+        // Log failure; retry with smaller stack.
+        char buf[96];
+        snprintf(buf, sizeof(buf), "[pthread] create failed rc=%d at 256KB stack; retrying 128KB", result);
+        vitaBreadcrumb(buf);
+        pthread_attr_t small;
+        pthread_attr_init(&small);
+        pthread_attr_setstacksize(&small, 128 * 1024);
+        result = __real_pthread_create(thread, &small, fn, arg);
+        pthread_attr_destroy(&small);
+        snprintf(buf, sizeof(buf), "[pthread] 128KB retry rc=%d", result);
+        vitaBreadcrumb(buf);
+    }
     return result;
 }
 
@@ -132,48 +166,136 @@ void vitaBreadcrumb(const char* msg)
     vitaTimedBreadcrumb(msg);
 }
 
+// Ring logger: per-crumb SD writes cost 13-22ms each.
+extern "C" void vitaLogFlushNow(void);
+namespace
+{
+    constexpr size_t kLogRingSize = 256 * 1024;
+    char s_logRing[kLogRingSize];
+    size_t s_logHead = 0;
+    unsigned s_logDropped = 0;
+    std::atomic_flag s_logLock = ATOMIC_FLAG_INIT;
+    std::atomic_flag s_logIoLock = ATOMIC_FLAG_INIT;
+    std::atomic<bool> s_logThreadStarted{ false };
+    char s_logFlushBuf[kLogRingSize];
+
+    int logFlushThread(SceSize, void*)
+    {
+        for (;;)
+        {
+            sceKernelDelayThread(250 * 1000);
+            vitaLogFlushNow();
+        }
+        return 0;
+    }
+
+    void logStartFlusherOnce()
+    {
+        bool expected = false;
+        if (s_logThreadStarted.compare_exchange_strong(expected, true))
+        {
+            SceUID tid = sceKernelCreateThread("omw_logflush", logFlushThread, 191, 16 * 1024, 0, 0, nullptr);
+            if (tid >= 0)
+                sceKernelStartThread(tid, 0, nullptr);
+        }
+    }
+
+    void logAppend(const char* data, size_t len)
+    {
+        logStartFlusherOnce();
+        while (s_logLock.test_and_set(std::memory_order_acquire))
+        {
+        }
+        if (s_logHead + len <= kLogRingSize)
+        {
+            memcpy(s_logRing + s_logHead, data, len);
+            s_logHead += len;
+        }
+        else
+            ++s_logDropped;
+        s_logLock.clear(std::memory_order_release);
+    }
+}
+
+extern "C" void vitaLogFlushNow(void)
+{
+    // Copy out under data lock; SD write outside it.
+    while (s_logIoLock.test_and_set(std::memory_order_acquire))
+    {
+    }
+    size_t len;
+    unsigned dropped;
+    {
+        while (s_logLock.test_and_set(std::memory_order_acquire))
+        {
+        }
+        len = s_logHead;
+        dropped = s_logDropped;
+        if (len > 0)
+            memcpy(s_logFlushBuf, s_logRing, len);
+        s_logHead = 0;
+        s_logDropped = 0;
+        s_logLock.clear(std::memory_order_release);
+    }
+    if (len > 0)
+    {
+        SceUID fd = sceIoOpen("ux0:data/openmw/boot.log", SCE_O_WRONLY | SCE_O_APPEND | SCE_O_CREAT, 0777);
+        if (fd >= 0)
+        {
+            sceIoWrite(fd, s_logFlushBuf, len);
+            if (dropped > 0)
+            {
+                char note[64];
+                int n = snprintf(note, sizeof(note), "[Log] ring overflow: %u dropped\n", dropped);
+                if (n > 0)
+                    sceIoWrite(fd, note, (size_t)n);
+            }
+            sceIoClose(fd);
+        }
+    }
+    s_logIoLock.clear(std::memory_order_release);
+}
+
 void vitaTimedBreadcrumb(const char* msg)
 {
-    SceUID fd = sceIoOpen("ux0:data/openmw/boot.log",
-        SCE_O_WRONLY | SCE_O_APPEND | SCE_O_CREAT, 0777);
-    if (fd >= 0)
-    {
-        SceUInt64 us = sceKernelGetProcessTimeWide();
-        unsigned long ms = (unsigned long)(us / 1000ULL);
-        char buf[256];
-        int pos = 0;
-        buf[pos++] = '[';
-        char numBuf[16];
-        int numLen = 0;
-        unsigned long tmp = ms;
-        do { numBuf[numLen++] = '0' + (tmp % 10); tmp /= 10; } while (tmp > 0);
-        for (int i = numLen - 1; i >= 0; --i) buf[pos++] = numBuf[i];
-        buf[pos++] = ']';
-        buf[pos++] = ' ';
-        int msgLen = 0;
-        while (msg[msgLen] && pos < 254) buf[pos++] = msg[msgLen++];
-        buf[pos++] = '\n';
-        sceIoWrite(fd, buf, pos);
-        sceIoClose(fd);
-    }
+    SceUInt64 us = sceKernelGetProcessTimeWide();
+    unsigned long ms = (unsigned long)(us / 1000ULL);
+    char buf[640];
+    int pos = 0;
+    buf[pos++] = '[';
+    char numBuf[16];
+    int numLen = 0;
+    unsigned long tmp = ms;
+    do { numBuf[numLen++] = '0' + (tmp % 10); tmp /= 10; } while (tmp > 0);
+    for (int i = numLen - 1; i >= 0; --i) buf[pos++] = numBuf[i];
+    buf[pos++] = ']';
+    buf[pos++] = ' ';
+    int msgLen = 0;
+    while (msg[msgLen] && pos < (int)sizeof(buf) - 2) buf[pos++] = msg[msgLen++];
+    buf[pos++] = '\n';
+    logAppend(buf, pos);
 }
 
 void vitaMemBreadcrumb(const char* msg)
 {
-    SceUID fd = sceIoOpen("ux0:data/openmw/boot.log",
-        SCE_O_WRONLY | SCE_O_APPEND | SCE_O_CREAT, 0777);
-    if (fd >= 0)
+    // RAM ring + background flusher like every other crumb. The old
+    // per-line sceIoOpen/Write/Close on ux0 -- twelve times per report
+    // window, each with its own mallinfo() free-list walk -- was the
+    // recurring ~200ms ghost frame no [Worst] bucket could name.
+    static SceUInt64 s_miAt = 0;
+    static unsigned s_usedKB = 0, s_freeKB = 0;
+    const SceUInt64 now = sceKernelGetProcessTimeWide();
+    if (now - s_miAt > 100000ULL) // one heap walk per dump burst
     {
         struct mallinfo mi = mallinfo();
-        unsigned int usedKB = (unsigned int)(mi.uordblks / 1024);
-        unsigned int freeKB = (unsigned int)(mi.fordblks / 1024);
-        char buf[300];
-        int len = snprintf(buf, sizeof(buf), "[VitaMem] %s | used: %uKB | free: %uKB\n",
-            msg, usedKB, freeKB);
-        if (len > 0)
-            sceIoWrite(fd, buf, (size_t)len);
-        sceIoClose(fd);
+        s_usedKB = (unsigned int)(mi.uordblks / 1024);
+        s_freeKB = (unsigned int)(mi.fordblks / 1024);
+        s_miAt = now;
     }
+    char buf[300];
+    int len = snprintf(buf, sizeof(buf), "[VitaMem] %s | used: %uKB | free: %uKB\n", msg, s_usedKB, s_freeKB);
+    if (len > 0)
+        logAppend(buf, (size_t)len);
 }
 
 // Vita newlib stubs for POSIX functions referenced at link time
@@ -293,6 +415,7 @@ namespace Vita
                 sceIoWrite(fd, s_emergencyBuf, static_cast<size_t>(len));
             sceIoClose(fd);
         }
+        vitaLogFlushNow();
         sceKernelExitProcess(1);
     }
 
@@ -324,6 +447,7 @@ namespace Vita
         {
             releaseEmergencyReserve();
             breadcrumb("[OOM_RECOVERY] Released 4MB emergency reserve");
+            vitaLogFlushNow();
             // Return to let operator new retry the allocation
             return;
         }
@@ -1029,6 +1153,7 @@ namespace Vita
         sceIoMkdir("ux0:data/openmw/data", 0777);
         sceIoMkdir("ux0:data/openmw/saves", 0777);
         sceIoMkdir("ux0:data/openmw/cache", 0777);
+        sceIoMkdir("ux0:data/openmw/cache/evict", 0777);
         sceIoMkdir("ux0:data/openmw/screenshots", 0777);
         sceIoMkdir("ux0:data/openmw/mods", 0777);
 
@@ -1152,6 +1277,25 @@ namespace Vita
 
         ensureDataDirectories();
 
+        // No clean-exit marker: archive crashed session's log.
+        {
+            SceUID fd = sceIoOpen("ux0:data/openmw/clean_exit", SCE_O_RDONLY, 0);
+            if (fd >= 0)
+            {
+                sceIoClose(fd);
+                sceIoRemove("ux0:data/openmw/clean_exit");
+            }
+            else
+            {
+                sceIoMkdir("ux0:data/openmw/crashlogs", 0777);
+                // Rotate slot files 2->3, 1->2, then archive as 1.
+                sceIoRemove("ux0:data/openmw/crashlogs/crash3.log");
+                sceIoRename("ux0:data/openmw/crashlogs/crash2.log", "ux0:data/openmw/crashlogs/crash3.log");
+                sceIoRename("ux0:data/openmw/crashlogs/crash1.log", "ux0:data/openmw/crashlogs/crash2.log");
+                sceIoRename("ux0:data/openmw/boot.log", "ux0:data/openmw/crashlogs/crash1.log");
+            }
+        }
+
         // Rotate logs
         sceIoRemove("ux0:data/openmw/boot.log.prev");
         sceIoRename("ux0:data/openmw/boot.log", "ux0:data/openmw/boot.log.prev");
@@ -1166,9 +1310,21 @@ namespace Vita
         // Log what std::terminate is called with
         std::set_terminate([]() {
             breadcrumb("[TERMINATE] std::terminate called");
+            if (const std::type_info* t = abi::__cxa_current_exception_type())
+            {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "[TERMINATE] type: %s", t->name());
+                breadcrumb(buf);
+            }
             std::exception_ptr ep = std::current_exception();
             if (ep) {
                 try { std::rethrow_exception(ep); }
+                catch (const std::system_error& e) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "[TERMINATE] system_error code=%d (%s): %s", e.code().value(),
+                        e.code().category().name(), e.what());
+                    breadcrumb(buf);
+                }
                 catch (const std::exception& e) {
                     char buf[256];
                     snprintf(buf, sizeof(buf), "[TERMINATE] exception: %s", e.what());
@@ -1178,6 +1334,7 @@ namespace Vita
             } else {
                 breadcrumb("[TERMINATE] no active exception (noexcept violation?)");
             }
+            vitaLogFlushNow();
             abort();
         });
 
@@ -1193,6 +1350,23 @@ namespace Vita
 
         initClocks();
 
+        // Settings load later; peek the raw cfg for the GL-thread flag.
+        bool glThread = false;
+        {
+            SceUID fd = sceIoOpen("app0:/settings.cfg", SCE_O_RDONLY, 0);
+            if (fd >= 0)
+            {
+                static char cfg[16384];
+                int n = sceIoRead(fd, cfg, sizeof(cfg) - 1);
+                sceIoClose(fd);
+                if (n > 0)
+                {
+                    cfg[n] = 0;
+                    glThread = strstr(cfg, "vita gl thread = true") != nullptr;
+                }
+            }
+        }
+
         // Initialize vitaGL before SDL_Init so SDL2's video subsystem skips its default init.
         //
         // GXM has FOUR independent buffer sizes that all matter for crash-resistance:
@@ -1207,6 +1381,7 @@ namespace Vita
         // garbage → data abort inside SceGxm (R0 = bad CDRAM ptr like 0x70100254).
         // Observed crash in dense interior cells (Shulk Egg Mine repro). Bumping the
         // vertex/fragment/VDM rings 2× each. Param buffer left at default 16 MB.
+        const auto vitaInitGL = [&] {
         vglSetParamBufferSize(16 * 1024 * 1024);
         vglSetVDMBufferSize(256 * 1024);                  // 128 KB → 256 KB
         vglSetVertexBufferSize(8 * 1024 * 1024);          //  2 MB → 8 MB (4 MB still crashed; bumped further)
@@ -1220,7 +1395,7 @@ namespace Vita
         // proven-good 640x368 and cap the Render Resolution combo on
         // the Vita Settings tab at 640x368 (no 720/768 presets).
         vglInitWithCustomSizes(0x100000, 640, 368,
-            16 * 1024 * 1024,
+            36 * 1024 * 1024,
             88 * 1024 * 1024,
             0,
             0,
@@ -1230,6 +1405,15 @@ namespace Vita
         vglUseLowPrecision(GL_TRUE);
         // SHARK_OPT_UNSAFE: most aggressive ALU rewrites; HAVE_SHADER_CACHE=1 amortises compile.
         vglSetupRuntimeShaderCompiler(SHARK_OPT_UNSAFE, 1, 1, 1);
+        };
+        if (glThread)
+        {
+            Vita::ensureGLWorker();
+            Vita::getGLWorker()->call(vitaInitGL);
+            breadcrumb("BOOT: GL owned by worker thread");
+        }
+        else
+            vitaInitGL();
         {
             char bstamp[96];
             snprintf(bstamp, sizeof(bstamp), "BOOT: build %s %s", __DATE__, __TIME__);
@@ -1239,6 +1423,7 @@ namespace Vita
 
         // IME sysmodule is loaded later by Vita::initIme()
 
+        asm volatile("" ::"r"(g_vitaSegPad)); // opaque ref: keep segment pad
         char initBuf[128];
         snprintf(initBuf, sizeof(initBuf),
             "Vita Platform Initialized: heap=%uMB stack=%uKB",
@@ -1252,6 +1437,12 @@ namespace Vita
     void breadcrumb(const char* msg)
     {
         vitaBreadcrumb(msg);
+    }
+
+    int getHeapUsedMBFresh()
+    {
+        struct mallinfo mi = mallinfo();
+        return mi.uordblks / (1024 * 1024);
     }
 
     int getHeapUsedMB()
@@ -1274,9 +1465,26 @@ namespace Vita
         return s_cachedMB;
     }
 
+    int getHeapFreeMB()
+    {
+        // fordblks only counts arena crumbs; true headroom includes the
+        // unclaimed heap the allocator grows into. Cached: mallinfo walks.
+        static int s_cachedFreeMB = 256;
+        static uint64_t s_lastFreeTime = 0;
+        const uint64_t now = sceKernelGetProcessTimeWide();
+        if (now - s_lastFreeTime > 250000)
+        {
+            struct mallinfo mi = mallinfo();
+            const int heapMB = (int)(_newlib_heap_size_user / (1024 * 1024));
+            s_cachedFreeMB = heapMB - (int)(mi.uordblks / (1024 * 1024));
+            s_lastFreeTime = now;
+        }
+        return s_cachedFreeMB;
+    }
+
     bool isMemoryPressure(int thresholdMB)
     {
-        return getHeapUsedMB() > thresholdMB;
+        return getHeapUsedMB() > thresholdMB || getHeapFreeMB() < 8;
     }
 
     void replenishEmergencyReserve()
@@ -1375,8 +1583,7 @@ namespace Vita
 
         // --- Map: resolution / widget size not forced (defaults in cfg).
 
-        // --- GUI: only Vita-required bits. Font size is user-tunable via the
-        //     in-game Settings menu (slider 12-32) — bundled cfg has 16 default.
+        // --- GUI: only Vita-required bits. Font size user-tunable (12-32).
         Settings::gui().mScalingFactor.set(0.8f);
         Settings::gui().mControllerMenus.set(true);
 

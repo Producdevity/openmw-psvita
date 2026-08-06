@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <exception>
 
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include "VitaInit.h"
@@ -70,10 +71,16 @@ namespace Vita
         mHasWork.store(true, std::memory_order_release);
     }
 
+    unsigned long long gWorkerWaitUs = 0;
+
     void SimWorker::finish()
     {
+        if (!mHasWork.load(std::memory_order_acquire))
+            return;
+        const SceUInt64 t0 = sceKernelGetProcessTimeWide();
         while (mHasWork.load(std::memory_order_acquire))
             sceKernelDelayThread(10);
+        gWorkerWaitUs += sceKernelGetProcessTimeWide() - t0;
     }
 
     void SimWorker::join()
@@ -107,6 +114,7 @@ namespace Vita
                 char buf[256];
                 std::snprintf(buf, sizeof(buf), "[SimWorker] std::exception: %s", e.what());
                 breadcrumb(buf);
+                vitaLogFlushNow();
             }
             catch (...)
             {

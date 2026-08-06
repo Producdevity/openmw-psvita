@@ -164,6 +164,36 @@ namespace MWWorld
 
         std::unordered_map<ESM::RefId, int> mRefCount;
 
+    public:
+#ifdef __vita__
+        // Boot cache for countAllCellRefsAndMarkKeys (4.3s of re-parsing all
+        // cell refs; outputs are a pure function of the content files).
+        // Seed cached counts; scan then early-returns.
+        void vitaSeedRefCounts(std::unordered_map<ESM::RefId, int>&& counts, const std::vector<ESM::RefId>& keyIds);
+        const std::unordered_map<ESM::RefId, int>& vitaGetRefCounts() const { return mRefCount; }
+        std::vector<ESM::RefId> vitaGetKeyIds() const;
+
+        // RefId -> sole containing cell (unambiguous only).
+        // Built alongside the ref count walk, cached with it (VRC2).
+        void vitaSeedRefCellIndex(std::unordered_map<ESM::RefId, ESM::RefId>&& index)
+        {
+            mVitaRefCellIndex = std::move(index);
+        }
+        const std::unordered_map<ESM::RefId, ESM::RefId>& vitaGetRefCellIndex() const { return mVitaRefCellIndex; }
+        ESM::RefId vitaFindRefCell(const ESM::RefId& id) const
+        {
+            auto it = mVitaRefCellIndex.find(id);
+            return it == mVitaRefCellIndex.end() ? ESM::RefId() : it->second;
+        }
+
+    private:
+        std::unordered_map<ESM::RefId, ESM::RefId> mVitaRefCellIndex;
+
+    public:
+#endif
+
+    private:
+
         std::vector<StoreBase*> mStores;
         std::vector<DynamicStore*> mDynamicStores;
 

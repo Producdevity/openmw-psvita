@@ -9,6 +9,7 @@
 #include <components/sceneutil/positionattitudetransform.hpp>
 
 #include "../mwbase/environment.hpp"
+#include "../vita/VitaInit.h"
 #include "../mwbase/soundmanager.hpp"
 #include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
@@ -298,9 +299,24 @@ namespace MWClass
 
     std::string Door::getDestination(const MWWorld::LiveCellRef<ESM::Door>& door)
     {
-        std::string_view dest = MWBase::Environment::get().getWorld()->getCellName(
-            &MWBase::Environment::get().getWorldModel()->getCell(door.mRef.getDestCell()));
-
+        std::string_view dest;
+        try
+        {
+            dest = MWBase::Environment::get().getWorld()->getCellName(
+                &MWBase::Environment::get().getWorldModel()->getCell(door.mRef.getDestCell()));
+        }
+        catch (const std::exception& e)
+        {
+#ifdef __vita__
+            // Unresolvable destination must never mute the whole prompt.
+            char db[192];
+            snprintf(db, sizeof(db), "[DoorDest] %s unresolved: %s",
+                door.mRef.getDestCell().toDebugString().c_str(), e.what());
+            Vita::breadcrumb(db);
+#endif
+        }
+        if (dest.empty())
+            return "#{sDoor}";
         return "#{sCell=" + std::string{ dest } + "}";
     }
 

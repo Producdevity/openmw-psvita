@@ -27,14 +27,8 @@ namespace Settings
         SettingValue<float> mFirstPersonFieldOfView{ mIndex, "Camera", "first person field of view",
             makeClampSanitizerFloat(1, 179) };
         SettingValue<bool> mReverseZ{ mIndex, "Camera", "reverse z" };
-        SettingValue<bool> mVitaDynamicFog{ mIndex, "Camera", "vita dynamic fog" };
-        SettingValue<float> mVitaDynFogTargetFps{ mIndex, "Camera", "vita dyn fog target fps",
-            makeClampSanitizerFloat(15.f, 30.f) };
         // Fog stops expanding here even when fps allows; spare goes to smoothness.
-        SettingValue<float> mVitaDynFogMaxDistance{ mIndex, "Camera", "vita dyn fog max distance",
-            makeClampSanitizerFloat(1500.f, 5000.f) };
         // controls how hard the proportional shrink response pulls fog in when fps is below target.
-        SettingValue<std::string> mVitaDynFogAggression{ mIndex, "Camera", "vita dyn fog aggression" };
     };
 }
 

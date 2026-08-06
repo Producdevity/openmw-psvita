@@ -231,9 +231,18 @@ void MWState::StateManager::resumeGame()
     MWBase::Environment::get().getLuaManager()->gameLoaded();
 }
 
+#ifdef __vita__
+// Save marker for [Slow] attribution.
+extern "C" uint32_t vitastat_save_flag;
+uint32_t vitastat_save_flag = 0;
+#endif
+
 void MWState::StateManager::saveGame(std::string_view description, const Slot* slot)
 {
     MWBase::Environment::get().getLuaManager()->applyDelayedActions();
+#ifdef __vita__
+    vitastat_save_flag = 1;
+#endif
 
 #ifdef __vita__
     // libpng's internal mallocs fail under heap pressure during save thumbnail
@@ -432,6 +441,72 @@ void MWState::StateManager::quickSave(std::string name)
     saveGame(name, saveFinder.getNextQuickSaveSlot());
 }
 
+#ifdef __vita__
+// Same record set saveGame writes, straight into RAM: no profile screenshot,
+// no slot, no file. Mirrors the block in saveGame — keep them in step.
+void MWState::StateManager::saveGameToMemory(std::string& out)
+{
+    ESM::SavedGame profile;
+    MWBase::World& world = *MWBase::Environment::get().getWorld();
+    for (const std::string& contentFile : world.getContentFiles())
+        profile.mContentFiles.push_back(contentFile);
+    profile.mPlayerName = world.getPlayerPtr().get<ESM::NPC>()->mBase->mName;
+    profile.mInGameTime = world.getTimeManager()->getEpochTimeStamp();
+    profile.mTimePlayed = mTimePlayed;
+    profile.mDescription = "streaming mode switch";
+
+    MWBase::Environment::get().getMechanicsManager()->persistAnimationStates();
+
+    std::stringstream stream;
+    ESM::ESMWriter writer;
+    for (const std::string& contentFile : world.getContentFiles())
+        writer.addMaster(contentFile, 0);
+    writer.setFormatVersion(ESM::CurrentSaveGameFormatVersion);
+    writer.setVersion(0);
+    writer.setType(0);
+    writer.setAuthor("");
+    writer.setDescription("");
+
+    size_t recordCount = 1
+        + MWBase::Environment::get().getJournal()->countSavedGameRecords()
+        + MWBase::Environment::get().getLuaManager()->countSavedGameRecords()
+        + MWBase::Environment::get().getWorld()->countSavedGameRecords()
+        + MWBase::Environment::get().getScriptManager()->getGlobalScripts().countSavedGameRecords()
+        + MWBase::Environment::get().getDialogueManager()->countSavedGameRecords()
+        + MWBase::Environment::get().getMechanicsManager()->countSavedGameRecords()
+        + MWBase::Environment::get().getInputManager()->countSavedGameRecords()
+        + MWBase::Environment::get().getWindowManager()->countSavedGameRecords();
+    writer.setRecordCount(static_cast<int>(recordCount));
+    writer.save(stream);
+
+    Loading::Listener& listener = *MWBase::Environment::get().getWindowManager()->getLoadingScreen();
+    listener.setProgressRange(MWBase::Environment::get().getWorld()->countSavedGameCells());
+    listener.setLabel("#{OMWEngine:SavingInProgress}", true);
+    Loading::ScopedLoad load(&listener);
+
+    writer.startRecord(ESM::REC_SAVE);
+    profile.save(writer);
+    writer.endRecord(ESM::REC_SAVE);
+
+    MWBase::Environment::get().getJournal()->write(writer, listener);
+    MWBase::Environment::get().getDialogueManager()->write(writer, listener);
+    MWBase::Environment::get().getLuaManager()->write(writer, listener);
+    MWBase::Environment::get().getWorld()->write(writer, listener);
+    MWBase::Environment::get().getScriptManager()->getGlobalScripts().write(writer, listener);
+    MWBase::Environment::get().getMechanicsManager()->write(writer, listener);
+    MWBase::Environment::get().getInputManager()->write(writer, listener);
+    MWBase::Environment::get().getWindowManager()->write(writer, listener);
+
+    if (static_cast<size_t>(writer.getRecordCount()) != recordCount + 1)
+        Log(Debug::Warning) << "mode switch: record count mismatch, estimated " << recordCount + 1 << " wrote "
+                            << writer.getRecordCount();
+    writer.close();
+    if (stream.fail())
+        throw std::runtime_error("mode switch: memory save failed");
+    out = stream.str();
+}
+#endif
+
 void MWState::StateManager::loadGame(const std::filesystem::path& filepath)
 {
     for (const auto& character : mCharacterManager)
@@ -486,21 +561,37 @@ struct SaveVersionTooNewError : SaveFormatVersionError
 
 void MWState::StateManager::loadGame(const Character* character, const std::filesystem::path& filepath)
 {
+    ESM::ESMReader reader;
+    reader.open(filepath);
+    loadGameFromReader(character, filepath, reader);
+}
+
+#ifdef __vita__
+// Switching the streaming architecture rebuilds the world through the save
+// path, but must not touch the player's saves: serialise to RAM, reload from
+// RAM, release. No slot, no file, no quicksave rotation.
+void MWState::StateManager::loadGameFromMemory(std::string&& data)
+{
+    ESM::ESMReader reader;
+    reader.open(std::make_unique<std::istringstream>(std::move(data)), "memory:modeswitch");
+    loadGameFromReader(getCurrentCharacter(), mLastSavegame, reader);
+}
+#endif
+
+void MWState::StateManager::loadGameFromReader(
+    const Character* character, const std::filesystem::path& filepath, ESM::ESMReader& reader)
+{
     try
     {
         cleanup();
 
 #ifdef __vita__
-        // Flush caches before save loading (cleanup may skip on first load).
-        MWBase::Environment::get().getWorld()->getRenderingManager()->flushUnrefQueueImmediate();
-        MWBase::Environment::get().getResourceSystem()->clearCache();
+        MWBase::Environment::get().getWorldScene()->vitaLoadPurge();
         Vita::logMemoryStatus("Pre-save-load");
 #endif
 
         Log(Debug::Info) << "Reading save file " << filepath.filename();
 
-        ESM::ESMReader reader;
-        reader.open(filepath);
 
         ESM::FormatVersion version = reader.getFormatVersion();
         if (version > ESM::CurrentSaveGameFormatVersion)

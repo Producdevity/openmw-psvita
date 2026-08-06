@@ -102,19 +102,8 @@ namespace MWGui
         void onVSyncModeChanged(MyGUI::ComboBox* sender, size_t pos);
 
 #ifdef __vita__
-        // Hide view-distance slider row while dynamic fog drives it.
-        void updateVitaViewDistVisibility();
         // Hide controls that can't work or cause issues on Vita.
         void hideIrrelevantVitaWidgets();
-        // Target-fps dropdown (3 discrete options: 15/18/20)
-        MyGUI::ComboBox* mVitaDynFogTargetFpsList = nullptr;
-        void onVitaDynFogTargetFpsChanged(MyGUI::ComboBox* sender, size_t pos);
-        // Fog aggression dropdown (Normal/Aggressive/Very Aggressive)
-        MyGUI::ComboBox* mVitaDynFogAggressionList = nullptr;
-        void onVitaDynFogAggressionChanged(MyGUI::ComboBox* sender, size_t pos);
-        // Preload cell cache size (1/2/3)
-        MyGUI::ComboBox* mVitaCellCacheList = nullptr;
-        void onVitaCellCacheChanged(MyGUI::ComboBox* sender, size_t pos);
         // Render resolution preset (5 discrete options). Sets both
         // Video.resolution x and Video.resolution y. Restart required.
         MyGUI::ComboBox* mVitaResolutionList = nullptr;

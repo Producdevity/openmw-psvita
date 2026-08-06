@@ -159,6 +159,9 @@ namespace MWRender
         void setViewMode(ViewMode viewMode);
 
         void updateParts();
+#ifdef __vita__
+        void logCompositeCensus();
+#endif
 
         /// Rebuilds the NPC, updating their root model, animation sources, and equipment.
         void rebuild();

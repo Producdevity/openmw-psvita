@@ -187,7 +187,7 @@ namespace MWLua
             MWMechanics::AiSequence& ai = ptr.getClass().getCreatureStats(ptr).getAiSequence();
             std::string_view cellNameId;
             if (cell)
-                cellNameId = cell->mStore->getCell()->getNameId();
+                cellNameId = cell->store()->getCell()->getNameId();
             ai.stack(
                 MWMechanics::AiFollow(getId(target.ptr()), cellNameId, duration, dest.x(), dest.y(), dest.z(), repeat),
                 ptr, cancelOther);
@@ -197,7 +197,7 @@ namespace MWLua
             const MWWorld::Ptr& ptr = self.ptr();
             MWMechanics::AiSequence& ai = ptr.getClass().getCreatureStats(ptr).getAiSequence();
             int gameHoursDuration = static_cast<int>(std::ceil(duration / 3600.0));
-            auto* esmCell = cell.mStore->getCell();
+            auto* esmCell = cell.store()->getCell();
             std::string_view cellNameId;
             if (!esmCell->isExterior())
                 cellNameId = esmCell->getNameId();

@@ -1,5 +1,7 @@
 #include "mapwindow.hpp"
 
+#include <algorithm>
+
 #include <osg/Texture2D>
 
 #include <MyGUI_Button.h>
@@ -1206,7 +1208,9 @@ namespace MWGui
 
     float MapWindow::getMarkerSize(size_t agregatedWeight) const
     {
-        float markerSize = 12.f * mGlobalMapZoom;
+        // 12px suits the stock 18px cell; hold that ratio when cells shrink.
+        const float cellSize = static_cast<float>(Settings::map().mGlobalMapCellSize);
+        float markerSize = std::max(12.f * cellSize / 18.f, 6.f) * mGlobalMapZoom;
         if (mGlobalMapZoom < 1)
             return static_cast<float>(markerSize * std::sqrt(agregatedWeight)); // we want to see agregated object
         return agregatedWeight ? 0 : markerSize; // we want to see only original markers (i.e. non agregated)

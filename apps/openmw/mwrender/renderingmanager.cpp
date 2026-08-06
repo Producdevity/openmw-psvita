@@ -483,10 +483,33 @@ namespace MWRender
 
         mObjects = std::make_unique<Objects>(mResourceSystem, sceneRoot, unrefQueue);
 
-        if (getenv("OPENMW_DONT_PRECOMPILE") == nullptr)
+#ifdef __vita__
+        // A/B toggle without a rebuild: drop ux0:data/openmw/noprecompile.txt
+        // to disable GL precompile and see whether the draw spikes are the
+        // compiling or just the streaming burst they coincide with.
+        bool vitaNoPrecompile = false;
+        if (FILE* f = fopen("ux0:data/openmw/noprecompile.txt", "rb"))
+        {
+            vitaNoPrecompile = true;
+            fclose(f);
+            Vita::breadcrumb("[ICO] disabled by noprecompile.txt");
+        }
+#else
+        constexpr bool vitaNoPrecompile = false;
+#endif
+        if (getenv("OPENMW_DONT_PRECOMPILE") == nullptr && !vitaNoPrecompile)
         {
             mViewer->setIncrementalCompileOperation(new osgUtil::IncrementalCompileOperation);
             mViewer->getIncrementalCompileOperation()->setTargetFrameRate(Settings::cells().mTargetFramerate);
+#ifdef __vita__
+            // Compiling runs inside the GL worker's draw, where OSG's
+            // "time already spent this frame" reads ~0 — so it believed a
+            // whole 33ms frame was free and took it (28-90ms draws).
+            auto* vitaIco = mViewer->getIncrementalCompileOperation();
+            vitaIco->setTargetFrameRate(120.f);
+            vitaIco->setMaximumNumOfObjectsToCompilePerFrame(4);
+            vitaIco->setMinimumTimeAvailableForGLCompileAndDeletePerFrame(0.002);
+#endif
         }
 
 #ifndef __vita__
@@ -610,7 +633,7 @@ namespace MWRender
         mViewer->getCamera()->setCullingMode(cullingMode);
         mViewer->getCamera()->setName(Constants::SceneCamera);
 
-        auto mask = ~(Mask_UpdateVisitor | Mask_SimpleWater);
+        auto mask = ~(Mask_UpdateVisitor | Mask_SimpleWater | Mask_VitaPick);
         MWBase::Environment::get().getWindowManager()->setCullMask(mask);
         NifOsg::Loader::setHiddenNodeMask(Mask_UpdateVisitor);
         NifOsg::Loader::setIntersectionDisabledNodeMask(Mask_Effect);
@@ -1325,6 +1348,27 @@ namespace MWRender
     }
 
     RenderingManager::RayResult RenderingManager::castCameraToViewportRay(
+        const float nX, const float nY, float maxDistance, bool ignorePlayer, unsigned int maskAnd)
+    {
+        osg::ref_ptr<osgUtil::LineSegmentIntersector> intersector(new osgUtil::LineSegmentIntersector(
+            osgUtil::LineSegmentIntersector::PROJECTION, nX * 2.f - 1.f, nY * (-2.f) + 1.f));
+
+        osg::Vec3d dist(0.f, 0.f, -maxDistance);
+        dist = dist * mViewer->getCamera()->getProjectionMatrix();
+
+        osg::Vec3d end = intersector->getEnd();
+        end.z() = dist.z();
+        intersector->setEnd(end);
+        intersector->setIntersectionLimit(osgUtil::LineSegmentIntersector::LIMIT_NEAREST);
+
+        osg::ref_ptr<osgUtil::IntersectionVisitor> iv = getIntersectionVisitor(intersector, ignorePlayer, true);
+        iv->setTraversalMask(iv->getTraversalMask() & maskAnd);
+        mViewer->getCamera()->accept(*iv);
+
+        return getIntersectionResult(intersector, mIntersectionVisitor);
+    }
+
+    RenderingManager::RayResult RenderingManager::castCameraToViewportRay(
         const float nX, const float nY, float maxDistance, bool ignorePlayer, bool ignoreActors)
     {
         osg::ref_ptr<osgUtil::LineSegmentIntersector> intersector(new osgUtil::LineSegmentIntersector(
@@ -1342,6 +1386,19 @@ namespace MWRender
         mViewer->getCamera()->accept(*getIntersectionVisitor(intersector, ignorePlayer, ignoreActors));
 
         return getIntersectionResult(intersector, mIntersectionVisitor);
+    }
+
+    void RenderingManager::getCameraRay(
+        float nX, float nY, float maxDistance, osg::Vec3f& outStart, osg::Vec3f& outEnd) const
+    {
+        const osg::Camera* cam = mViewer->getCamera();
+        const osg::Matrix invVP = osg::Matrix::inverse(cam->getViewMatrix() * cam->getProjectionMatrix());
+        const osg::Vec3f ndcNear(nX * 2.f - 1.f, nY * (-2.f) + 1.f, -1.f);
+        const osg::Vec3f ndcFar(nX * 2.f - 1.f, nY * (-2.f) + 1.f, 1.f);
+        outStart = ndcNear * invVP;
+        osg::Vec3f dir = (ndcFar * invVP) - outStart;
+        dir.normalize();
+        outEnd = outStart + dir * maxDistance;
     }
 
     void RenderingManager::updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& updated)

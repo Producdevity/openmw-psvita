@@ -2,6 +2,7 @@
 #define GAME_MWWORLD_SCENE_H
 
 #include <osg/Vec2i>
+#include <osg/Vec4f>
 #include <osg/Vec4i>
 #include <osg/ref_ptr>
 
@@ -9,6 +10,7 @@
 #include "ptr.hpp"
 
 #include <map>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <set>
@@ -21,6 +23,7 @@ namespace osg
 {
     class Vec3f;
     class Stats;
+    class Node;
 }
 
 namespace ESM
@@ -90,6 +93,7 @@ namespace MWWorld
         CellStoreCollection mActiveCells;
         bool mCellChanged;
         bool mCellLoaded = false;
+        bool mVitaLastCrossScreened = true;
         MWWorld::World& mWorld;
         MWPhysics::PhysicsSystem* mPhysics;
         MWRender::RenderingManager& mRendering;
@@ -125,7 +129,11 @@ namespace MWWorld
         osg::Vec2i mCurrentGridCenter;
 
         // Load and unload cells as necessary to create a cell grid with "X" and "Y" in the center
-        void changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent = true);
+        // loadScreen: boot/load-game/teleport/interior-exit — the player is
+        // already waiting, so synchronous completion work belongs here and
+        // NEVER on the movement path (radial mode: crossings are bookkeeping).
+        void changeCellGrid(const osg::Vec3f& pos, ESM::ExteriorCellLocation playerCellIndex, bool changeEvent = true,
+            bool loadScreen = false);
 
         void requestChangeCellGrid(const osg::Vec3f& position, const osg::Vec2i& cell, bool changeEvent = true);
 
@@ -151,6 +159,11 @@ namespace MWWorld
 
         struct PendingCellLoad {
             CellStore* cell;
+            std::chrono::steady_clock::time_point queuedAt{};
+            bool urgent = false;
+            bool prepared = true;  // terrain/water/nav registered
+            int firstClutter = 0;  // objects [0, firstClutter) are structural
+            bool farCompiled = false;
             bool objectsCollected = false;  // whether we've collected the object list
             std::vector<Ptr> objectsToInsert;  // filtered lite-type objects to insert
             int nextObject = 0;  // index into objectsToInsert
@@ -159,6 +172,27 @@ namespace MWWorld
             bool batchingDone = false;
         };
         std::vector<PendingCellLoad> mPendingCellLoads;
+        std::chrono::steady_clock::time_point mVitaLastCrossing{};
+        void vitaScreenHousekeeping();
+        void vitaStoreEvictPass(bool pressure);
+        void finishPendingCellLoad(PendingCellLoad& pending);
+        void vitaFinalizeDeferredCell(CellStore& cell);
+        bool vitaCellStreamable(CellStore& cell, const osg::Vec3f& pos, int x, int y);
+        int vitaBubbleTick(int maxMs); // returns hydration ops performed
+        std::set<CellStore*, std::less<>> mVitaActorDomain;
+        std::set<CellStore*, std::less<>> mVitaPhysDomain;
+        std::map<CellStore*, osg::Vec2f> mVitaCleanSweep;
+        std::map<CellStore*, osg::Vec4f> mVitaCellRefBox;
+        // Lane B targets whose add produced no base node (nothing-roll LEVC,
+        // failed add): skip in the actor scan or it respins every tick.
+        std::set<const LiveCellRefBase*> mVitaBareAfterAdd;
+        float vitaCellEdge2(CellStore& cell, const osg::Vec3f& pp);
+        // Every model an actor's construction will actually load beyond its
+        // base: x-variant mesh + kf, NPC parts/gear, LEVC candidates.
+        void vitaActorWarmPaths(const Ptr& ptr, std::vector<std::string>& out) const;
+        void vitaRemovePhysicsOnly(const Ptr& ptr, const DetourNavigator::UpdateGuard* guard);
+        void vitaRetirePump();
+        std::set<CellStore*, std::less<>> vitaProtectedCells() const;
         // Per-frame deferred-load budget. Each addObject call costs 0.4-3 ms;
         // 3 keeps worst-case at ~9 ms (≈30% of a 30 fps budget) instead of
         // the 24 ms burst that 8 produced. Slower load tail, smoother frames.
@@ -230,6 +264,8 @@ namespace MWWorld
 #endif
 
     public:
+        void vitaLoadPurge();
+
         Scene(MWWorld::World& world, MWRender::RenderingManager& rendering, MWPhysics::PhysicsSystem* physics,
             DetourNavigator::Navigator& navigator);
 
@@ -249,6 +285,9 @@ namespace MWWorld
         ///< Has the set of active cells changed, since the last frame?
 
         bool hasCellLoaded() const { return mCellLoaded; }
+        // True when the last grid change ran under a loading screen; a live
+        // streaming crossing must never block on completion work.
+        bool vitaLastCrossScreened() const { return mVitaLastCrossScreened; }
 
         void resetCellLoaded() { mCellLoaded = false; }
 
@@ -283,6 +322,8 @@ namespace MWWorld
 
         void updateObjectRotation(const Ptr& ptr, RotationOrder order);
         void updateObjectScale(const Ptr& ptr);
+
+        void vitaOnObjectTransformed(const Ptr& ptr);
 
         bool isCellActive(const CellStore& cell);
 

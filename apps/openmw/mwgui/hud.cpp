@@ -109,6 +109,20 @@ namespace MWGui
         mMainWidget->eventMouseButtonClick.clear();
     }
 
+    namespace
+    {
+        // MyGUI's setters don't compare-before-set; unconditional per-frame
+        // calls dirty widgets and force GUI vertex rebuilds.
+        bool setBarState(MyGUI::ProgressBar* bar, size_t range, size_t position)
+        {
+            if (bar->getProgressRange() == range && bar->getProgressPosition() == position)
+                return false;
+            bar->setProgressRange(range);
+            bar->setProgressPosition(position);
+            return true;
+        }
+    }
+
     void HUD::setValue(std::string_view id, const MWMechanics::DynamicStat<float>& value)
     {
         int current = static_cast<int>(value.getCurrent());
@@ -121,31 +135,35 @@ namespace MWGui
         std::string valStr = MyGUI::utility::toString(current) + " / " + MyGUI::utility::toString(modified);
         if (id == "HBar")
         {
-            mHealth->setProgressRange(std::max(0, modified));
-            mHealth->setProgressPosition(std::max(0, current));
-            getWidget(w, "HealthFrame");
-            w->setUserString("Caption_HealthDescription", "#{sHealthDesc}\n" + valStr);
+            if (setBarState(mHealth, std::max(0, modified), std::max(0, current)))
+            {
+                getWidget(w, "HealthFrame");
+                w->setUserString("Caption_HealthDescription", "#{sHealthDesc}\n" + valStr);
+            }
         }
         else if (id == "MBar")
         {
-            mMagicka->setProgressRange(std::max(0, modified));
-            mMagicka->setProgressPosition(std::max(0, current));
-            getWidget(w, "MagickaFrame");
-            w->setUserString("Caption_HealthDescription", "#{sMagDesc}\n" + valStr);
+            if (setBarState(mMagicka, std::max(0, modified), std::max(0, current)))
+            {
+                getWidget(w, "MagickaFrame");
+                w->setUserString("Caption_HealthDescription", "#{sMagDesc}\n" + valStr);
+            }
         }
         else if (id == "FBar")
         {
-            mStamina->setProgressRange(std::max(0, modified));
-            mStamina->setProgressPosition(std::max(0, current));
-            getWidget(w, "FatigueFrame");
-            w->setUserString("Caption_HealthDescription", "#{sFatDesc}\n" + valStr);
+            if (setBarState(mStamina, std::max(0, modified), std::max(0, current)))
+            {
+                getWidget(w, "FatigueFrame");
+                w->setUserString("Caption_HealthDescription", "#{sFatDesc}\n" + valStr);
+            }
         }
     }
 
     void HUD::setDrowningTimeLeft(float time, float maxTime)
     {
         size_t progress = static_cast<size_t>(time / maxTime * 200);
-        mDrowning->setProgressPosition(progress);
+        if (mDrowning->getProgressPosition() != progress)
+            mDrowning->setProgressPosition(progress);
 
         bool isDrowning = (progress == 0);
         if (isDrowning && !mIsDrowning) // Just started drowning
@@ -316,8 +334,12 @@ namespace MWGui
         }
 
         if (mDrowningBar->getVisible())
-            mDrowningBar->setPosition(
+        {
+            const MyGUI::IntPoint pos(
                 mMainWidget->getWidth() / 2 - mDrowningFrame->getWidth() / 2, mMainWidget->getTop());
+            if (mDrowningBar->getPosition() != pos)
+                mDrowningBar->setPosition(pos);
+        }
 
         if (mIsDrowning)
         {
@@ -342,8 +364,7 @@ namespace MWGui
             mWeaponSpellBox->setVisible(true);
         }
 
-        mSpellStatus->setProgressRange(100);
-        mSpellStatus->setProgressPosition(successChancePercent);
+        setBarState(mSpellStatus, 100, successChancePercent);
 
         mSpellBox->setUserString("ToolTipType", "Spell");
         mSpellBox->setUserString("Spell", spellId.serialize());
@@ -377,8 +398,7 @@ namespace MWGui
             mWeaponSpellBox->setVisible(true);
         }
 
-        mSpellStatus->setProgressRange(100);
-        mSpellStatus->setProgressPosition(chargePercent);
+        setBarState(mSpellStatus, 100, chargePercent);
 
         mSpellBox->setUserString("ToolTipType", "ItemPtr");
         mSpellBox->setUserData(MWWorld::Ptr(item));
@@ -401,8 +421,7 @@ namespace MWGui
         mWeapBox->setUserString("ToolTipType", "ItemPtr");
         mWeapBox->setUserData(MWWorld::Ptr(item));
 
-        mWeapStatus->setProgressRange(100);
-        mWeapStatus->setProgressPosition(durabilityPercent);
+        setBarState(mWeapStatus, 100, durabilityPercent);
 
         mWeapImage->setItem(item);
     }
@@ -418,8 +437,7 @@ namespace MWGui
             mWeaponSpellBox->setVisible(true);
         }
 
-        mSpellStatus->setProgressRange(100);
-        mSpellStatus->setProgressPosition(0);
+        setBarState(mSpellStatus, 100, 0);
         mSpellImage->setItem(MWWorld::Ptr());
         mSpellBox->clearUserStrings();
         mSpellBox->setUserData(MyGUI::Any::Null);
@@ -436,8 +454,7 @@ namespace MWGui
             mWeaponSpellBox->setVisible(true);
         }
 
-        mWeapStatus->setProgressRange(100);
-        mWeapStatus->setProgressPosition(0);
+        setBarState(mWeapStatus, 100, 0);
 
         MWBase::World* world = MWBase::Environment::get().getWorld();
         MWWorld::Ptr player = world->getPlayerPtr();
@@ -555,10 +572,9 @@ namespace MWGui
         if (enemy.isEmpty())
             return;
         MWMechanics::CreatureStats& stats = enemy.getClass().getCreatureStats(enemy);
-        mEnemyHealth->setProgressRange(100);
         // Health is usually cast to int before displaying. Actors die whenever they are < 1 health.
         // Therefore any value < 1 should show as an empty health bar. We do the same in statswindow :)
-        mEnemyHealth->setProgressPosition(static_cast<size_t>(stats.getHealth().getRatio() * 100));
+        setBarState(mEnemyHealth, 100, static_cast<size_t>(stats.getHealth().getRatio() * 100));
 
         static const float fNPCHealthBarFade = MWBase::Environment::get()
                                                    .getESMStore()
@@ -593,10 +609,8 @@ namespace MWGui
         mSpellName.clear();
         mWeaponSpellBox->setVisible(false);
 
-        mWeapStatus->setProgressRange(100);
-        mWeapStatus->setProgressPosition(0);
-        mSpellStatus->setProgressRange(100);
-        mSpellStatus->setProgressPosition(0);
+        setBarState(mWeapStatus, 100, 0);
+        setBarState(mSpellStatus, 100, 0);
 
         mWeapImage->setItem(MWWorld::Ptr());
         mSpellImage->setItem(MWWorld::Ptr());

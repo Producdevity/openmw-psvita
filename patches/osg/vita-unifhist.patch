@@ -1,0 +1,92 @@
+--- a/include/osg/Program
++++ b/include/osg/Program
+@@ -36,6 +36,7 @@
+ extern unsigned int osgapply_unif_n;
+ extern unsigned int osgapply_unif_up;
+ }
++void osgapply_unif_note(const osg::Uniform& u, const osg::Uniform* prev);
+ #endif
+ 
+ namespace osg {
+@@ -354,6 +355,7 @@
+                         if (slot.first.get() != &uniform || slot.second != uniform.getModifiedCount())
+                         {
+                             ++osgapply_unif_up;
++                            osgapply_unif_note(uniform, slot.first.get());
+                             uniform.apply(_extensions.get(), location);
+                             slot.first = &uniform;
+                             slot.second = uniform.getModifiedCount();
+--- a/src/osg/State.cpp
++++ b/src/osg/State.cpp
+@@ -41,6 +41,7 @@
+ 
+ #ifdef __vita__
+ #include <psp2/kernel/processmgr.h>
++#include <cstdio>
+ extern "C" {
+ uint32_t osgapply_calls = 0;
+ uint32_t osgapply_tex_us = 0;
+@@ -52,6 +53,63 @@
+ void vitaBreadcrumb(const char*);
+ uint32_t osgapply_push = 0;
+ uint32_t osgapply_pop = 0;
++uint32_t osgapply_unif_rup = 0;
++}
++
++// Upload histogram by nameID; rup = value-identical upload
++// (pointer differs) — the share uniform interning would erase.
++namespace
++{
++    struct VitaUnifStat
++    {
++        std::string name;
++        uint32_t up = 0;
++        uint32_t rup = 0;
++    };
++    std::vector<VitaUnifStat> sVitaUnifHist;
++}
++
++void osgapply_unif_note(const osg::Uniform& u, const osg::Uniform* prev)
++{
++    const bool redundant = prev && prev != &u && prev->getType() == u.getType()
++        && prev->getNumElements() == u.getNumElements() && u.compareData(*prev) == 0;
++    if (redundant)
++        ++osgapply_unif_rup;
++    const unsigned int id = u.getNameID();
++    if (id >= 160)
++        return;
++    if (sVitaUnifHist.size() <= id)
++        sVitaUnifHist.resize(id + 1);
++    VitaUnifStat& s = sVitaUnifHist[id];
++    if (s.name.empty() && !u.getName().empty())
++        s.name = u.getName();
++    ++s.up;
++    if (redundant)
++        ++s.rup;
++}
++
++extern "C" int osgapply_unif_hist_report(char* buf, unsigned int buflen)
++{
++    // Top 8 by uploads, then reset. Returns chars written (0 = quiet window).
++    int written = 0;
++    for (int rank = 0; rank < 8; ++rank)
++    {
++        VitaUnifStat* best = 0;
++        for (std::vector<VitaUnifStat>::iterator it = sVitaUnifHist.begin(); it != sVitaUnifHist.end(); ++it)
++            if (it->up > 0 && (!best || it->up > best->up))
++                best = &*it;
++        if (!best)
++            break;
++        int n = snprintf(buf + written, buflen - written, "%s%s=%u/%u", written ? " " : "",
++            best->name.empty() ? "?" : best->name.c_str(), (unsigned)best->up, (unsigned)best->rup);
++        best->up = best->rup = 0;
++        if (n < 0 || (unsigned)n >= buflen - written)
++            break;
++        written += n;
++    }
++    for (std::vector<VitaUnifStat>::iterator it = sVitaUnifHist.begin(); it != sVitaUnifHist.end(); ++it)
++        it->up = it->rup = 0;
++    return written;
+ }
+ #define OSGAP_T() sceKernelGetProcessTimeLow()
+ #define OSGAP_ADD(var, a, b) var += (b) - (a);

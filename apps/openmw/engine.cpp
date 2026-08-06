@@ -3,6 +3,8 @@
 #include <cerrno>
 #include <chrono>
 #include <future>
+#include <map>
+#include <mutex>
 #include <system_error>
 #include <thread>
 #ifdef __vita__
@@ -12,6 +14,7 @@
 #include <osgDB/ReaderWriter>
 #include <osgDB/Registry>
 #include <osgUtil/RenderBin>
+#include <osgUtil/UpdateVisitor>
 #include <osgViewer/Renderer>
 #include <osgViewer/ViewerEventHandlers>
 
@@ -24,10 +27,58 @@
 #include "vita/VitaInit.h"
 #include "vita/VitaMemAudit.h"
 #include "vita/VitaSimWorker.h"
+#include "vita/VitaGLWorker.h"
 #include <components/vita/VitaDialogueText.h>
 #include <components/vita/VitaEsmPrefetch.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/display.h>
+// Pin API; vitasdk's stock vitaGL.h lacks it.
+extern "C" void vglSetStaticVboRam(unsigned char enable);
+extern "C" uint32_t phase_evt_us, phase_upd_us, phase_focus_us, phase_lua_us, phase_pre_us, phase_pace_us;
+extern "C" uint32_t phase_fin_us, phase_inp_us, phase_unref_us, phase_stats_us;
+extern "C" uint32_t phase_snd_us, phase_lsync_us, phase_state_us;
+extern "C" uint32_t phase_world_us, phase_wm_us;
+extern "C" unsigned int vita_bin2_graphs, vita_bin2_leaves;
+extern "C" uint32_t gl_draw_us, gl_swap_us, gl_draw_max, gl_swap_max;
+
+namespace
+{
+    // Texture-sorted iteration over the merged-statics bin.
+    struct VitaStaticBinCallback : osgUtil::RenderBin::DrawCallback
+    {
+        static const osg::StateAttribute* texOf(const osgUtil::StateGraph* sg)
+        {
+            const osg::StateSet* ss = sg->getStateSet();
+            return ss ? ss->getTextureAttribute(0, osg::StateAttribute::TEXTURE) : nullptr;
+        }
+
+        void drawImplementation(
+            osgUtil::RenderBin* bin, osg::RenderInfo& renderInfo, osgUtil::RenderLeaf*& previous) override
+        {
+            osgUtil::RenderBin::StateGraphList& graphs = bin->getStateGraphList();
+            unsigned int leaves = 0;
+            for (const osgUtil::StateGraph* sg : graphs)
+                leaves += sg->_leaves.size();
+            vita_bin2_graphs += graphs.size();
+            vita_bin2_leaves += leaves;
+            // Texture-first order: adjacent deltas skip the rebind.
+            std::sort(graphs.begin(), graphs.end(),
+                [](const osgUtil::StateGraph* a, const osgUtil::StateGraph* b) {
+                    const osg::StateAttribute* ta = texOf(a);
+                    const osg::StateAttribute* tb = texOf(b);
+                    if (ta != tb)
+                        return ta < tb;
+                    return a->getStateSet() < b->getStateSet();
+                });
+            bin->drawImplementation(renderInfo, previous);
+        }
+    };
+}
 #include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
+// Fork replay switches (fetched-OSG RenderLeaf.cpp).
+extern int vita_draw_replay;
+extern int vita_state_replay;
 #else
 #define VITA_CRUMB(msg)
 #endif
@@ -195,18 +246,97 @@ namespace
     }
 }
 
+#ifdef __vita__
+namespace
+{
+    std::mutex sVitaScriptHistMutex;
+    std::map<ESM::RefId, uint32_t> sVitaScriptHist;
+}
+
+extern "C" int vita_script_hist_report(char* buf, unsigned int buflen)
+{
+    // Top 6 by time this window, then reset.
+    const std::lock_guard<std::mutex> lock(sVitaScriptHistMutex);
+    int written = 0;
+    for (int rank = 0; rank < 6; ++rank)
+    {
+        auto best = sVitaScriptHist.end();
+        for (auto it = sVitaScriptHist.begin(); it != sVitaScriptHist.end(); ++it)
+            if (it->second > 0 && (best == sVitaScriptHist.end() || it->second > best->second))
+                best = it;
+        if (best == sVitaScriptHist.end())
+            break;
+        int n = snprintf(buf + written, buflen - written, "%s%s=%ums", written ? " " : "",
+            best->first.toDebugString().c_str(), best->second / 1000);
+        best->second = 0;
+        if (n < 0 || (unsigned)n >= buflen - written)
+            break;
+        written += n;
+    }
+    sVitaScriptHist.clear();
+    return written;
+}
+#endif
+
 void OMW::Engine::executeLocalScripts()
 {
     MWWorld::LocalScripts& localScripts = mWorld->getLocalScripts();
 
     localScripts.startIteration();
     std::pair<ESM::RefId, MWWorld::Ptr> script;
+#ifdef __vita__
+    // Far-tier scheduling: scripted objects beyond kNearR tick every 4th
+    // frame with dt scaled 4x (thread-local, opcodes see correct elapsed).
+    static unsigned sScriptFrame = 0;
+    ++sScriptFrame;
+    constexpr float kNearR = 2048.f;
+    const osg::Vec3f playerPos = mWorld->getPlayerPtr().getRefData().getPosition().asVec3();
+#endif
     while (localScripts.getNext(script))
     {
+#ifdef __vita__
+        bool farTier = false;
+        if (script.second.isInCell())
+        {
+            const osg::Vec3f op = script.second.getRefData().getPosition().asVec3();
+            farTier = (op - playerPos).length2() > kNearR * kNearR;
+        }
+        if (farTier)
+        {
+            const unsigned phase = (unsigned)((uintptr_t)script.second.mRef >> 4);
+            if ((sScriptFrame & 3u) != (phase & 3u))
+                continue;
+        }
+        MWScript::InterpreterContext interpreterContext(&script.second.getRefData().getLocals(), script.second);
+        const osg::Timer* const stimer = osg::Timer::instance();
+        const osg::Timer_t st0 = stimer->tick();
+        if (farTier)
+            MWBase::Environment::sVitaDtScale = 4.f;
+        mScriptManager->run(script.first, interpreterContext);
+        MWBase::Environment::sVitaDtScale = 1.f;
+        const uint32_t sus = (uint32_t)stimer->delta_u(st0, stimer->tick());
+        {
+            const std::lock_guard<std::mutex> lock(sVitaScriptHistMutex);
+            sVitaScriptHist[script.first] += sus;
+        }
+#else
         MWScript::InterpreterContext interpreterContext(&script.second.getRefData().getLocals(), script.second);
         mScriptManager->run(script.first, interpreterContext);
+#endif
     }
 }
+
+#ifdef __vita__
+extern "C" {
+uint32_t vita_sim_script_us = 0, vita_sim_mech_us = 0, vita_sim_phys_us = 0;
+uint32_t vita_sim_gscript_us = 0;
+}
+#define VITA_SIM_T0() const osg::Timer_t simT0 = timer->tick();
+#define VITA_SIM_ADD(var) var += (uint32_t)timer->delta_u(simT0, timer->tick());
+#else
+#define VITA_SIM_T0()
+#define VITA_SIM_ADD(var)
+#endif
 
 void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, float frametime, bool paused)
 {
@@ -215,6 +345,7 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
 
         {
             ScopedProfile<UserStatsType::Script> profile(frameStart, frameNumber, *timer, *stats);
+            VITA_SIM_T0()
 
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
@@ -226,7 +357,15 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
                         executeLocalScripts();
 
                         // global scripts
+#ifdef __vita__
+                        {
+                            const osg::Timer_t gt0 = timer->tick();
+                            mScriptManager->getGlobalScripts().run();
+                            vita_sim_gscript_us += (uint32_t)timer->delta_u(gt0, timer->tick());
+                        }
+#else
                         mScriptManager->getGlobalScripts().run();
+#endif
                     }
 
                     mWorld->getWorldScene().markCellAsUnchanged();
@@ -252,11 +391,13 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
 #endif
                 }
             }
+            VITA_SIM_ADD(vita_sim_script_us)
         }
 
         // update mechanics
         {
             ScopedProfile<UserStatsType::Mechanics> profile(frameStart, frameNumber, *timer, *stats);
+            VITA_SIM_T0()
 
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
@@ -269,11 +410,13 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
                 if (!paused && player.getClass().getCreatureStats(player).isDead())
                     mStateManager->endGame();
             }
+            VITA_SIM_ADD(vita_sim_mech_us)
         }
 
         // update physics
         {
             ScopedProfile<UserStatsType::Physics> profile(frameStart, frameNumber, *timer, *stats);
+            VITA_SIM_T0()
 
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
@@ -282,13 +425,16 @@ void OMW::Engine::runSimPhases(osg::Timer_t frameStart, unsigned frameNumber, fl
                     mWorld->updatePhysics(frametime, paused, frameStart, frameNumber, *stats);
                 } catch (const std::exception& e) {
                     Vita::breadcrumb(("[PhysCrash] std::exception: " + std::string(e.what())).c_str());
+                    vitaLogFlushNow();
                 } catch (...) {
                     Vita::breadcrumb("[PhysCrash] non-std exception caught");
+                    vitaLogFlushNow();
                 }
 #else
                 mWorld->updatePhysics(frametime, paused, frameStart, frameNumber, *stats);
 #endif
             }
+            VITA_SIM_ADD(vita_sim_phys_us)
         }
 
 }
@@ -301,17 +447,32 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     mEnvironment.setFrameDuration(frametime);
 
+#ifdef __vita__
+    uint64_t vitaFrameT0 = 0;
+#endif
     try
     {
 #ifdef __vita__
+        phase_evt_us = phase_upd_us = phase_focus_us = phase_lua_us = phase_pre_us = 0;
+        phase_fin_us = phase_inp_us = phase_unref_us = phase_stats_us = 0;
+        phase_snd_us = phase_lsync_us = phase_state_us = 0;
+        phase_world_us = phase_wm_us = 0;
+        vitaFrameT0 = sceKernelGetProcessTimeWide();
         // Finish overlapped sim before touching game state.
         if (mSimWorker && mSimOverlap && mSimPrimed)
             mSimWorker->finish();
+        phase_fin_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaFrameT0);
 #endif
         // update input
         {
+#ifdef __vita__
+            const uint64_t inpT0 = sceKernelGetProcessTimeWide();
+#endif
             ScopedProfile<UserStatsType::Input> profile(frameStart, frameNumber, *timer, *stats);
             mInputManager->update(frametime, false);
+#ifdef __vita__
+            phase_inp_us = (uint32_t)(sceKernelGetProcessTimeWide() - inpT0);
+#endif
         }
 
         // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
@@ -329,22 +490,40 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             else
                 mSoundManager->resumePlayback();
 
+#ifdef __vita__
+            const uint64_t sndT0 = sceKernelGetProcessTimeWide();
+#endif
             // sound
             if (mUseSound)
                 mSoundManager->update(frametime);
+#ifdef __vita__
+            phase_snd_us = (uint32_t)(sceKernelGetProcessTimeWide() - sndT0);
+#endif
         }
 
         {
             ScopedProfile<UserStatsType::LuaSyncUpdate> profile(frameStart, frameNumber, *timer, *stats);
+#ifdef __vita__
+            const uint64_t lsT0 = sceKernelGetProcessTimeWide();
+#endif
             // Should be called after input manager update and before any change to the game world.
             // It applies to the game world queued changes from the previous frame.
             mLuaManager->synchronizedUpdate();
+#ifdef __vita__
+            phase_lsync_us = (uint32_t)(sceKernelGetProcessTimeWide() - lsT0);
+#endif
         }
 
         // update game state
         {
             ScopedProfile<UserStatsType::State> profile(frameStart, frameNumber, *timer, *stats);
+#ifdef __vita__
+            const uint64_t stT0 = sceKernelGetProcessTimeWide();
+#endif
             mStateManager->update(frametime);
+#ifdef __vita__
+            phase_state_us = (uint32_t)(sceKernelGetProcessTimeWide() - stT0);
+#endif
         }
 
         bool paused = mWorld->getTimeManager()->isPaused();
@@ -375,16 +554,28 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         {
             ScopedProfile<UserStatsType::World> profile(frameStart, frameNumber, *timer, *stats);
 
+#ifdef __vita__
+            const uint64_t wldT0 = sceKernelGetProcessTimeWide();
+#endif
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
                 mWorld->update(frametime, paused);
             }
+#ifdef __vita__
+            phase_world_us = (uint32_t)(sceKernelGetProcessTimeWide() - wldT0);
+#endif
         }
 
         // update GUI
         {
             ScopedProfile<UserStatsType::Gui> profile(frameStart, frameNumber, *timer, *stats);
+#ifdef __vita__
+            const uint64_t wmT0 = sceKernelGetProcessTimeWide();
+#endif
             mWindowManager->update(frametime);
+#ifdef __vita__
+            phase_wm_us = (uint32_t)(sceKernelGetProcessTimeWide() - wmT0);
+#endif
         }
     }
     catch (const std::exception& e)
@@ -397,8 +588,19 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     if (reportResource)
         stats->setAttribute(frameNumber, "UnrefQueue", static_cast<double>(mUnrefQueue->getSize()));
 
+#ifdef __vita__
+    {
+        const uint64_t unrefT0 = sceKernelGetProcessTimeWide();
+        mUnrefQueue->flush(*mWorkQueue);
+        phase_unref_us = (uint32_t)(sceKernelGetProcessTimeWide() - unrefT0);
+    }
+#else
     mUnrefQueue->flush(*mWorkQueue);
+#endif
 
+#ifdef __vita__
+    const uint64_t statsT0 = sceKernelGetProcessTimeWide();
+#endif
     if (reportResource)
     {
         stats->setAttribute(frameNumber, "FrameNumber", frameNumber);
@@ -414,11 +616,39 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
         stats->setAttribute(frameNumber, "StringRefId Count", static_cast<double>(ESM::StringRefId::totalCount()));
     }
+#ifdef __vita__
+    phase_stats_us = (uint32_t)(sceKernelGetProcessTimeWide() - statsT0);
+#endif
 
     mStereoManager->updateSettings(Settings::camera().mNearClip, Settings::camera().mViewingDistance);
 
+#ifdef __vita__
+    phase_pre_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaFrameT0);
+    uint64_t vitaPhaseT0 = sceKernelGetProcessTimeWide();
+#endif
     mViewer->eventTraversal();
+#ifdef __vita__
+    phase_evt_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
+    vitaPhaseT0 = sceKernelGetProcessTimeWide();
+    if (mUpdateOverlap && mSimWorker && mSimOverlap && mCullOverlap && mViewer->getSceneData())
+    {
+        // Hazard classes update on main; the rest on the worker pre-cull.
+        constexpr unsigned int kHazardMask = MWRender::Mask_Effect | MWRender::Mask_WeatherParticles
+            | MWRender::Mask_ParticleSystem | MWRender::Mask_Water | MWRender::Mask_SimpleWater | MWRender::Mask_Sky;
+        osgUtil::UpdateVisitor* uv = mViewer->getUpdateVisitor();
+        const unsigned int fullMask = uv->getTraversalMask();
+        uv->setTraversalMask(kHazardMask);
+        mViewer->updateTraversal();
+        uv->setTraversalMask(fullMask & ~kHazardMask);
+        mVitaWorkerUpdateMask = fullMask;
+        mVitaWorkerUpdatePending = true;
+    }
+    else
+        mViewer->updateTraversal();
+    phase_upd_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
+#else
     mViewer->updateTraversal();
+#endif
 
     // update focus object for GUI
     {
@@ -430,7 +660,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         if (s_focusAccum >= 0.1f)
         {
             s_focusAccum = 0.f;
+            vitaPhaseT0 = sceKernelGetProcessTimeWide();
             mWorld->updateFocusObject();
+            phase_focus_us = (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
         }
 #else
         mWorld->updateFocusObject();
@@ -438,7 +670,13 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     }
 
     // if there is a separate Lua thread, it starts the update now
+#ifdef __vita__
+    vitaPhaseT0 = sceKernelGetProcessTimeWide();
     mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
+    phase_lua_us += (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
+#else
+    mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
+#endif
 
 #ifdef __vita__
     const uint64_t renderStartUs = sceKernelGetProcessTimeWide();
@@ -455,6 +693,14 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         const bool havePrev = mCullPrimed;
         Vita::setDrawInFlight(true);
         mSimWorker->run([this, renderer, frameStart, nextFrame, nextDt, nextPaused] {
+            if (mVitaWorkerUpdatePending)
+            {
+                // Non-hazard update callbacks; must precede cull.
+                osgUtil::UpdateVisitor* uv = mViewer->getUpdateVisitor();
+                mViewer->getSceneData()->accept(*uv);
+                uv->setTraversalMask(mVitaWorkerUpdateMask);
+                mVitaWorkerUpdatePending = false;
+            }
             renderer->cull();
             runSimPhases(frameStart, nextFrame, nextDt, nextPaused);
         });
@@ -462,10 +708,77 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         mCullPrimed = true;
         if (havePrev)
         {
-            renderer->draw();
-            mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+            if (Vita::GLWorker* glw = Vita::getGLWorker())
+            {
+                osg::GraphicsContext* gc = mViewer->getCamera()->getGraphicsContext();
+                auto* icoProbe = mViewer->getIncrementalCompileOperation();
+                glw->run([renderer, gc, icoProbe] {
+                    const uint64_t t0 = sceKernelGetProcessTimeWide();
+                    // Spike anatomy: is a long draw compiling new GL objects
+                    // (ICO), or is it dispatch/vitaGL itself?
+                    const unsigned int icoSets
+                        = icoProbe ? (unsigned int)icoProbe->getToCompile().size() : 0u;
+                    const bool icoBefore = icoSets > 0;
+                    renderer->draw();
+                    const uint64_t t1 = sceKernelGetProcessTimeWide();
+                    gc->swapBuffers();
+                    const uint64_t t2 = sceKernelGetProcessTimeWide();
+                    if ((uint32_t)(t1 - t0) > 25000)
+                    {
+                        // Name what compiled: a budget can only be checked
+                        // BETWEEN objects, so one huge texture blows through it.
+                        unsigned tex = 0, drw = 0, prog = 0;
+                        unsigned biggestKB = 0;
+                        char biggest[48] = "";
+                        if (icoProbe)
+                            for (const auto& cs : icoProbe->getToCompile())
+                                for (const auto& cm : cs->_compileMap)
+                                    for (const auto& opIt : cm.second._compileOps)
+                                    {
+                                        if (auto* t = dynamic_cast<osgUtil::IncrementalCompileOperation::
+                                                    CompileTextureOp*>(opIt.get()))
+                                        {
+                                            ++tex;
+                                            if (osg::Image* im = t->_texture->getImage(0))
+                                            {
+                                                const unsigned kb = (unsigned)(im->getTotalSizeInBytes() / 1024);
+                                                if (kb > biggestKB)
+                                                {
+                                                    biggestKB = kb;
+                                                    snprintf(biggest, sizeof(biggest), "%s", im->getFileName().c_str());
+                                                }
+                                            }
+                                        }
+                                        else if (dynamic_cast<osgUtil::IncrementalCompileOperation::
+                                                     CompileProgramOp*>(opIt.get()))
+                                            ++prog;
+                                        else
+                                            ++drw;
+                                    }
+                        char db[224];
+                        snprintf(db, sizeof(db), "[DrawSpike] draw=%ums sets=%u tex=%u drw=%u prog=%u big=%uKB %s",
+                            (unsigned)((t1 - t0) / 1000), icoSets, tex, drw, prog, biggestKB, biggest);
+                        Vita::breadcrumb(db);
+                    }
+                    gl_draw_us += (uint32_t)(t1 - t0);
+                    gl_swap_us += (uint32_t)(t2 - t1);
+                    if ((uint32_t)(t1 - t0) > gl_draw_max)
+                        gl_draw_max = (uint32_t)(t1 - t0);
+                    if ((uint32_t)(t2 - t1) > gl_swap_max)
+                        gl_swap_max = (uint32_t)(t2 - t1);
+                    Vita::noteRenderTime(t2 - t0);
+                    Vita::setDrawInFlight(false);
+                });
+            }
+            else
+            {
+                renderer->draw();
+                mViewer->getCamera()->getGraphicsContext()->swapBuffers();
+                Vita::setDrawInFlight(false);
+            }
         }
-        Vita::setDrawInFlight(false);
+        else
+            Vita::setDrawInFlight(false);
     }
     else if (mSimWorker && mSimOverlap)
     {
@@ -490,12 +803,19 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     }
     else
         mViewer->renderingTraversals();
-    Vita::noteRenderTime(sceKernelGetProcessTimeWide() - renderStartUs);
+    if (!Vita::getGLWorker())
+        Vita::noteRenderTime(sceKernelGetProcessTimeWide() - renderStartUs);
 #else
     mViewer->renderingTraversals();
 #endif
 
+#ifdef __vita__
+    vitaPhaseT0 = sceKernelGetProcessTimeWide();
     mLuaWorker->finishUpdate(frameStart, frameNumber, *stats);
+    phase_lua_us += (uint32_t)(sceKernelGetProcessTimeWide() - vitaPhaseT0);
+#else
+    mLuaWorker->finishUpdate(frameStart, frameNumber, *stats);
+#endif
 
 #ifdef __vita__
     Vita::auditFrameStats(*mViewer);
@@ -588,6 +908,18 @@ OMW::Engine::~Engine()
     SDL_Quit();
 
     Log(Debug::Info) << "Quitting peacefully.";
+#ifdef __vita__
+    // Clean-exit marker; absent at boot = crashed.
+    {
+        SceUID fd = sceIoOpen("ux0:data/openmw/clean_exit", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+        if (fd >= 0)
+        {
+            sceIoWrite(fd, "ok", 2);
+            sceIoClose(fd);
+        }
+        vitaLogFlushNow();
+    }
+#endif
 }
 
 // Set data dir
@@ -1241,6 +1573,16 @@ void OMW::Engine::go()
     else
         osgUtil::RenderBin::setDefaultRenderBinSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
     // vitaGL is single-threaded; sim moves to a worker instead.
+    mUpdateOverlap = Settings::general().mVitaUpdateOverlap;
+    vita_draw_replay = Settings::general().mVitaDrawReplay ? 1 : 0;
+    vita_state_replay = Settings::general().mVitaStateReplay ? 1 : 0;
+    vglSetStaticVboRam(Settings::general().mVitaStaticVboRam ? 1 : 0);
+    if (Settings::general().mVitaStaticBin)
+    {
+        osg::ref_ptr<osgUtil::RenderBin> proto = new osgUtil::RenderBin(osgUtil::RenderBin::SORT_BY_STATE);
+        proto->setDrawCallback(new VitaStaticBinCallback);
+        osgUtil::RenderBin::addRenderBinPrototype("VitaStaticBin", proto);
+    }
     if (Settings::general().mVitaSimThread)
     {
         mSimWorker = std::make_unique<Vita::SimWorker>();
@@ -1256,7 +1598,10 @@ void OMW::Engine::go()
             if (!Vita::isSimThread())
                 mSimWorker->finish();
             auto* renderer = static_cast<osgViewer::Renderer*>(mViewer->getCamera()->getRenderer());
-            renderer->draw();
+            if (Vita::GLWorker* glw = Vita::getGLWorker())
+                glw->call([renderer] { renderer->draw(); });
+            else
+                renderer->draw();
             mCullPrimed = false;
         });
     }
@@ -1339,24 +1684,6 @@ void OMW::Engine::go()
     MWWorld::DateTimeManager& timeManager = *mWorld->getTimeManager();
     Misc::FrameRateLimiter frameRateLimiter = Misc::makeFrameRateLimiter(mEnvironment.getFrameRateLimit());
     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
-#ifdef __vita__
-    constexpr float kDynFogMin = 1500.f;
-    constexpr float kDynFogMinInterior = 700.f;
-    constexpr float kDynFogMax = 5000.f;
-    constexpr float kDynFogUserMoveThreshold = 300.f;
-    constexpr float kDynFogDeadband = 0.5f;
-    constexpr float kDynFogEmaAlpha = 0.15f;
-    constexpr float kDynFogLerpHz = 4.0f;
-    constexpr auto kDynFogAdjustInterval = std::chrono::milliseconds(250);
-    float vitaDynFogTarget = Settings::camera().mViewingDistance;
-    float vitaDynFogLastWritten = Settings::camera().mViewingDistance;
-    bool vitaDynFogWasOn = false;
-    // Seed EMA with the configured target period so the first tick isn't biased.
-    float vitaDynFogEmaDt = 1.0f / std::max(15.f, Settings::camera().mVitaDynFogTargetFps.get());
-    auto vitaDynFogLastAdjust = std::chrono::steady_clock::now();
-    bool vitaDynFogWasRunning = false;
-    bool vitaDynFogWasInInterior = false;
-#endif
     while (!mViewer->done() && !mStateManager->hasQuitRequest())
     {
         const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
@@ -1401,152 +1728,38 @@ void OMW::Engine::go()
         }
 
 #ifdef __vita__
+        // Vblank-locked pacing: kernel sleeps overshoot ~8ms.
         {
-            double frameDt = std::chrono::duration<double>(
-                frameRateLimiter.getLastFrameDuration()).count();
-            // Skip cell-load / pause spikes so they don't poison the fps EMA.
-            if (frameDt > 0.001 && frameDt < 0.2)
-                vitaDynFogEmaDt = (1.0f - kDynFogEmaAlpha) * vitaDynFogEmaDt
-                    + kDynFogEmaAlpha * static_cast<float>(frameDt);
-
-            bool dynFogOn = Settings::camera().mVitaDynamicFog;
-            const float dynFogTargetFps
-                = std::max(15.f, Settings::camera().mVitaDynFogTargetFps.get());
-            auto pickFloor = [&]() -> std::pair<float, float> {
-                struct Tier { float fps, ext, intr; };
-                static constexpr Tier kTable[] = {
-                    { 15.f, 2000.f, 1000.f },
-                    { 18.f, 1700.f,  850.f },
-                    { 20.f, 1500.f,  700.f },
-                };
-                const Tier* pick = &kTable[2]; // default "20 (Balanced)"
-                float best = std::abs(dynFogTargetFps - kTable[2].fps);
-                for (const Tier& t : kTable)
-                {
-                    float d = std::abs(dynFogTargetFps - t.fps);
-                    if (d < best) { best = d; pick = &t; }
-                }
-                return { pick->ext, pick->intr };
-            };
-            const auto [floorExt, floorInt] = pickFloor();
-            const bool isRunning = (mStateManager->getState() == MWBase::StateManager::State_Running);
-            bool isInInterior = false;
-            float effectiveMin = floorExt;
-            if (isRunning)
+            static unsigned int s_lastVcount = 0;
+            const float fpsLimit = mEnvironment.getFrameRateLimit();
+            if (fpsLimit > 0.f)
             {
-                MWWorld::Ptr player = mWorld->getPlayerPtr();
-                MWWorld::CellStore* cell = player.getCell();
-                if (cell && !cell->isExterior())
-                {
-                    isInInterior = true;
-                    effectiveMin = floorInt;
-                }
-            }
-
-            // Snap fog to the floor so it always *grows* from tight toward the
-            const bool dynFogJustEnabled = dynFogOn && !vitaDynFogWasOn;
-            const bool justLoadedGame = dynFogOn && isRunning && !vitaDynFogWasRunning;
-            const bool enteredInterior = dynFogOn && isInInterior && !vitaDynFogWasInInterior;
-            if (dynFogJustEnabled || justLoadedGame || enteredInterior)
-            {
-                vitaDynFogTarget = effectiveMin;
-                vitaDynFogLastWritten = effectiveMin;
-                Settings::camera().mViewingDistance.set(effectiveMin);
-                static const Settings::CategorySettingVector kFilter{ { "Camera", "viewing distance" } };
-                const auto changes = Settings::Manager::getPendingChanges(kFilter);
-                if (!changes.empty())
-                {
-                    mWorld->processChangedSettings(changes);
-                    Settings::Manager::resetPendingChanges(kFilter);
-                }
-                vitaDynFogLastAdjust = std::chrono::steady_clock::now();
-            }
-            vitaDynFogWasOn = dynFogOn;
-            vitaDynFogWasRunning = isRunning;
-            vitaDynFogWasInInterior = isInInterior;
-
-            if (dynFogOn)
-            {
-                float current = Settings::camera().mViewingDistance;
-                // Compare to what we last wrote, not to target — the lerp lags target naturally.
-                if (std::abs(current - vitaDynFogLastWritten) > kDynFogUserMoveThreshold)
-                {
-                    Settings::camera().mVitaDynamicFog.set(false);
-                    vitaDynFogWasOn = false;
-                }
+                const unsigned int vblanksPerFrame
+                    = std::max(1u, (unsigned int)(60.f / fpsLimit + 0.5f));
+                const uint64_t paceT0 = sceKernelGetProcessTimeWide();
+                const unsigned int vc = sceDisplayGetVcount();
+                if (s_lastVcount == 0 || vc >= s_lastVcount + vblanksPerFrame)
+                    s_lastVcount = vc;
                 else
                 {
-                    // Resolve aggression profile each tick (cheap, allows live UI changes)
-                    const std::string& aggStr = Settings::camera().mVitaDynFogAggression.get();
-                    float shrinkCoef = 50.f, shrinkMaxAbs = 500.f, shrinkLerpHz = 6.f; // aggressive default
-                    if (aggStr == "normal")
-                    {
-                        shrinkCoef = 30.f; shrinkMaxAbs = 300.f; shrinkLerpHz = 4.f;
-                    }
-                    else if (aggStr == "very aggressive")
-                    {
-                        shrinkCoef = 80.f; shrinkMaxAbs = 800.f; shrinkLerpHz = 8.f;
-                    }
-
-                    auto now = std::chrono::steady_clock::now();
-                    if (now - vitaDynFogLastAdjust >= kDynFogAdjustInterval)
-                    {
-                        vitaDynFogLastAdjust = now;
-                        float fps = 1.0f / vitaDynFogEmaDt;
-                        float fpsGap = fps - dynFogTargetFps;
-                        float step = 0.f;
-                        if (fpsGap < -kDynFogDeadband)
-                        {
-                            // Two-tier shrink: catastrophic snap is fixed (always
-                            // saves you), proportional response scales with the
-                            // aggression setting.
-                            if (fps < 15.f)
-                                step = -2000.f;
-                            else
-                                step = std::clamp(fpsGap * shrinkCoef, -shrinkMaxAbs, -20.f);
-                        }
-                        else if (fpsGap > kDynFogDeadband)
-                            step = std::clamp(fpsGap * 20.f, 20.f, 150.f);
-                        const float userMax = std::clamp(
-                            Settings::camera().mVitaDynFogMaxDistance.get(), effectiveMin, kDynFogMax);
-                        vitaDynFogTarget
-                            = std::clamp(vitaDynFogTarget + step, effectiveMin, userMax);
-                    }
-
-
-                    const float targetDelta = vitaDynFogTarget - current;
-                    float lerpHz = kDynFogLerpHz;
-                    if (targetDelta < -1200.f)
-                        lerpHz = 16.f;
-                    else if (targetDelta < 0.f && targetDelta > -1200.f)
-                        lerpHz = shrinkLerpHz; // proportional shrink uses aggression-tuned rate
-                    float lerpT = 1.0f - std::exp(-lerpHz * static_cast<float>(frameDt));
-                    float newDist = current + targetDelta * lerpT;
-                    if (std::abs(newDist - current) > 0.5f)
-                    {
-                        Settings::camera().mViewingDistance.set(newDist);
-                        vitaDynFogLastWritten = newDist;
-                        static const Settings::CategorySettingVector kFilter{
-                            { "Camera", "viewing distance" } };
-                        const auto changes
-                            = Settings::Manager::getPendingChanges(kFilter);
-                        if (!changes.empty())
-                        {
-                            mWorld->processChangedSettings(changes);
-                            Settings::Manager::resetPendingChanges(kFilter);
-                        }
-                    }
+                    while (sceDisplayGetVcount() < s_lastVcount + vblanksPerFrame)
+                        sceDisplayWaitVblankStart();
+                    s_lastVcount += vblanksPerFrame;
                 }
+                phase_pace_us = (uint32_t)(sceKernelGetProcessTimeWide() - paceT0);
             }
         }
-#endif
+        frameRateLimiter.limit(); // dt bookkeeping only
+#else
         frameRateLimiter.limit();
+#endif
     }
 
     mLuaWorker->join();
 #ifdef __vita__
     if (mSimWorker)
         mSimWorker->join();
+    Vita::destroyGLWorker();
 #endif
 
     // Save user settings

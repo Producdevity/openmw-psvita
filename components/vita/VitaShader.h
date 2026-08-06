@@ -27,6 +27,11 @@ namespace Vita
     /// Called from ShaderVisitor for each geometry/drawable node.
     void applyVitaShader(osg::Node& node, int colorMode, float alphaRef, const osg::Material* mat);
 
+    /// Canonicalize by (name, type, value) so identical uniforms share one
+    /// instance and the per-program apply memo can skip re-uploads.
+    /// Interned uniforms must never be mutated in place.
+    osg::Uniform* internUniform(osg::Uniform* fresh);
+
     /// Add lighting/fog/camera uniforms to the scene root StateSet.
     /// These are updated per-frame by RenderingManager.
     void setupSceneUniforms(osg::StateSet* sceneRootSS);

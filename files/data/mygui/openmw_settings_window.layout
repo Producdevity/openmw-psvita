@@ -795,47 +795,23 @@
             </Widget>
             <Widget type="TabItem">
                 <Property key="Caption" value=" Vita "/>
-                <!-- Dynamic Fog: auto-adjusts view distance to maintain FPS -->
-                <Widget type="Widget" position="4 4 352 22" align="Left Top HStretch">
-                    <Widget type="AutoSizedButton" skin="MW_Button" position="0 0 50 22" align="Left Top" name="VitaDynamicFogButton">
-                        <UserString key="SettingCategory" value="Camera"/>
-                        <UserString key="SettingName" value="vita dynamic fog"/>
+                <!-- Streamed cell crossings -->
+                <Widget type="Widget" position="4 4 352 24" align="Left Top HStretch">
+                    <Widget type="AutoSizedButton" skin="MW_Button" position="0 0 50 22" align="Left Top" name="VitaSeamlessButton">
+                        <UserString key="SettingCategory" value="General"/>
+                        <UserString key="SettingName" value="vita seamless crossing"/>
                         <UserString key="SettingType" value="CheckButton"/>
                     </Widget>
-                    <Widget type="TextBox" skin="NormalText" position="56 3 296 18" align="Left Top">
-                        <Property key="Caption" value="Dynamic Fog (Auto FPS)"/>
-                    </Widget>
-                </Widget>
-                <!-- Dynamic Fog Target FPS: the controller shrinks view distance below target and grows above -->
-                <Widget type="Widget" position="4 30 352 32" align="Left Top HStretch" name="VitaDynFogTargetFpsRow">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top">
-                        <Property key="Caption" value="Dynamic Fog Target FPS"/>
-                    </Widget>
-                    <Widget type="ComboBox" skin="MW_ComboBox" position="0 16 200 24" align="Left Top" name="VitaDynFogTargetFpsList">
-                        <Property key="AddItem" value="15 (Max Distance)"/>
-                        <Property key="AddItem" value="18 (Long Distance)"/>
-                        <Property key="AddItem" value="20 (Balanced)"/>
-                        <Property key="AddItem" value="25 (Smooth)"/>
-                        <Property key="AddItem" value="30 (Fluid)"/>
-                    </Widget>
-                </Widget>
-                <!-- Dynamic Fog Aggression: how hard the controller shrinks fog when fps lags target -->
-                <Widget type="Widget" position="4 66 352 32" align="Left Top HStretch" name="VitaDynFogAggressionRow">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top">
-                        <Property key="Caption" value="Dynamic Fog Aggression"/>
-                    </Widget>
-                    <Widget type="ComboBox" skin="MW_ComboBox" position="0 16 200 24" align="Left Top" name="VitaDynFogAggressionList">
-                        <Property key="AddItem" value="Normal"/>
-                        <Property key="AddItem" value="Aggressive"/>
-                        <Property key="AddItem" value="Very Aggressive"/>
+                    <Widget type="TextBox" skin="NormalText" position="56 2 296 20" align="Left Top">
+                        <Property key="Caption" value="Streamed Cell Crossings"/>
                     </Widget>
                 </Widget>
                 <!-- View Distance -->
-                <Widget type="Widget" position="4 102 352 32" align="Left Top HStretch" name="VitaViewDistRow">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top" name="VitaViewDistText">
+                <Widget type="Widget" position="4 32 352 36" align="Left Top HStretch" name="VitaViewDistRow">
+                    <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top" name="VitaViewDistText">
                         <Property key="Caption" value="View Distance"/>
                     </Widget>
-                    <Widget type="ScrollBar" skin="MW_HScroll" position="0 16 352 14" align="Left Top HStretch" name="VitaViewDistSlider">
+                    <Widget type="ScrollBar" skin="MW_HScroll" position="0 22 352 14" align="Left Top HStretch" name="VitaViewDistSlider">
                         <Property key="Range" value="4501"/>
                         <Property key="Page" value="100"/>
                         <UserString key="SettingType" value="Slider"/>
@@ -849,11 +825,11 @@
                     </Widget>
                 </Widget>
                 <!-- Field of View -->
-                <Widget type="Widget" position="4 138 352 32" align="Left Top HStretch">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top" name="VitaFovText">
+                <Widget type="Widget" position="4 72 352 36" align="Left Top HStretch">
+                    <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top" name="VitaFovText">
                         <Property key="Caption" value="Field of View"/>
                     </Widget>
-                    <Widget type="ScrollBar" skin="MW_HScroll" position="0 16 352 14" align="Left Top HStretch">
+                    <Widget type="ScrollBar" skin="MW_HScroll" position="0 22 352 14" align="Left Top HStretch">
                         <Property key="Range" value="61"/>
                         <Property key="Page" value="1"/>
                         <UserString key="SettingType" value="Slider"/>
@@ -867,11 +843,11 @@
                     </Widget>
                 </Widget>
                 <!-- Font Size -->
-                <Widget type="Widget" position="4 174 352 32" align="Left Top HStretch">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top" name="VitaFontText">
+                <Widget type="Widget" position="4 112 352 36" align="Left Top HStretch">
+                    <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top" name="VitaFontText">
                         <Property key="Caption" value="Font Size"/>
                     </Widget>
-                    <Widget type="ScrollBar" skin="MW_HScroll" position="0 16 352 14" align="Left Top HStretch">
+                    <Widget type="ScrollBar" skin="MW_HScroll" position="0 22 352 14" align="Left Top HStretch">
                         <Property key="Range" value="21"/>
                         <Property key="Page" value="1"/>
                         <UserString key="SettingType" value="Slider"/>
@@ -884,33 +860,23 @@
                         <UserString key="SettingLabelCaption" value="VitaFontValue"/>
                     </Widget>
                 </Widget>
-                <!-- Preload Cell Cache -->
-                <Widget type="Widget" position="4 210 352 32" align="Left Top HStretch" name="VitaCellCacheRow">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top">
-                        <Property key="Caption" value="Preload Cell Cache"/>
-                    </Widget>
-                    <Widget type="ComboBox" skin="MW_ComboBox" position="0 16 200 24" align="Left Top" name="VitaCellCacheList">
-                        <Property key="AddItem" value="1 (Default)"/>
-                        <Property key="AddItem" value="2 (More Cells)"/>
-                    </Widget>
-                </Widget>
                 <!-- Render Resolution (restart) -->
-                <Widget type="Widget" position="4 246 352 32" align="Left Top HStretch" name="VitaResolutionRow">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top">
+                <Widget type="Widget" position="4 152 352 46" align="Left Top HStretch" name="VitaResolutionRow">
+                    <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top">
                         <Property key="Caption" value="Render Resolution (restart)"/>
                     </Widget>
-                    <Widget type="ComboBox" skin="MW_ComboBox" position="0 16 200 24" align="Left Top" name="VitaResolutionList">
+                    <Widget type="ComboBox" skin="MW_ComboBox" position="0 20 200 26" align="Left Top" name="VitaResolutionList">
                         <Property key="AddItem" value="480x272"/>
                         <Property key="AddItem" value="512x288"/>
                         <Property key="AddItem" value="640x368"/>
                     </Widget>
                 </Widget>
                 <!-- Texture Detail (restart) -->
-                <Widget type="Widget" position="4 282 352 32" align="Left Top HStretch" name="VitaTextureDetailRow">
-                    <Widget type="TextBox" skin="NormalText" position="0 0 352 16" align="Left Top">
+                <Widget type="Widget" position="4 202 352 46" align="Left Top HStretch" name="VitaTextureDetailRow">
+                    <Widget type="TextBox" skin="NormalText" position="0 0 352 20" align="Left Top">
                         <Property key="Caption" value="Texture Detail (restart)"/>
                     </Widget>
-                    <Widget type="ComboBox" skin="MW_ComboBox" position="0 16 200 24" align="Left Top" name="VitaTextureDetailList">
+                    <Widget type="ComboBox" skin="MW_ComboBox" position="0 20 200 26" align="Left Top" name="VitaTextureDetailList">
                         <Property key="AddItem" value="Performance (64 / 512)"/>
                         <Property key="AddItem" value="Balanced (128 / 768)"/>
                         <Property key="AddItem" value="High (256 / 1024)"/>
@@ -918,7 +884,7 @@
                     </Widget>
                 </Widget>
                 <!-- Hint: texture filtering lives on the Video tab to avoid duplicate UI. -->
-                <Widget type="TextBox" skin="SandText" position="4 322 352 16" align="Left Top HStretch">
+                <Widget type="TextBox" skin="SandText" position="4 252 352 20" align="Left Top HStretch">
                     <Property key="Caption" value="Texture filtering: see the Video tab."/>
                 </Widget>
             </Widget>

@@ -9,6 +9,11 @@
 
 #include "charactermanager.hpp"
 
+namespace ESM
+{
+    class ESMReader;
+}
+
 namespace MWState
 {
     class StateManager : public MWBase::StateManager
@@ -83,6 +88,15 @@ namespace MWState
         /// Otherwise, a new Character will be created.
 
         void loadGame(const Character* character, const std::filesystem::path& filepath) override;
+
+            void loadGameFromReader(
+                const Character* character, const std::filesystem::path& filepath, ESM::ESMReader& reader);
+#ifdef __vita__
+            /// Reload the world from a RAM buffer — no slot, no file. Used to
+            /// switch the streaming architecture without a restart.
+            void loadGameFromMemory(std::string&& data) override;
+            void saveGameToMemory(std::string& out) override;
+#endif
         ///< Load a saved game file belonging to the given character.
 
         Character* getCurrentCharacter() override;

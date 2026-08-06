@@ -49,8 +49,79 @@
 #include "rotatecontroller.hpp"
 #include "vismask.hpp"
 
+#ifdef __vita__
+#include <osg/LightSource>
+#include <osgParticle/ParticleProcessor>
+#include <osgParticle/ParticleSystem>
+#include <chrono>
+#include <components/sceneutil/attach.hpp>
+extern "C" void vitaBreadcrumb(const char*);
+#endif
+
+#ifdef __vita__
+namespace MWRender
+{
+    extern thread_local uint32_t gVitaPartTemplateUs; // defined in actoranimation.cpp
+}
+#endif
+
 namespace
 {
+#ifdef __vita__
+    // A single unique NPC still costs 0.5-0.7s inside the render add even with
+    // the per-part rig cache live. Split the span before optimising it: is the
+    // time in attach (cache misses) or elsewhere in updateParts?
+    thread_local uint32_t sPartAttachUs = 0;
+    thread_local int sPartCount = 0;
+
+    struct VitaCompositeCrumb
+    {
+        std::string mId;
+        std::chrono::steady_clock::time_point mT0;
+        unsigned mH0 = 0, mM0 = 0;
+        uint32_t mOuterUs = 0;
+        int mOuterCount = 0;
+        uint32_t mOuterTmplUs = 0;
+
+        explicit VitaCompositeCrumb(std::string id)
+            : mId(std::move(id))
+            , mT0(std::chrono::steady_clock::now())
+            , mOuterUs(sPartAttachUs)
+            , mOuterCount(sPartCount)
+            , mOuterTmplUs(MWRender::gVitaPartTemplateUs)
+        {
+            unsigned entries = 0;
+            SceneUtil::getRigCacheStats(mH0, mM0, entries);
+            sPartAttachUs = 0;
+            sPartCount = 0;
+            MWRender::gVitaPartTemplateUs = 0;
+        }
+
+        ~VitaCompositeCrumb()
+        {
+            const int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - mT0)
+                               .count();
+            const uint32_t attachUs = sPartAttachUs;
+            const int parts = sPartCount;
+            const uint32_t tmplUs = MWRender::gVitaPartTemplateUs;
+            // rebuild() re-enters updateParts; restore the outer tally so a
+            // nested build does not zero its parent's numbers.
+            sPartAttachUs = mOuterUs + attachUs;
+            sPartCount = mOuterCount + parts;
+            MWRender::gVitaPartTemplateUs = mOuterTmplUs + tmplUs;
+            if (ms < 40)
+                return;
+            unsigned h = 0, m = 0, entries = 0;
+            SceneUtil::getRigCacheStats(h, m, entries);
+            char buf[192];
+            snprintf(buf, sizeof(buf), "[Composite] %s %dms parts=%d attach=%ums tmpl=%ums rig=%ums hit=%u miss=%u",
+                mId.c_str(), ms, parts, attachUs / 1000, tmplUs / 1000,
+                attachUs > tmplUs ? (attachUs - tmplUs) / 1000 : 0, h - mH0, m - mM0);
+            Vita::breadcrumb(buf);
+        }
+    };
+#endif
 
     std::string getVampireHead(const ESM::RefId& race, bool female)
     {
@@ -563,8 +634,97 @@ namespace MWRender
         return mesh;
     }
 
+#ifdef __vita__
+    namespace
+    {
+        // Counts bakeable gear leaves; rejects animated subtrees.
+        struct CompositeCensus : osg::NodeVisitor
+        {
+            std::vector<osg::StateSet*> mStates;
+            bool mViable = true;
+
+            CompositeCensus()
+                : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+            {
+            }
+
+            void apply(osg::Node& node) override
+            {
+                if (!mViable || node.getUpdateCallback() || dynamic_cast<osg::LightSource*>(&node)
+                    || dynamic_cast<osgParticle::ParticleProcessor*>(&node))
+                {
+                    mViable = false;
+                    return;
+                }
+                traverse(node);
+            }
+
+            void apply(osg::Drawable& drawable) override
+            {
+                if (!mViable)
+                    return;
+                osg::Geometry* geom = drawable.asGeometry();
+                if (drawable.getUpdateCallback() || dynamic_cast<osgParticle::ParticleSystem*>(&drawable) || !geom
+                    || strcmp(geom->className(), "Geometry") != 0)
+                {
+                    mViable = false;
+                    return;
+                }
+                osg::StateSet* ss = geom->getStateSet();
+                for (int p = (int)getNodePath().size() - 1; p >= 0 && !ss; --p)
+                    ss = getNodePath()[p]->getStateSet();
+                mStates.push_back(ss);
+            }
+        };
+    }
+
+    void NpcAnimation::logCompositeCensus()
+    {
+        int partsSeen = 0, partsViable = 0, pieceCount = 0;
+        std::vector<osg::StateSet*> groups;
+        for (int type = 0; type < ESM::PRT_Count; ++type)
+        {
+            if (!mObjectParts[type] || type == ESM::PRT_Head || type == ESM::PRT_Hair || type == ESM::PRT_Weapon
+                || type == ESM::PRT_Shield)
+                continue;
+            ++partsSeen;
+            osg::Node* node = mObjectParts[type]->getNode().get();
+            if (!node || node->getNumParents() == 0)
+                continue;
+            osg::MatrixTransform* bone = dynamic_cast<osg::MatrixTransform*>(node->getParent(0));
+            if (!bone || bone->getName().empty() || bone->getName().find("Left") != std::string::npos)
+                continue;
+            CompositeCensus cc;
+            node->accept(cc);
+            if (!cc.mViable || cc.mStates.empty())
+                continue;
+            ++partsViable;
+            for (osg::StateSet* ss : cc.mStates)
+            {
+                ++pieceCount;
+                bool found = false;
+                for (osg::StateSet* g : groups)
+                    if (g == ss || (g && ss && g->compare(*ss, true) == 0))
+                    {
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    groups.push_back(ss);
+            }
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[Composite] parts=%d/%d pieces=%d groups=%d census", partsViable, partsSeen,
+            pieceCount, (int)groups.size());
+        vitaBreadcrumb(buf);
+    }
+#endif
+
     void NpcAnimation::updateParts()
     {
+#ifdef __vita__
+        VitaCompositeCrumb compositeCrumb(mPtr.getCellRef().getRefId().toDebugString());
+#endif
         if (!mObjectRoot.get())
             return;
 
@@ -689,7 +849,16 @@ namespace MWRender
     PartHolderPtr NpcAnimation::insertBoundedPart(VFS::Path::NormalizedView model, std::string_view bonename,
         std::string_view bonefilter, bool enchantedGlow, osg::Vec4f* glowColor, bool isLight)
     {
+#ifdef __vita__
+        const auto attach0 = std::chrono::steady_clock::now();
+#endif
         osg::ref_ptr<osg::Node> attached = attach(model, bonename, bonefilter, isLight);
+#ifdef __vita__
+        sPartAttachUs += (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - attach0)
+                             .count();
+        ++sPartCount;
+#endif
         if (enchantedGlow)
             mGlowUpdater = SceneUtil::addEnchantedGlow(attached, mResourceSystem, *glowColor);
 

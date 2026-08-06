@@ -30,6 +30,11 @@
 
 #include "itemmodel.hpp"
 
+#ifdef __vita__
+#include "../vita/VitaInit.h"
+#include <chrono>
+#endif
+
 namespace MWGui
 {
     ToolTips::ToolTips()

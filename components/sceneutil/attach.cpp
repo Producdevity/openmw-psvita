@@ -16,6 +16,14 @@
 
 #include "visitor.hpp"
 
+#ifdef __vita__
+#include <components/sceneutil/clone.hpp>
+
+#include <map>
+#include <string>
+#include <utility>
+#endif
+
 namespace SceneUtil
 {
 
@@ -111,16 +119,86 @@ namespace SceneUtil
         }
     }
 
+#ifdef __vita__
+    namespace
+    {
+        // The filtered rig copy is the actor-assembly cost center (~30-100ms
+        // per skinned part). Cache the pristine product per (template,
+        // filter); every consumer gets a rig-aware clone. Dedup is automatic
+        // across all actors sharing a part; no invalidation exists because
+        // entries derive only from immutable templates.
+        struct RigCacheEntry
+        {
+            osg::ref_ptr<osg::Group> master;
+            osg::ref_ptr<const osg::Node> tmpl; // pins template pointer identity
+            unsigned stamp = 0;
+        };
+        std::map<std::pair<const osg::Node*, std::string>, RigCacheEntry> sRigCache;
+        unsigned sRigStamp = 0;
+        unsigned sRigHits = 0;
+        unsigned sRigMisses = 0;
+    }
+
+    void getRigCacheStats(unsigned& hits, unsigned& misses, unsigned& entries)
+    {
+        hits = sRigHits;
+        misses = sRigMisses;
+        entries = (unsigned)sRigCache.size();
+    }
+
+    void clearRigCache()
+    {
+        sRigCache.clear();
+    }
+#endif
+
     osg::ref_ptr<osg::Node> attach(osg::ref_ptr<const osg::Node> toAttach, osg::Node* master, std::string_view filter,
         osg::Group* attachNode, Resource::SceneManager* sceneManager, const osg::Quat* attitude)
     {
         if (dynamic_cast<const SceneUtil::Skeleton*>(toAttach.get()))
         {
+#ifdef __vita__
+            osg::ref_ptr<osg::Group> handle;
+            const auto key = std::make_pair(toAttach.get(), std::string(filter));
+            auto rit = sRigCache.find(key);
+            if (rit != sRigCache.end())
+            {
+                ++sRigHits;
+                rit->second.stamp = ++sRigStamp;
+                SceneUtil::CopyOp copyop;
+                handle = static_cast<osg::Group*>(rit->second.master->clone(copyop));
+            }
+            else
+            {
+                ++sRigMisses;
+                osg::ref_ptr<osg::Group> rigMaster = new osg::Group;
+                CopyRigVisitor copyVisitor(rigMaster, filter);
+                const_cast<osg::Node*>(toAttach.get())->accept(copyVisitor);
+                copyVisitor.doCopy(sceneManager);
+                constexpr std::size_t kMaxRigCache = 96;
+                if (sRigCache.size() >= kMaxRigCache)
+                {
+                    auto oldest = sRigCache.begin();
+                    for (auto o = sRigCache.begin(); o != sRigCache.end(); ++o)
+                        if (o->second.stamp < oldest->second.stamp)
+                            oldest = o;
+                    sRigCache.erase(oldest);
+                }
+                RigCacheEntry entry;
+                entry.master = rigMaster;
+                entry.tmpl = toAttach;
+                entry.stamp = ++sRigStamp;
+                sRigCache.emplace(key, std::move(entry));
+                SceneUtil::CopyOp copyop;
+                handle = static_cast<osg::Group*>(rigMaster->clone(copyop));
+            }
+#else
             osg::ref_ptr<osg::Group> handle = new osg::Group;
 
             CopyRigVisitor copyVisitor(handle, filter);
             const_cast<osg::Node*>(toAttach.get())->accept(copyVisitor);
             copyVisitor.doCopy(sceneManager);
+#endif
             // add a ref to the original template to hint to the cache that it is still being used and should be kept in
             // cache.
             handle->getOrCreateUserDataContainer()->addUserObject(new Resource::TemplateRef(toAttach));

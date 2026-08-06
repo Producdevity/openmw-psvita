@@ -105,6 +105,13 @@ namespace MWMechanics
         return ESM::RefId();
     }
 
+    void getSummonableCreatures(std::vector<ESM::RefId>& out)
+    {
+        for (const auto& [effectId, creatureId] : getSummonMap())
+            if (!creatureId.empty())
+                out.push_back(creatureId);
+    }
+
     ESM::RefNum summonCreature(ESM::RefId effectId, const MWWorld::Ptr& summoner)
     {
         const ESM::RefId& creatureID = getSummonedCreature(effectId);

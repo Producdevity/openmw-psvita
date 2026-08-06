@@ -66,7 +66,7 @@ namespace MWLua
             MWWorld::WorldModel* wm = MWBase::Environment::get().getWorldModel();
             MWWorld::CellStore* cell;
             if (cellOrName.is<GCell>())
-                cell = cellOrName.as<const GCell&>().mStore;
+                cell = cellOrName.as<const GCell&>().store();
             else
             {
                 std::string_view name = LuaUtil::cast<std::string_view>(cellOrName);

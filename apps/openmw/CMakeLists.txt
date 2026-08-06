@@ -9,6 +9,7 @@ if(VITA)
         vita/VitaIme.cpp
         vita/VitaMemAudit.cpp
         vita/VitaSimWorker.cpp
+        vita/VitaGLWorker.cpp
     )
 endif()
 
@@ -420,11 +421,11 @@ if (VITA AND BUILD_OPENMW)
     add_dependencies(eboot.bin-self openmw-velf)
 
     # LiveArea assets
-    set(VITA_DATA_DIR ${CMAKE_SOURCE_DIR}/data/vita)
+    set(VITA_DATA_DIR ${CMAKE_SOURCE_DIR}/data/openMW)
 
     # Create VPK package
     vita_create_vpk(openmw.vpk ${VITA_TITLEID} eboot.bin
-        VERSION 01.00
+        VERSION 02.10
         NAME ${VITA_APP_NAME}
         FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/openmw.cfg openmw.cfg
         FILE ${CMAKE_BINARY_DIR}/defaults.bin defaults.bin
@@ -432,11 +433,16 @@ if (VITA AND BUILD_OPENMW)
         FILE ${VITA_DATA_DIR}/sce_sys/icon0.png sce_sys/icon0.png
         FILE ${VITA_DATA_DIR}/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
         FILE ${VITA_DATA_DIR}/sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
+        FILE ${VITA_DATA_DIR}/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
         FILE ${VITA_DATA_DIR}/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
         # Pre-warmed VFS file index for path-stable engine resource dirs
         # (app0:/resources/vfs and app0:/resources/vfs-mw). Skips ~22KB of
         # recursive_directory_iterator work on first launch. Copied to
         # ux0:data/openmw/config/ at boot if not already present.
+        # PC-cooked warm packages (fallback when no learned copy on ux0)
+        FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/warm/commonwarm.txt warm/commonwarm.txt
+        FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/warm/warm_regions.txt warm/warm_regions.txt
+        FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/warm/object_index.txt warm/object_index.txt
         FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/vfs_seed/vfs_dir_0.bin vfs_seed/vfs_dir_0.bin
         FILE ${CMAKE_SOURCE_DIR}/apps/openmw/vita/vfs_seed/vfs_dir_1.bin vfs_seed/vfs_dir_1.bin
         # GOG ships ~21k loose files extracted from the BSAs, making the

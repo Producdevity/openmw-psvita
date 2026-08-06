@@ -8,6 +8,7 @@
 #include "../vita/VitaInit.h"
 #include "../vita/VitaMemAudit.h"
 #include <components/vita/VitaEsmPrefetch.h>
+#include <psp2/kernel/processmgr.h>
 #define VITA_CRUMB(msg) Vita::breadcrumb(msg)
 #else
 #define VITA_CRUMB(msg)
@@ -42,6 +43,8 @@
 #include <components/misc/constants.hpp>
 #include <components/misc/convert.hpp>
 #include <components/misc/mathutil.hpp>
+#include <fstream>
+
 #include <components/misc/pathhelpers.hpp>
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/rng.hpp>
@@ -98,6 +101,9 @@
 
 #include "../mwphysics/actor.hpp"
 #include "../mwphysics/collisiontype.hpp"
+#ifdef __vita__
+#include <osgUtil/LineSegmentIntersector>
+#endif
 #include "../mwphysics/object.hpp"
 #include "../mwphysics/physicssystem.hpp"
 
@@ -283,6 +289,138 @@ namespace MWWorld
     {
     }
 
+#ifdef __vita__
+    namespace
+    {
+        // Boot cache for the cell-ref scan inside validateRecords (was 4.3s
+        // of re-parsing every cell). Keyed on content file names + sizes.
+        constexpr uint32_t kRefCacheMagic = 0x32435256; // 'VRC2'
+
+        uint64_t refCacheKey(const Files::Collections& fileCollections, const std::vector<std::string>& content)
+        {
+            uint64_t h = 1469598103934665603ull;
+            auto mix = [&h](const void* data, size_t n) {
+                const unsigned char* p = static_cast<const unsigned char*>(data);
+                for (size_t i = 0; i < n; ++i)
+                {
+                    h ^= p[i];
+                    h *= 1099511628211ull;
+                }
+            };
+            for (const std::string& file : content)
+            {
+                mix(file.data(), file.size());
+                const Files::MultiDirCollection& col = fileCollections.getCollection(Misc::getFileExtension(file));
+                if (col.doesExist(file))
+                {
+                    std::error_code ec;
+                    const uint64_t size = std::filesystem::file_size(col.getPath(file), ec);
+                    mix(&size, sizeof(size));
+                }
+            }
+            return h;
+        }
+
+        bool tryLoadRefCache(const std::filesystem::path& path, uint64_t key, MWWorld::ESMStore& store)
+        {
+            std::ifstream in(path, std::ios::binary);
+            if (!in)
+                return false;
+            uint32_t magic = 0;
+            uint64_t fileKey = 0;
+            in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            in.read(reinterpret_cast<char*>(&fileKey), sizeof(fileKey));
+            if (!in || magic != kRefCacheMagic || fileKey != key)
+                return false;
+            auto readString = [&in]() {
+                uint16_t len = 0;
+                in.read(reinterpret_cast<char*>(&len), sizeof(len));
+                std::string sdata(len, '\0');
+                in.read(sdata.data(), len);
+                return sdata;
+            };
+            uint32_t nCounts = 0;
+            in.read(reinterpret_cast<char*>(&nCounts), sizeof(nCounts));
+            if (!in || nCounts > 2000000)
+                return false;
+            std::unordered_map<ESM::RefId, int> counts;
+            counts.reserve(nCounts);
+            for (uint32_t i = 0; i < nCounts; ++i)
+            {
+                std::string id = readString();
+                int32_t count = 0;
+                in.read(reinterpret_cast<char*>(&count), sizeof(count));
+                if (!in)
+                    return false;
+                counts[ESM::RefId::deserializeText(id)] = count;
+            }
+            uint32_t nKeys = 0;
+            in.read(reinterpret_cast<char*>(&nKeys), sizeof(nKeys));
+            if (!in || nKeys > 100000)
+                return false;
+            std::vector<ESM::RefId> keyIds;
+            keyIds.reserve(nKeys);
+            for (uint32_t i = 0; i < nKeys; ++i)
+                keyIds.push_back(ESM::RefId::deserializeText(readString()));
+            if (!in)
+                return false;
+            uint32_t nIndex = 0;
+            in.read(reinterpret_cast<char*>(&nIndex), sizeof(nIndex));
+            if (!in || nIndex > 2000000)
+                return false;
+            std::unordered_map<ESM::RefId, ESM::RefId> refCellIndex;
+            refCellIndex.reserve(nIndex);
+            for (uint32_t i = 0; i < nIndex; ++i)
+            {
+                std::string id = readString();
+                std::string cellId = readString();
+                if (!in)
+                    return false;
+                refCellIndex[ESM::RefId::deserializeText(id)] = ESM::RefId::deserializeText(cellId);
+            }
+            store.vitaSeedRefCounts(std::move(counts), keyIds);
+            store.vitaSeedRefCellIndex(std::move(refCellIndex));
+            return true;
+        }
+
+        void saveRefCache(const std::filesystem::path& path, uint64_t key, const MWWorld::ESMStore& store)
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out)
+                return;
+            out.write(reinterpret_cast<const char*>(&kRefCacheMagic), sizeof(kRefCacheMagic));
+            out.write(reinterpret_cast<const char*>(&key), sizeof(key));
+            auto writeString = [&out](const std::string& sdata) {
+                const uint16_t len = static_cast<uint16_t>(std::min<size_t>(sdata.size(), 65535));
+                out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+                out.write(sdata.data(), len);
+            };
+            const auto& counts = store.vitaGetRefCounts();
+            const uint32_t nCounts = static_cast<uint32_t>(counts.size());
+            out.write(reinterpret_cast<const char*>(&nCounts), sizeof(nCounts));
+            for (const auto& [id, count] : counts)
+            {
+                writeString(id.serializeText());
+                const int32_t c = count;
+                out.write(reinterpret_cast<const char*>(&c), sizeof(c));
+            }
+            const auto keyIds = store.vitaGetKeyIds();
+            const uint32_t nKeys = static_cast<uint32_t>(keyIds.size());
+            out.write(reinterpret_cast<const char*>(&nKeys), sizeof(nKeys));
+            for (const auto& id : keyIds)
+                writeString(id.serializeText());
+            const auto& refCellIndex = store.vitaGetRefCellIndex();
+            const uint32_t nIndex = static_cast<uint32_t>(refCellIndex.size());
+            out.write(reinterpret_cast<const char*>(&nIndex), sizeof(nIndex));
+            for (const auto& [id, cellId] : refCellIndex)
+            {
+                writeString(id.serializeText());
+                writeString(cellId.serializeText());
+            }
+        }
+    }
+#endif
+
     void World::loadData(const Files::Collections& fileCollections, const std::vector<std::string>& contentFiles,
         const std::vector<std::string>& groundcoverFiles, ToUTF8::Utf8Encoder* encoder, Loading::Listener* listener)
     {
@@ -306,8 +444,20 @@ namespace MWWorld
         mStore.setUp();
 #ifdef __vita__
         VITA_CRUMB("loadData: validateRecords");
+        const std::filesystem::path refCachePath = mUserDataPath / "config" / "refcount_cache.bin";
+        const uint64_t refCacheKey_ = refCacheKey(fileCollections, contentFiles);
+        const bool refCacheHit = tryLoadRefCache(refCachePath, refCacheKey_, mStore);
+        if (refCacheHit)
+            VITA_CRUMB("loadData: ref cache HIT (scan skipped)");
 #endif
         mStore.validateRecords(mReaders);
+#ifdef __vita__
+        if (!refCacheHit)
+            saveRefCache(refCachePath, refCacheKey_, mStore);
+#endif
+#ifdef __vita__
+        VITA_CRUMB("loadData: validate done");
+#endif
         mStore.movePlayerRecord();
 #ifdef __vita__
         // Release the boot-time in-RAM ESM buffers (esmloader slurp).
@@ -317,7 +467,8 @@ namespace MWWorld
         // malloc_trim moved to Engine after the load join: trimming here
         // ran concurrently with main-thread GUI allocation.
         vitaMemBreadcrumb("[VitaAudit] after ESMStore setUp");
-        Vita::auditDialogueStore(mStore);
+        // auditDialogueStore removed from the boot path 2026-07-25: the
+        // diagnostic walked every INFO twice per boot (data long collected).
 #endif
 
         mSwimHeightScale = mStore.get<ESM::GameSetting>().find("fSwimHeightScale")->mValue.getFloat();
@@ -408,9 +559,35 @@ namespace MWWorld
         }
         else
         {
+#ifdef __vita__
+            // Intro video first: hides ~22s script compile.
+            if (!bypass)
+            {
+                VITA_CRUMB("startNewGame() playing new game video (pre-scripts)");
+                std::string_view earlyVideo = Fallback::Map::getString("Movies_New_Game");
+                if (!earlyVideo.empty())
+                {
+                    MWBase::Environment::get().getSoundManager()->stopMusic();
+                    MWBase::Environment::get().getWindowManager()->playVideo(earlyVideo, true);
+                }
+            }
+#endif
             VITA_CRUMB("startNewGame() running startup scripts");
             for (int i = 0; i < 5; ++i)
+            {
+#ifdef __vita__
+                const unsigned long long passStart = sceKernelGetProcessTimeWide();
+#endif
                 MWBase::Environment::get().getScriptManager()->getGlobalScripts().run();
+#ifdef __vita__
+                {
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "startNewGame() script pass %d: %llums", i,
+                        (sceKernelGetProcessTimeWide() - passStart) / 1000);
+                    Vita::breadcrumb(buf);
+                }
+#endif
+            }
             VITA_CRUMB("startNewGame() scripts done, checking player cell");
             if (!getPlayerPtr().isInCell())
             {
@@ -431,6 +608,7 @@ namespace MWWorld
             }
         }
 
+#ifndef __vita__
         if (!bypass)
         {
             VITA_CRUMB("startNewGame() playing new game video");
@@ -442,6 +620,7 @@ namespace MWWorld
                 MWBase::Environment::get().getWindowManager()->playVideo(video, true);
             }
         }
+#endif
 
         VITA_CRUMB("startNewGame() enabling collision");
         // enable collision
@@ -1149,6 +1328,7 @@ namespace MWWorld
     MWWorld::Ptr World::moveObject(
         const Ptr& ptr, CellStore* newCell, const osg::Vec3f& position, bool movePhysics, bool keepActive)
     {
+        mWorldScene->vitaOnObjectTransformed(ptr);
         ESM::Position pos = ptr.getRefData().getPosition();
         std::memcpy(pos.pos, &position, sizeof(osg::Vec3f));
         ptr.getRefData().setPosition(pos);
@@ -1398,6 +1578,21 @@ namespace MWWorld
         {
             float height = static_cast<float>(ESM::getCellSize(ptr.getCell()->getCell()->getWorldSpace()));
             osg::Vec3f traced = mPhysics->traceDown(ptr, pos, height);
+#ifdef __vita__
+            // This snap only ever moves an actor down, and exists to free ones
+            // stuck in geometry — always a small correction. A large drop means
+            // a deliberate airborne placement (Tarhiel), and taking it cancels
+            // the fall along with its damage.
+            constexpr float kMaxSnapDrop = 256.f;
+            if (!force && ptr.getClass().isActor() && pos.z() - traced.z() > kMaxSnapDrop)
+            {
+                char sbuf[128];
+                snprintf(sbuf, sizeof(sbuf), "[Airborne] kept %s %d units up",
+                    ptr.getCellRef().getRefId().toDebugString().c_str(), (int)(pos.z() - traced.z()));
+                Vita::breadcrumb(sbuf);
+                traced.z() = pos.z();
+            }
+#endif
             pos.z() = std::min(pos.z(), traced.z());
         }
 
@@ -1653,6 +1848,19 @@ namespace MWWorld
         std::erase_if(mDoorStates, [&](const auto& entry) { return entry.first.mCell == &store; });
         mProjectileManager->purgeCasterHandles(&store);
     }
+
+    void World::vitaWeatherWarmPaths(std::vector<std::string>& out)
+    {
+        const VFS::Manager* vfs = mResourceSystem->getVFS();
+        for (const Weather& w : mWeatherManager->getAllWeather())
+        {
+            if (!w.mCloudTexture.empty())
+                out.push_back(Misc::ResourceHelpers::correctTexturePath(VFS::Path::toNormalized(w.mCloudTexture), *vfs)
+                        .value());
+            if (!w.mParticleEffect.empty())
+                out.push_back(VFS::Path::toNormalized(w.mParticleEffect).value());
+        }
+    }
 #endif
 
     void World::processDoors(float duration)
@@ -1736,19 +1944,56 @@ namespace MWWorld
         if (mPlayerInJail && !mGoToJail && !MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Jail))
             mPlayerInJail = false;
 
+#ifdef __vita__
+        // The 4.5s wld= stalls land in here with every existing probe
+        // silent. Name the span before fixing it.
+        uint64_t wsT[6];
+        wsT[0] = sceKernelGetProcessTimeWide();
+#endif
         updateWeather(duration, paused);
 
+#ifdef __vita__
+        wsT[1] = sceKernelGetProcessTimeWide();
+#endif
         updateNavigator();
 
+#ifdef __vita__
+        wsT[2] = sceKernelGetProcessTimeWide();
+#endif
         mPlayer->update();
 
         mPhysics->debugDraw();
 
+#ifdef __vita__
+        wsT[3] = sceKernelGetProcessTimeWide();
+#endif
         mWorldScene->update(duration);
 
+#ifdef __vita__
+        wsT[4] = sceKernelGetProcessTimeWide();
+#endif
         mRendering->update(duration, paused);
 
+#ifdef __vita__
+        wsT[5] = sceKernelGetProcessTimeWide();
+#endif
         updateSoundListener();
+
+#ifdef __vita__
+        {
+            const uint64_t wsEnd = sceKernelGetProcessTimeWide();
+            if (wsEnd - wsT[0] > 500000ULL)
+            {
+                char wb[160];
+                snprintf(wb, sizeof(wb), "[WorldSplit] %dms wthr=%d nav=%d plyr=%d scene=%d rend=%d snd=%d",
+                    (int)((wsEnd - wsT[0]) / 1000), (int)((wsT[1] - wsT[0]) / 1000),
+                    (int)((wsT[2] - wsT[1]) / 1000), (int)((wsT[3] - wsT[2]) / 1000),
+                    (int)((wsT[4] - wsT[3]) / 1000), (int)((wsT[5] - wsT[4]) / 1000),
+                    (int)((wsEnd - wsT[5]) / 1000));
+                Vita::breadcrumb(wb);
+            }
+        }
+#endif
 
         mSpellPreloadTimer -= duration;
         if (mSpellPreloadTimer <= 0.f)
@@ -1869,6 +2114,17 @@ namespace MWWorld
         catch (std::exception& e)
         {
             Log(Debug::Error) << "Error updating focus object: " << e.what();
+#ifdef __vita__
+            static std::chrono::steady_clock::time_point sLastFocusErr{};
+            const auto nowFe = std::chrono::steady_clock::now();
+            if (nowFe - sLastFocusErr > std::chrono::seconds(5))
+            {
+                sLastFocusErr = nowFe;
+                char fe[192];
+                snprintf(fe, sizeof(fe), "[FocusErr] %s", e.what());
+                Vita::breadcrumb(fe);
+            }
+#endif
         }
     }
 
@@ -1886,7 +2142,58 @@ namespace MWWorld
             rayToObject = mRendering->castCameraToViewportRay(x, y, maxDistance, ignorePlayer);
         }
         else
+        {
+#ifdef __vita__
+            // Hybrid: physics ray for occluders/actors; masked scene ray for
+            // items (no collision objects). Nearer hit wins, so walls occlude.
+            osg::Vec3f rayStart, rayEnd;
+            mRendering->getCameraRay(0.5f, 0.5f, maxDistance, rayStart, rayEnd);
+            std::vector<MWWorld::ConstPtr> ignore;
+            if (ignorePlayer)
+                ignore.push_back(mPlayer->getPlayer());
+            const MWPhysics::RayCastingResult phys = mPhysics->castRay(rayStart, rayEnd, ignore, {},
+                MWPhysics::CollisionType_Default | MWPhysics::CollisionType_VisualOnly);
+            const float physDist
+                = (phys.mHit && !phys.mHitObject.isEmpty()) ? (phys.mHitPos - rayStart).length() : -1.f;
+
+            const MWRender::RenderingManager::RayResult scene = mRendering->castCameraToViewportRay(
+                0.5f, 0.5f, maxDistance, ignorePlayer,
+                MWRender::Mask_Scene | MWRender::Mask_Object | MWRender::Mask_VitaPick
+                    | MWRender::Mask_Static); // doors are remasked Static (door.cpp)
+            float sceneDist = -1.f;
+            MWWorld::Ptr sceneObject = scene.mHitObject;
+            if (scene.mHit)
+            {
+                if (sceneObject.isEmpty() && scene.mHitRefnum.isSet())
+                    sceneObject = MWBase::Environment::get().getWorldModel()->getPtr(scene.mHitRefnum);
+                if (!sceneObject.isEmpty())
+                    sceneDist = scene.mRatio * maxDistance;
+            }
+
+            // Nameless scenery must not eat the prompt of a named object
+            // the crosshair visibly rests on (recessed door leaves sit
+            // behind their frame's collision on one side).
+            const bool physNamed = phys.mHit && !phys.mHitObject.isEmpty()
+                && !phys.mHitObject.getClass().getName(phys.mHitObject).empty();
+            const bool sceneNamed = !sceneObject.isEmpty()
+                && !sceneObject.getClass().getName(sceneObject).empty();
+            if (physDist >= 0.f && (sceneDist < 0.f || physDist <= sceneDist)
+                && (physNamed || !sceneNamed))
+            {
+                mDistanceToFocusObject = physDist - camDist;
+                return phys.mHitObject;
+            }
+            if (sceneDist >= 0.f)
+            {
+                mDistanceToFocusObject = sceneDist - camDist;
+                return sceneObject;
+            }
+            mDistanceToFocusObject = -1;
+            return MWWorld::Ptr();
+#else
             rayToObject = mRendering->castCameraToViewportRay(0.5f, 0.5f, maxDistance, ignorePlayer);
+#endif
+        }
 
         focusObject = rayToObject.mHitObject;
         if (focusObject.isEmpty() && rayToObject.mHitRefnum.isSet())

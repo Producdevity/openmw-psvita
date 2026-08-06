@@ -128,7 +128,14 @@ namespace MWBase
 
         void setFrameRateLimit(float value) { mFrameRateLimit = value; }
 
+#ifdef __vita__
+        // Per-thread dt scale: far-tier script scheduling runs a script every
+        // Nth frame with dt scaled to match, without touching other threads.
+        static thread_local float sVitaDtScale;
+        float getFrameDuration() const { return mFrameDuration * sVitaDtScale; }
+#else
         float getFrameDuration() const { return mFrameDuration; }
+#endif
 
         void setFrameDuration(float value) { mFrameDuration = value; }
 

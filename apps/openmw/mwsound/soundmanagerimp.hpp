@@ -167,6 +167,14 @@ namespace MWSound
         bool isEnabled() const override { return mOutput->isInitialized(); }
         ///< Returns true if sound system is enabled
 
+#ifdef __vita__
+        void vitaWarmCellSounds(const ESM::RefId& regionId) override;
+        std::vector<ESM::RefId> mVitaSoundWarmQueue;
+        std::set<ESM::RefId> mVitaSoundWarmQueued;
+        void vitaPumpSoundWarm(int maxLoads);
+        void vitaWarmActorSounds(MWWorld::CellStore& cell) override;
+#endif
+
         void stopMusic() override;
         ///< Stops music if it's playing
 

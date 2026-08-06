@@ -2,6 +2,7 @@
 #define GAME_MWWORLD_CELLSTORE_H
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -171,6 +172,10 @@ namespace MWWorld
         bool isSafeToEvict(std::string* whyNot = nullptr) const;
         ///< ESM reload loses nothing (mirrors the save-persistence criterion).
         ///< whyNot (diagnostics): filled with the blocking reason.
+
+        CellStore* vitaOwningStore(const LiveCellRefBase* ref) const;
+        ///< Store that owns \a ref's memory: its origin cell if it moved here, else this.
+        ///< A ref outlives the cell it stands in, never the cell that allocated it.
 #endif
 
         bool hasId(const ESM::RefId& id) const;

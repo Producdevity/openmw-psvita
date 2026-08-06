@@ -15,6 +15,75 @@
 #include <components/esm3/cellstate.hpp>
 #include <components/esm3/esmreader.hpp>
 #include <components/esm3/esmwriter.hpp>
+#include <components/esm3/formatversion.hpp>
+
+#include <cstdio>
+#include <sstream>
+
+namespace
+{
+    std::string vitaEvictPath(const ESM::RefId& id)
+    {
+        std::string name = id.toDebugString();
+        for (char& c : name)
+            if (!std::isalnum((unsigned char)c))
+                c = '_';
+        return "ux0:data/openmw/cache/evict/" + name + ".bin";
+    }
+
+    bool vitaSpillWrite(const std::string& path, const std::string& data)
+    {
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f)
+            return false;
+        const bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+        fclose(f);
+        return ok;
+    }
+
+    const std::string& vitaObjectIndexBlob();
+    bool vitaSpillRead(const std::string& path, std::string& out)
+    {
+        FILE* f = fopen(path.c_str(), "rb");
+        if (!f)
+            return false;
+        fseek(f, 0, SEEK_END);
+        const long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        out.resize((std::size_t)n);
+        const bool ok = fread(out.data(), 1, out.size(), f) == out.size();
+        fclose(f);
+        return ok;
+    }
+
+    const std::string& vitaObjectIndexBlob()
+    {
+        static std::string blob = [] {
+            std::string b;
+            if (!vitaSpillRead("ux0:data/openmw/cache/object_index.txt", b))
+                vitaSpillRead("app0:warm/object_index.txt", b);
+            if (!b.empty())
+                b.insert(0, 1, '\n');
+            return b;
+        }();
+        return blob;
+    }
+
+    bool vitaObjectIndexLookup(const ESM::RefId& name, std::string& out)
+    {
+        const std::string& blob = vitaObjectIndexBlob();
+        if (blob.empty())
+            return false;
+        const std::string key = "\n" + name.serializeText() + "\t";
+        const auto pos = blob.find(key);
+        if (pos == std::string::npos)
+            return false;
+        const auto valueStart = pos + key.size();
+        const auto valueEnd = blob.find('\n', valueStart);
+        out = blob.substr(valueStart, valueEnd - valueStart);
+        return true;
+    }
+}
 #include <components/esm3/loadregn.hpp>
 #include <components/esm4/loadwrld.hpp>
 #include <components/loadinglistener/loadinglistener.hpp>
@@ -157,6 +226,12 @@ void MWWorld::WorldModel::clear()
     mCells.clear();
     std::fill(mIdCache.begin(), mIdCache.end(), std::make_pair(ESM::RefId(), (MWWorld::CellStore*)nullptr));
     mIdCacheIndex = 0;
+#ifdef __vita__
+    for (const auto& [id, data] : mVitaEvictedState)
+        if (data.empty())
+            std::remove(vitaEvictPath(id).c_str());
+    mVitaEvictedState.clear();
+#endif
 }
 
 MWWorld::Ptr MWWorld::WorldModel::getPtrAndCache(const ESM::RefId& name, CellStore& cellStore)
@@ -177,7 +252,7 @@ MWWorld::Ptr MWWorld::WorldModel::getPtrAndCache(const ESM::RefId& name, CellSto
 void MWWorld::WorldModel::writeCell(ESM::ESMWriter& writer, CellStore& cell) const
 {
     if (cell.getState() != CellStore::State_Loaded)
-        cell.load();
+        vitaLoadWithState(cell);
 
     ESM::CellState cellState;
 
@@ -202,12 +277,22 @@ MWWorld::WorldModel::WorldModel(MWWorld::ESMStore& store, ESM::ReadersCache& rea
 
 namespace MWWorld
 {
+    void WorldModel::vitaLoadWithState(CellStore& store) const
+    {
+        store.load();
+#ifdef __vita__
+        // State follows identity: every materialization path yields the
+        // same cell regardless of eviction history.
+        const_cast<WorldModel*>(this)->vitaApplyEvictedState(store.getCell()->getId());
+#endif
+    }
+
     CellStore& WorldModel::getExterior(ESM::ExteriorCellLocation location, bool forceLoad) const
     {
         CellStore* cellStore = getOrCreateExterior(location, mExteriors, mStore, mReaders, mCells, true);
 
         if (forceLoad && cellStore->getState() != CellStore::State_Loaded)
-            cellStore->load();
+            vitaLoadWithState(*cellStore);
 
         return *cellStore;
     }
@@ -231,7 +316,7 @@ namespace MWWorld
         }
 
         if (forceLoad && cellStore->getState() != CellStore::State_Loaded)
-            cellStore->load();
+            vitaLoadWithState(*cellStore);
 
         return cellStore;
     }
@@ -251,14 +336,14 @@ namespace MWWorld
         {
             CellStore& cellStore = it->second;
             if (forceLoad && cellStore.getState() != CellStore::State_Loaded)
-                cellStore.load();
+                vitaLoadWithState(cellStore);
             return &cellStore;
         }
 
         if (id == draftCellId)
         {
             CellStore& cellStore = emplaceCellStore(id, Cell(mDraftCell), mStore, mReaders, mCells);
-            cellStore.load();
+            vitaLoadWithState(cellStore);
             return &cellStore;
         }
 
@@ -281,7 +366,7 @@ namespace MWWorld
             mInteriors.emplace(cellStore.getCell()->getNameId(), &cellStore);
 
         if (forceLoad && cellStore.getState() != CellStore::State_Loaded)
-            cellStore.load();
+            vitaLoadWithState(cellStore);
 
         return &cellStore;
     }
@@ -395,6 +480,34 @@ MWWorld::Ptr MWWorld::WorldModel::getPtrByRefId(const ESM::RefId& name)
             return ptr;
     }
 
+#ifdef __vita__
+    // Baked object->cell index: jump straight to the owning cell instead of
+    // materializing a store for every cell in the game (measured: 16s burst).
+    {
+        std::string spec;
+        if (vitaObjectIndexLookup(name, spec) && spec.size() > 2)
+        {
+            CellStore* hinted = nullptr;
+            if (spec[0] == 'E')
+            {
+                int gx = 0, gy = 0;
+                if (sscanf(spec.c_str() + 2, "%d %d", &gx, &gy) == 2)
+                    hinted = &getExterior(
+                        ESM::ExteriorCellLocation(gx, gy, ESM::Cell::sDefaultWorldspaceId), false);
+            }
+            else if (spec[0] == 'I')
+                hinted = findCell(std::string_view(spec).substr(2), false);
+            if (hinted != nullptr)
+            {
+                vitaApplyEvictedState(hinted->getCell()->getId());
+                Ptr ptr = getPtrAndCache(name, *hinted);
+                if (!ptr.isEmpty())
+                    return ptr;
+            }
+        }
+    }
+#endif
+
     // Now try the other cells
     const MWWorld::Store<ESM::Cell>& cells = mStore.get<ESM::Cell>();
 
@@ -439,7 +552,7 @@ MWWorld::Ptr MWWorld::WorldModel::getPtrByRefId(const ESM::RefId& name)
 }
 
 #ifdef __vita__
-std::size_t MWWorld::WorldModel::evictSweptCellStores()
+std::size_t MWWorld::WorldModel::evictSweptCellStores(const std::set<CellStore*, std::less<>>& protectedCells)
 {
     std::unordered_set<const CellStore*> toEvict;
     for (auto& [id, store] : mCells)
@@ -451,6 +564,8 @@ std::size_t MWWorld::WorldModel::evictSweptCellStores()
     // Anything the Ptr cache references stays.
     for (const auto& [cachedId, cachedCell] : mIdCache)
         toEvict.erase(cachedCell);
+    for (CellStore* pc : protectedCells)
+        toEvict.erase(pc);
 
     if (toEvict.empty())
         return 0;
@@ -459,6 +574,179 @@ std::size_t MWWorld::WorldModel::evictSweptCellStores()
     std::erase_if(mInteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
     std::erase_if(mExteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
     return std::erase_if(mCells, [&](auto& entry) { return toEvict.count(&entry.second) > 0; });
+}
+
+bool MWWorld::WorldModel::vitaEvictOneDistant(const std::set<CellStore*, std::less<>>& protectedCells,
+    int centerX, int centerY, int minDist, const std::function<void(CellStore&)>& onEvict)
+{
+    const CellStore* victim = nullptr;
+    bool victimNeedsState = false;
+    int movedPinned = 0;
+    for (int pass = 0; pass < 2 && victim == nullptr; ++pass)
+    {
+        for (const auto& [loc, store] : mExteriors)
+        {
+            if (store->getState() != CellStore::State_Loaded)
+                continue;
+            if (protectedCells.count(store) > 0)
+                continue;
+            std::string why;
+            const bool safe = store->isSafeToEvict(&why);
+            // movedRefs: partner stores hold raw pointers into our lists;
+            // destruction would dangle them (crash in updateMergedRefs).
+            if (pass == 1 && why == "movedRefs")
+                ++movedPinned;
+            if (pass == 0 ? !safe : (safe || why == "cellState" || why == "movedRefs"))
+                continue;
+            const int dx = std::abs(loc.mX - centerX);
+            const int dy = std::abs(loc.mY - centerY);
+            if (dx <= minDist && dy <= minDist)
+                continue;
+            bool cached = false;
+            for (const auto& [cachedId, cachedCell] : mIdCache)
+                if (cachedCell == store)
+                {
+                    cached = true;
+                    break;
+                }
+            if (cached)
+                continue; // skip, keep searching
+            victim = store;
+            victimNeedsState = !safe;
+            break;
+        }
+    }
+    if (!victim)
+    {
+        if (movedPinned > 0)
+        {
+            static std::chrono::steady_clock::time_point sLast{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - sLast > std::chrono::seconds(30))
+            {
+                sLast = now;
+                char buf[80];
+                snprintf(buf, sizeof(buf), "[Evict] movedRefs pins %d stores", movedPinned);
+                Vita::breadcrumb(buf);
+            }
+        }
+        return false;
+    }
+    CellStore* mut = const_cast<CellStore*>(victim);
+    if (victimNeedsState)
+    {
+        std::stringstream ss;
+        ESM::ESMWriter writer;
+        writer.setFormatVersion(ESM::CurrentSaveGameFormatVersion);
+        writer.save(ss);
+        writeCell(writer, *mut);
+        writer.close();
+        std::string data = std::move(ss).str();
+        const ESM::RefId id = mut->getCell()->getId();
+        if (vitaSpillWrite(vitaEvictPath(id), data))
+            mVitaEvictedState[id] = std::string(); // spilled: empty marker
+        else
+            mVitaEvictedState[id] = std::move(data);
+    }
+    if (onEvict)
+        onEvict(*mut);
+    std::erase_if(mExteriors, [&](const auto& entry) { return entry.second == victim; });
+    std::erase_if(mCells, [&](auto& entry) { return &entry.second == victim; });
+    return true;
+}
+
+void MWWorld::WorldModel::vitaApplyBuffer(const std::string& data)
+{
+    ESM::ESMReader reader;
+    reader.open(std::make_unique<std::istringstream>(data), "vita-evicted-state");
+    while (reader.hasMoreRecs())
+    {
+        const ESM::NAME n = reader.getRecName();
+        reader.getRecHeader();
+        readRecord(reader, n.toInt());
+    }
+}
+
+bool MWWorld::WorldModel::vitaApplyEvictedState(const ESM::RefId& id)
+{
+    const auto it = mVitaEvictedState.find(id);
+    if (it == mVitaEvictedState.end())
+        return false;
+    std::string data = std::move(it->second);
+    mVitaEvictedState.erase(it);
+    if (data.empty())
+    {
+        if (!vitaSpillRead(vitaEvictPath(id), data))
+            return false;
+        std::remove(vitaEvictPath(id).c_str());
+    }
+    const auto sa0 = std::chrono::steady_clock::now();
+    vitaApplyBuffer(data);
+    const int saMs = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - sa0)
+                         .count();
+    if (saMs > 20)
+    {
+        char sb[112];
+        snprintf(sb, sizeof(sb), "[StateApply] %s %dms", id.toDebugString().c_str(), saMs);
+        Vita::breadcrumb(sb);
+    }
+    return true;
+}
+
+std::size_t MWWorld::WorldModel::vitaEvictInteriors(const std::set<CellStore*, std::less<>>& protectedCells,
+    std::size_t maxCount, const std::function<void(CellStore&)>& onEvict)
+{
+    std::size_t evicted = 0;
+    for (auto it = mInteriors.begin(); it != mInteriors.end() && evicted < maxCount;)
+    {
+        CellStore* store = it->second;
+        if (store->getState() != CellStore::State_Loaded || protectedCells.count(store) > 0)
+        {
+            ++it;
+            continue;
+        }
+        std::string why;
+        const bool safe = store->isSafeToEvict(&why);
+        if (!safe && (why == "cellState" || why == "movedRefs"))
+        {
+            ++it;
+            continue;
+        }
+        bool cached = false;
+        for (const auto& [cachedId, cachedCell] : mIdCache)
+            if (cachedCell == store)
+            {
+                cached = true;
+                break;
+            }
+        if (cached)
+        {
+            ++it;
+            continue;
+        }
+        if (!safe)
+        {
+            std::stringstream ss;
+            ESM::ESMWriter writer;
+            writer.setFormatVersion(ESM::CurrentSaveGameFormatVersion);
+            writer.save(ss);
+            writeCell(writer, *store);
+            writer.close();
+            std::string data = std::move(ss).str();
+            const ESM::RefId iid = store->getCell()->getId();
+            if (vitaSpillWrite(vitaEvictPath(iid), data))
+                mVitaEvictedState[iid] = std::string();
+            else
+                mVitaEvictedState[iid] = std::move(data);
+        }
+        if (onEvict)
+            onEvict(*store);
+        it = mInteriors.erase(it);
+        std::erase_if(mCells, [&](auto& e) { return &e.second == store; });
+        ++evicted;
+    }
+    return evicted;
 }
 
 std::size_t MWWorld::WorldModel::evictInactiveLoadedCellStores(
@@ -491,6 +779,7 @@ std::size_t MWWorld::WorldModel::evictInactiveLoadedCellStores(
     std::erase_if(mExteriors, [&](const auto& entry) { return toEvict.count(entry.second) > 0; });
     return std::erase_if(mCells, [&](auto& entry) { return toEvict.count(&entry.second) > 0; });
 }
+
 #endif
 
 void MWWorld::WorldModel::getExteriorPtrs(const ESM::RefId& name, std::vector<MWWorld::Ptr>& out)
@@ -528,7 +817,7 @@ std::vector<MWWorld::Ptr> MWWorld::WorldModel::getAll(const ESM::RefId& id)
         {
             if (!cellStore.hasId(id))
                 continue;
-            cellStore.load();
+            vitaLoadWithState(cellStore);
         }
         cellStore.forEach([&](const Ptr& ptr) {
             if (ptr.getCellRef().getRefId() == id)
@@ -541,7 +830,11 @@ std::vector<MWWorld::Ptr> MWWorld::WorldModel::getAll(const ESM::RefId& id)
 
 size_t MWWorld::WorldModel::countSavedGameRecords() const
 {
-    return std::count_if(mCells.begin(), mCells.end(), [](const auto& v) { return v.second.hasState(); });
+    std::size_t n = std::count_if(mCells.begin(), mCells.end(), [](const auto& v) { return v.second.hasState(); });
+#ifdef __vita__
+    n += mVitaEvictedState.size();
+#endif
+    return n;
 }
 
 void MWWorld::WorldModel::write(ESM::ESMWriter& writer, Loading::Listener& progress) const
@@ -552,6 +845,25 @@ void MWWorld::WorldModel::write(ESM::ESMWriter& writer, Loading::Listener& progr
             writeCell(writer, cellStore);
             progress.increaseProgress();
         }
+#ifdef __vita__
+    // Evicted-with-state cells: restore through the guarded path, write,
+    // leave resident; the valve reclaims later. Only guarded evictors may
+    // destroy stores. Snapshot ids: applies can cascade into this map.
+    WorldModel* self = const_cast<WorldModel*>(this);
+    std::vector<ESM::RefId> evictedIds;
+    evictedIds.reserve(self->mVitaEvictedState.size());
+    for (const auto& [id, data] : self->mVitaEvictedState)
+        evictedIds.push_back(id);
+    for (const ESM::RefId& id : evictedIds)
+    {
+        self->vitaApplyEvictedState(id); // no-op if a cascade consumed it
+        CellStore* cs = self->findCell(id, false);
+        if (cs == nullptr || !cs->hasState())
+            continue;
+        writeCell(writer, *cs);
+        progress.increaseProgress();
+    }
+#endif
 }
 
 struct MWWorld::WorldModel::GetCellStoreCallback : public CellStore::GetCellStoreCallback
@@ -601,7 +913,7 @@ bool MWWorld::WorldModel::readRecord(ESM::ESMReader& reader, uint32_t type)
             cellStore->readFog(reader);
 
         if (cellStore->getState() != CellStore::State_Loaded)
-            cellStore->load();
+            vitaLoadWithState(*cellStore);
 
         cellStore->readReferences(reader, &callback);
 

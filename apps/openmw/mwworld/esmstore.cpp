@@ -567,10 +567,51 @@ namespace MWWorld
         std::set<ESM::RefId> keyIDs;
         std::vector<ESM::RefId> refIDs;
         const Store<ESM::Cell>& cells = get<ESM::Cell>();
+#ifdef __vita__
+        std::vector<uint32_t> refCellIdx;
+        std::vector<ESM::RefId> walkedCells;
+#endif
         for (auto it = cells.intBegin(); it != cells.intEnd(); ++it)
+        {
             readRefs(*it, refs, refIDs, keyIDs, readers);
+#ifdef __vita__
+            walkedCells.push_back(it->mId);
+            refCellIdx.resize(refs.size(), static_cast<uint32_t>(walkedCells.size() - 1));
+#endif
+        }
         for (auto it = cells.extBegin(); it != cells.extEnd(); ++it)
+        {
             readRefs(*it, refs, refIDs, keyIDs, readers);
+#ifdef __vita__
+            walkedCells.push_back(it->mId);
+            refCellIdx.resize(refs.size(), static_cast<uint32_t>(walkedCells.size() - 1));
+#endif
+        }
+#ifdef __vita__
+        // Ref -> sole cell; must precede count pass.
+        {
+            std::unordered_map<uint64_t, std::pair<std::size_t, uint32_t>> lastByRefNum;
+            lastByRefNum.reserve(refs.size());
+            for (std::size_t i = 0; i < refs.size(); ++i)
+            {
+                const ESM::RefNum n = refs[i].mRefNum;
+                const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(n.mContentFile)) << 32)
+                    | n.mIndex;
+                lastByRefNum[key] = { refs[i].mRefID, refCellIdx[i] };
+            }
+            mVitaRefCellIndex.clear();
+            for (const auto& [num, v] : lastByRefNum)
+            {
+                if (v.first == deletedRefID)
+                    continue;
+                const ESM::RefId& cellId = walkedCells[v.second];
+                auto [slot, inserted] = mVitaRefCellIndex.try_emplace(refIDs[v.first], cellId);
+                if (!inserted && slot->second != cellId)
+                    slot->second = ESM::RefId(); // ambiguous
+            }
+            std::erase_if(mVitaRefCellIndex, [](const auto& p) { return p.second.empty(); });
+        }
+#endif
         const auto lessByRefNum = [](const Ref& l, const Ref& r) { return l.mRefNum < r.mRefNum; };
         std::stable_sort(refs.begin(), refs.end(), lessByRefNum);
         const auto equalByRefNum = [](const Ref& l, const Ref& r) { return l.mRefNum == r.mRefNum; };
@@ -590,6 +631,30 @@ namespace MWWorld
                 it->second.mData.mFlags |= ESM::Miscellaneous::Key;
         }
     }
+
+#ifdef __vita__
+    void ESMStore::vitaSeedRefCounts(std::unordered_map<ESM::RefId, int>&& counts, const std::vector<ESM::RefId>& keyIds)
+    {
+        mRefCount = std::move(counts);
+        auto& store = getWritable<ESM::Miscellaneous>().mStatic;
+        for (const auto& id : keyIds)
+        {
+            auto it = store.find(id);
+            if (it != store.end())
+                it->second.mData.mFlags |= ESM::Miscellaneous::Key;
+        }
+    }
+
+    std::vector<ESM::RefId> ESMStore::vitaGetKeyIds() const
+    {
+        std::vector<ESM::RefId> ids;
+        const auto& store = get<ESM::Miscellaneous>();
+        for (auto it = store.begin(); it != store.end(); ++it)
+            if (it->mData.mFlags & ESM::Miscellaneous::Key)
+                ids.push_back(it->mId);
+        return ids;
+    }
+#endif
 
     int ESMStore::getRefCount(const ESM::RefId& id) const
     {

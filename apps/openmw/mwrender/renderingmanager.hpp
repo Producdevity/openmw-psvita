@@ -157,6 +157,14 @@ namespace MWRender
         void addCell(const MWWorld::CellStore* store);
         void removeCell(const MWWorld::CellStore* store);
 
+#ifdef __vita__
+        /// Visit every ref that currently owns a render node.
+        void vitaCollectObjectPtrs(const std::function<void(const MWWorld::Ptr&)>& sink) const
+        {
+            mObjects->vitaCollectObjectPtrs(sink);
+        }
+#endif
+
         void enableTerrain(bool enable, ESM::RefId worldspace);
 
         void updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& updated);
@@ -193,6 +201,12 @@ namespace MWRender
 
         /// Return the object under the mouse cursor / crosshair position, given by nX and nY normalized screen
         /// coordinates, where (0,0) is the top left corner.
+        /// World-space camera ray for the given viewport coords; no traversal.
+        void getCameraRay(float nX, float nY, float maxDistance, osg::Vec3f& outStart, osg::Vec3f& outEnd) const;
+
+        RayResult castCameraToViewportRay(const float nX, const float nY, float maxDistance, bool ignorePlayer,
+            unsigned int maskAnd);
+
         RayResult castCameraToViewportRay(
             const float nX, const float nY, float maxDistance, bool ignorePlayer, bool ignoreActors = false);
 

@@ -3,6 +3,8 @@
 #include "VitaShader.h"
 
 #include <algorithm>
+#include <map>
+#include <mutex>
 #include <string>
 
 #include <osg/Node>
@@ -325,6 +327,28 @@ namespace Vita
         return s_white;
     }
 
+    osg::Uniform* internUniform(osg::Uniform* fresh)
+    {
+        osg::ref_ptr<osg::Uniform> holder(fresh);
+        std::string key = fresh->getName();
+        const unsigned int type = (unsigned int)fresh->getType();
+        key.append(reinterpret_cast<const char*>(&type), sizeof(type));
+        if (const osg::FloatArray* fa = fresh->getFloatArray())
+            key.append(static_cast<const char*>(fa->getDataPointer()), fa->getTotalDataSize());
+        else if (const osg::IntArray* ia = fresh->getIntArray())
+            key.append(static_cast<const char*>(ia->getDataPointer()), ia->getTotalDataSize());
+        else if (const osg::UIntArray* ua = fresh->getUIntArray())
+            key.append(static_cast<const char*>(ua->getDataPointer()), ua->getTotalDataSize());
+        else
+            return holder.release(); // unkeyed data type; skip interning
+
+        static std::map<std::string, osg::ref_ptr<osg::Uniform>> s_pool;
+        static std::mutex s_poolMutex;
+        std::lock_guard<std::mutex> lock(s_poolMutex);
+        auto it = s_pool.try_emplace(std::move(key), holder).first;
+        return it->second.get();
+    }
+
     void applyVitaShader(osg::Node& node, int colorMode, float alphaRef, const osg::Material* mat)
     {
         osg::StateSet* ss = node.getOrCreateStateSet();
@@ -339,14 +363,14 @@ namespace Vita
         {
             ss->setRenderBinDetails(1, "RenderBin");
         }
-        ss->addUniform(new osg::Uniform("colorMode", colorMode));
-        ss->addUniform(new osg::Uniform("alphaRef", alphaRef));
-        ss->addUniform(new osg::Uniform("diffuseMap", 0));
+        ss->addUniform(internUniform(new osg::Uniform("colorMode", colorMode)));
+        ss->addUniform(internUniform(new osg::Uniform("alphaRef", alphaRef)));
+        ss->addUniform(internUniform(new osg::Uniform("diffuseMap", 0)));
         osg::Uniform* material = new osg::Uniform(osg::Uniform::FLOAT_VEC4, "u_material", 3);
         material->setElement(0u, mat ? mat->getDiffuse(osg::Material::FRONT) : osg::Vec4f(1, 1, 1, 1));
         material->setElement(1u, mat ? mat->getAmbient(osg::Material::FRONT) : osg::Vec4f(1, 1, 1, 1));
         material->setElement(2u, mat ? mat->getEmission(osg::Material::FRONT) : osg::Vec4f(0, 0, 0, 1));
-        ss->addUniform(material);
+        ss->addUniform(internUniform(material));
     }
 
     // Scene Uniforms

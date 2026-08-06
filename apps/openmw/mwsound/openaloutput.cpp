@@ -29,6 +29,12 @@
 #define ALC_ALL_DEVICES_SPECIFIER 0x1013
 #endif
 
+#ifdef __vita__
+extern "C" void vitaBreadcrumb(const char*);
+extern "C" void vitaLogFlushNow(void);
+#include <cstdio>
+#endif
+
 #define MAKE_PTRID(id) ((void*)(uintptr_t)id)
 #define GET_PTRID(ptr) ((ALuint)(uintptr_t)ptr)
 
@@ -355,7 +361,25 @@ namespace MWSound
                 auto iter = mStreams.begin();
                 while (iter != mStreams.end())
                 {
+#ifdef __vita__
+                    // Uncaught here = terminate; drop the stream instead.
+                    bool alive;
+                    try
+                    {
+                        alive = (*iter)->process();
+                    }
+                    catch (const std::exception& e)
+                    {
+                        char buf[160];
+                        snprintf(buf, sizeof(buf), "[SoundStream] process failed: %s", e.what());
+                        vitaBreadcrumb(buf);
+                        vitaLogFlushNow();
+                        alive = false;
+                    }
+                    if (!alive)
+#else
                     if ((*iter)->process() == false)
+#endif
                         iter = mStreams.erase(iter);
                     else
                         ++iter;

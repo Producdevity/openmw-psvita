@@ -13,6 +13,10 @@
 #include "skeleton.hpp"
 #include "util.hpp"
 
+#ifdef __vita__
+extern "C" unsigned int rig_cull_count, rig_cull_verts;
+#endif
+
 namespace SceneUtil
 {
 
@@ -397,6 +401,11 @@ namespace SceneUtil
 
         if (nv.getVisitorType() == osg::NodeVisitor::CULL_VISITOR)
         {
+#ifdef __vita__
+            ++rig_cull_count;
+            if (const osg::Array* va = getSourceGeometry() ? getSourceGeometry()->getVertexArray() : nullptr)
+                rig_cull_verts += va->getNumElements();
+#endif
             // The cull visitor won't be applied to the node itself,
             // but we want to use its state to render the child geometry.
             osg::StateSet* stateset = getStateSet();

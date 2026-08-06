@@ -56,6 +56,9 @@ namespace MWRender
         Mask_Lighting = (1 << 19),
 
         Mask_Groundcover = (1 << 20),
+
+        // Vita: merged originals; intersectable but never rendered.
+        Mask_VitaPick = (1 << 21),
     };
 
     // Defines masks to remove when using ToggleWorld command

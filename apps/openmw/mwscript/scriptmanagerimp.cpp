@@ -22,6 +22,27 @@
 #include "extensions.hpp"
 #include "interpretercontext.hpp"
 
+#ifdef __vita__
+#include <cstdio>
+#include <psp2/kernel/processmgr.h>
+extern "C" void vitaBreadcrumb(const char*);
+
+void vitaScriptCompileNote(const ESM::RefId& name, unsigned long long us)
+{
+    static unsigned long long total = 0;
+    static int count = 0;
+    total += us;
+    ++count;
+    if (us > 50000)
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "[ScriptCompile] %s: %llums (running total %llums / %d scripts)",
+            name.getRefIdString().c_str(), us / 1000, total / 1000, count);
+        vitaBreadcrumb(buf);
+    }
+}
+#endif
+
 namespace MWScript
 {
     ScriptManager::ScriptManager(const MWWorld::ESMStore& store, Compiler::Context& compilerContext, int warningsMode)
@@ -38,6 +59,9 @@ namespace MWScript
 
     bool ScriptManager::compile(const ESM::RefId& name)
     {
+#ifdef __vita__
+        const unsigned long long compileStart = sceKernelGetProcessTimeWide();
+#endif
         mParser.reset();
         mErrorHandler.reset();
 
@@ -90,6 +114,9 @@ namespace MWScript
                 const_cast<ESM::Script*>(script)->mScriptText.shrink_to_fit();
 #endif
 
+#ifdef __vita__
+                vitaScriptCompileNote(name, sceKernelGetProcessTimeWide() - compileStart);
+#endif
                 return true;
             }
         }

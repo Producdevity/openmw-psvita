@@ -678,6 +678,14 @@ namespace MWWorld
         });
         return clean;
     }
+
+    MWWorld::CellStore* CellStore::vitaOwningStore(const LiveCellRefBase* ref) const
+    {
+        const auto it = mMovedHere.find(const_cast<LiveCellRefBase*>(ref));
+        if (it != mMovedHere.end())
+            return it->second;
+        return const_cast<CellStore*>(this);
+    }
 #endif
 
     bool CellStore::hasId(const ESM::RefId& id) const

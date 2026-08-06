@@ -70,6 +70,26 @@ namespace sol
 
 namespace MWLua
 {
+    LCell::LCell(const MWWorld::CellStore* store)
+        : mId(store->getCell()->getId())
+    {
+    }
+
+    MWWorld::CellStore* LCell::store() const
+    {
+        return &MWBase::Environment::get().getWorldModel()->getCell(mId);
+    }
+
+    GCell::GCell(const MWWorld::CellStore* store)
+        : mId(store->getCell()->getId())
+    {
+    }
+
+    MWWorld::CellStore* GCell::store() const
+    {
+        return &MWBase::Environment::get().getWorldModel()->getCell(mId);
+    }
+
 
     template <class CellT, class ObjectT>
     static void initCellBindings(const std::string& prefix, const Context& context)
@@ -77,9 +97,9 @@ namespace MWLua
         auto view = context.sol();
         sol::usertype<CellT> cellT = view.new_usertype<CellT>(prefix + "Cell");
 
-        cellT[sol::meta_function::equal_to] = [](const CellT& a, const CellT& b) { return a.mStore == b.mStore; };
+        cellT[sol::meta_function::equal_to] = [](const CellT& a, const CellT& b) { return a.mId == b.mId; };
         cellT[sol::meta_function::to_string] = [](const CellT& c) {
-            auto cell = c.mStore->getCell();
+            auto cell = c.store()->getCell();
             std::stringstream res;
             if (cell->isExterior())
                 res << "exterior(" << cell->getGridX() << ", " << cell->getGridY() << ", "
@@ -89,33 +109,33 @@ namespace MWLua
             return res.str();
         };
 
-        cellT["name"] = sol::readonly_property([](const CellT& c) { return c.mStore->getCell()->getNameId(); });
+        cellT["name"] = sol::readonly_property([](const CellT& c) { return c.store()->getCell()->getNameId(); });
         cellT["displayName"] = sol::readonly_property([](const CellT& c) -> std::string_view {
             const auto& storage = MWBase::Environment::get().getWindowManager()->getTranslationDataStorage();
-            return storage.translateCellName(c.mStore->getCell()->getNameId());
+            return storage.translateCellName(c.store()->getCell()->getNameId());
         });
-        cellT["id"] = sol::readonly_property([](const CellT& c) -> ESM::RefId { return c.mStore->getCell()->getId(); });
+        cellT["id"] = sol::readonly_property([](const CellT& c) -> ESM::RefId { return c.store()->getCell()->getId(); });
         cellT["region"]
-            = sol::readonly_property([](const CellT& c) -> ESM::RefId { return c.mStore->getCell()->getRegion(); });
+            = sol::readonly_property([](const CellT& c) -> ESM::RefId { return c.store()->getCell()->getRegion(); });
         cellT["worldSpaceId"]
-            = sol::readonly_property([](const CellT& c) -> ESM::RefId { return c.mStore->getCell()->getWorldSpace(); });
-        cellT["gridX"] = sol::readonly_property([](const CellT& c) { return c.mStore->getCell()->getGridX(); });
-        cellT["gridY"] = sol::readonly_property([](const CellT& c) { return c.mStore->getCell()->getGridY(); });
-        cellT["hasWater"] = sol::readonly_property([](const CellT& c) { return c.mStore->getCell()->hasWater(); });
+            = sol::readonly_property([](const CellT& c) -> ESM::RefId { return c.store()->getCell()->getWorldSpace(); });
+        cellT["gridX"] = sol::readonly_property([](const CellT& c) { return c.store()->getCell()->getGridX(); });
+        cellT["gridY"] = sol::readonly_property([](const CellT& c) { return c.store()->getCell()->getGridY(); });
+        cellT["hasWater"] = sol::readonly_property([](const CellT& c) { return c.store()->getCell()->hasWater(); });
         cellT["hasSky"] = sol::readonly_property([](const CellT& c) {
-            return c.mStore->getCell()->isExterior() || (c.mStore->getCell()->isQuasiExterior()) != 0;
+            return c.store()->getCell()->isExterior() || (c.store()->getCell()->isQuasiExterior()) != 0;
         });
-        cellT["isExterior"] = sol::readonly_property([](const CellT& c) { return c.mStore->isExterior(); });
+        cellT["isExterior"] = sol::readonly_property([](const CellT& c) { return c.store()->isExterior(); });
 
         // deprecated, use cell:hasTag("QuasiExterior") instead
         cellT["isQuasiExterior"]
-            = sol::readonly_property([](const CellT& c) { return (c.mStore->getCell()->isQuasiExterior()) != 0; });
+            = sol::readonly_property([](const CellT& c) { return (c.store()->getCell()->isQuasiExterior()) != 0; });
 
         cellT["hasTag"] = [](const CellT& c, std::string_view tag) -> bool {
             if (tag == "NoSleep")
-                return (c.mStore->getCell()->noSleep()) != 0;
+                return (c.store()->getCell()->noSleep()) != 0;
             else if (tag == "QuasiExterior")
-                return (c.mStore->getCell()->isQuasiExterior()) != 0;
+                return (c.store()->getCell()->isQuasiExterior()) != 0;
             return false;
         };
 
@@ -124,19 +144,19 @@ namespace MWLua
             if (!ptr.isInCell())
                 return false;
             MWWorld::CellStore* cell = ptr.getCell();
-            return cell == c.mStore || (cell->getCell()->getWorldSpace() == c.mStore->getCell()->getWorldSpace());
+            return cell == c.store() || (cell->getCell()->getWorldSpace() == c.store()->getCell()->getWorldSpace());
         };
 
         cellT["waterLevel"] = sol::readonly_property([](const CellT& c) -> sol::optional<float> {
-            if (c.mStore->getCell()->hasWater())
-                return c.mStore->getWaterLevel();
+            if (c.store()->getCell()->hasWater())
+                return c.store()->getWaterLevel();
             else
                 return sol::nullopt;
         });
 
         cellT["pathGrid"] = sol::readonly_property([](const CellT& c) -> const ESM::Pathgrid* {
             const ESM::Pathgrid* grid
-                = MWBase::Environment::get().getESMStore()->get<ESM::Pathgrid>().search(*c.mStore->getCell());
+                = MWBase::Environment::get().getESMStore()->get<ESM::Pathgrid>().search(*c.store()->getCell());
             if (grid && grid->mPoints.empty())
                 return nullptr;
             return grid;
@@ -145,8 +165,8 @@ namespace MWLua
         if constexpr (std::is_same_v<CellT, GCell>)
         { // only for global scripts
             cellT["getAll"] = [ids = getPackageToTypeTable(view)](const CellT& cell, sol::optional<sol::table> type) {
-                if (cell.mStore->getState() != MWWorld::CellStore::State_Loaded)
-                    cell.mStore->load();
+                if (cell.store()->getState() != MWWorld::CellStore::State_Loaded)
+                    cell.store()->load();
                 ObjectIdList res = std::make_shared<std::vector<ObjectId>>();
                 auto visitor = [&](const MWWorld::Ptr& ptr) {
                     if (ptr.mRef->isDeleted())
@@ -159,7 +179,7 @@ namespace MWLua
 
                 bool ok = true;
                 if (!type.has_value())
-                    cell.mStore->forEach(std::move(visitor));
+                    cell.store()->forEach(std::move(visitor));
                 else if (ids[*type] == sol::nil)
                     ok = false;
                 else
@@ -170,126 +190,126 @@ namespace MWLua
                         case ESM::REC_INTERNAL_PLAYER:
                         {
                             MWWorld::Ptr player = MWBase::Environment::get().getWorld()->getPlayerPtr();
-                            if (player.getCell() == cell.mStore)
+                            if (player.getCell() == cell.store())
                                 res->push_back(getId(player));
                         }
                         break;
 
                         case ESM::REC_CREA:
-                            cell.mStore->template forEachType<ESM::Creature>(visitor);
+                            cell.store()->template forEachType<ESM::Creature>(visitor);
                             break;
                         case ESM::REC_NPC_:
-                            cell.mStore->template forEachType<ESM::NPC>(visitor);
+                            cell.store()->template forEachType<ESM::NPC>(visitor);
                             break;
                         case ESM::REC_ACTI:
-                            cell.mStore->template forEachType<ESM::Activator>(visitor);
+                            cell.store()->template forEachType<ESM::Activator>(visitor);
                             break;
                         case ESM::REC_DOOR:
-                            cell.mStore->template forEachType<ESM::Door>(visitor);
+                            cell.store()->template forEachType<ESM::Door>(visitor);
                             break;
                         case ESM::REC_CONT:
-                            cell.mStore->template forEachType<ESM::Container>(visitor);
+                            cell.store()->template forEachType<ESM::Container>(visitor);
                             break;
 
                         case ESM::REC_ALCH:
-                            cell.mStore->template forEachType<ESM::Potion>(visitor);
+                            cell.store()->template forEachType<ESM::Potion>(visitor);
                             break;
                         case ESM::REC_ARMO:
-                            cell.mStore->template forEachType<ESM::Armor>(visitor);
+                            cell.store()->template forEachType<ESM::Armor>(visitor);
                             break;
                         case ESM::REC_BOOK:
-                            cell.mStore->template forEachType<ESM::Book>(visitor);
+                            cell.store()->template forEachType<ESM::Book>(visitor);
                             break;
                         case ESM::REC_CLOT:
-                            cell.mStore->template forEachType<ESM::Clothing>(visitor);
+                            cell.store()->template forEachType<ESM::Clothing>(visitor);
                             break;
                         case ESM::REC_INGR:
-                            cell.mStore->template forEachType<ESM::Ingredient>(visitor);
+                            cell.store()->template forEachType<ESM::Ingredient>(visitor);
                             break;
                         case ESM::REC_LIGH:
-                            cell.mStore->template forEachType<ESM::Light>(visitor);
+                            cell.store()->template forEachType<ESM::Light>(visitor);
                             break;
                         case ESM::REC_MISC:
-                            cell.mStore->template forEachType<ESM::Miscellaneous>(visitor);
+                            cell.store()->template forEachType<ESM::Miscellaneous>(visitor);
                             break;
                         case ESM::REC_WEAP:
-                            cell.mStore->template forEachType<ESM::Weapon>(visitor);
+                            cell.store()->template forEachType<ESM::Weapon>(visitor);
                             break;
                         case ESM::REC_APPA:
-                            cell.mStore->template forEachType<ESM::Apparatus>(visitor);
+                            cell.store()->template forEachType<ESM::Apparatus>(visitor);
                             break;
                         case ESM::REC_LOCK:
-                            cell.mStore->template forEachType<ESM::Lockpick>(visitor);
+                            cell.store()->template forEachType<ESM::Lockpick>(visitor);
                             break;
                         case ESM::REC_PROB:
-                            cell.mStore->template forEachType<ESM::Probe>(visitor);
+                            cell.store()->template forEachType<ESM::Probe>(visitor);
                             break;
                         case ESM::REC_REPA:
-                            cell.mStore->template forEachType<ESM::Repair>(visitor);
+                            cell.store()->template forEachType<ESM::Repair>(visitor);
                             break;
                         case ESM::REC_STAT:
-                            cell.mStore->template forEachType<ESM::Static>(visitor);
+                            cell.store()->template forEachType<ESM::Static>(visitor);
                             break;
                         case ESM::REC_LEVC:
-                            cell.mStore->template forEachType<ESM::CreatureLevList>(visitor);
+                            cell.store()->template forEachType<ESM::CreatureLevList>(visitor);
                             break;
 
                         case ESM::REC_ACTI4:
-                            cell.mStore->template forEachType<ESM4::Activator>(visitor);
+                            cell.store()->template forEachType<ESM4::Activator>(visitor);
                             break;
                         case ESM::REC_AMMO4:
-                            cell.mStore->template forEachType<ESM4::Ammunition>(visitor);
+                            cell.store()->template forEachType<ESM4::Ammunition>(visitor);
                             break;
                         case ESM::REC_ARMO4:
-                            cell.mStore->template forEachType<ESM4::Armor>(visitor);
+                            cell.store()->template forEachType<ESM4::Armor>(visitor);
                             break;
                         case ESM::REC_BOOK4:
-                            cell.mStore->template forEachType<ESM4::Book>(visitor);
+                            cell.store()->template forEachType<ESM4::Book>(visitor);
                             break;
                         case ESM::REC_CLOT4:
-                            cell.mStore->template forEachType<ESM4::Clothing>(visitor);
+                            cell.store()->template forEachType<ESM4::Clothing>(visitor);
                             break;
                         case ESM::REC_CONT4:
-                            cell.mStore->template forEachType<ESM4::Container>(visitor);
+                            cell.store()->template forEachType<ESM4::Container>(visitor);
                             break;
                         case ESM::REC_DOOR4:
-                            cell.mStore->template forEachType<ESM4::Door>(visitor);
+                            cell.store()->template forEachType<ESM4::Door>(visitor);
                             break;
                         case ESM::REC_FLOR4:
-                            cell.mStore->template forEachType<ESM4::Flora>(visitor);
+                            cell.store()->template forEachType<ESM4::Flora>(visitor);
                             break;
                         case ESM::REC_FURN4:
-                            cell.mStore->template forEachType<ESM4::Furniture>(visitor);
+                            cell.store()->template forEachType<ESM4::Furniture>(visitor);
                             break;
                         case ESM::REC_IMOD4:
-                            cell.mStore->template forEachType<ESM4::ItemMod>(visitor);
+                            cell.store()->template forEachType<ESM4::ItemMod>(visitor);
                             break;
                         case ESM::REC_INGR4:
-                            cell.mStore->template forEachType<ESM4::Ingredient>(visitor);
+                            cell.store()->template forEachType<ESM4::Ingredient>(visitor);
                             break;
                         case ESM::REC_LIGH4:
-                            cell.mStore->template forEachType<ESM4::Light>(visitor);
+                            cell.store()->template forEachType<ESM4::Light>(visitor);
                             break;
                         case ESM::REC_MISC4:
-                            cell.mStore->template forEachType<ESM4::MiscItem>(visitor);
+                            cell.store()->template forEachType<ESM4::MiscItem>(visitor);
                             break;
                         case ESM::REC_MSTT4:
-                            cell.mStore->template forEachType<ESM4::MovableStatic>(visitor);
+                            cell.store()->template forEachType<ESM4::MovableStatic>(visitor);
                             break;
                         case ESM::REC_ALCH4:
-                            cell.mStore->template forEachType<ESM4::Potion>(visitor);
+                            cell.store()->template forEachType<ESM4::Potion>(visitor);
                             break;
                         case ESM::REC_SCOL4:
-                            cell.mStore->template forEachType<ESM4::StaticCollection>(visitor);
+                            cell.store()->template forEachType<ESM4::StaticCollection>(visitor);
                             break;
                         case ESM::REC_STAT4:
-                            cell.mStore->template forEachType<ESM4::Static>(visitor);
+                            cell.store()->template forEachType<ESM4::Static>(visitor);
                             break;
                         case ESM::REC_TREE4:
-                            cell.mStore->template forEachType<ESM4::Tree>(visitor);
+                            cell.store()->template forEachType<ESM4::Tree>(visitor);
                             break;
                         case ESM::REC_WEAP4:
-                            cell.mStore->template forEachType<ESM4::Weapon>(visitor);
+                            cell.store()->template forEachType<ESM4::Weapon>(visitor);
                             break;
 
                         default:

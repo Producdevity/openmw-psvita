@@ -8,6 +8,8 @@
 // C-linkage breadcrumbs (also callable from C++ via Vita::breadcrumb wrapper)
 extern "C" {
 void vitaBreadcrumb(const char* msg);
+// Drain log ring to boot.log; call from crash paths.
+void vitaLogFlushNow(void);
 void vitaTimedBreadcrumb(const char* msg);
 void vitaMemBreadcrumb(const char* msg);
 }
@@ -37,6 +39,10 @@ namespace Vita
 
     // Returns true if heap usage exceeds the given MB threshold
     bool isMemoryPressure(int thresholdMB);
+    int getHeapFreeMB();
+
+    // Uncached mallinfo read; for accurate before/after crumbs.
+    int getHeapUsedMBFresh();
 
     // Replenish emergency reserve after OOM recovery.
     void replenishEmergencyReserve();

@@ -112,6 +112,13 @@ namespace MWBase
         virtual bool isEnabled() const = 0;
         ///< Returns true if sound system is enabled
 
+#ifdef __vita__
+        // Warm region ambients + weather one-shots; cold = 100-570ms stalls.
+        virtual void vitaWarmCellSounds(const ESM::RefId& regionId) = 0;
+        // Warm cell creatures' SNDG sounds; cold = 53-68ms mid-combat stalls.
+        virtual void vitaWarmActorSounds(MWWorld::CellStore& cell) = 0;
+#endif
+
         virtual void stopMusic() = 0;
         ///< Stops music if it's playing
 

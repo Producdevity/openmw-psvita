@@ -9,6 +9,11 @@
 #include <osg/ref_ptr>
 
 #include <map>
+#include <mutex>
+#include <set>
+#include <unordered_map>
+#include <atomic>
+#include <chrono>
 #include <span>
 
 namespace osg
@@ -81,6 +86,77 @@ namespace MWWorld
 
         std::size_t getCacheSize() const { return mPreloadCells.size(); }
 
+#ifdef __vita__
+        bool isCellPreloaded(const MWWorld::CellStore& cell) const
+        {
+            auto it = mPreloadCells.find(&cell);
+            return it != mPreloadCells.end() && it->second.mWorkItem && it->second.mWorkItem->isDone();
+        }
+        void vitaCollectHeldCells(std::set<CellStore*, std::less<>>& out) const
+        {
+            for (const auto& [cell, entry] : mPreloadCells)
+                out.insert(const_cast<CellStore*>(cell));
+        }
+        // Border warming: separate slots, immune to LRU eviction.
+        // Common-asset set: frequency-learned models pinned across cells.
+        void vitaLearnModels(const std::vector<std::string>& models);
+        void vitaSaveModelFreq();
+        void vitaLoadModelFreq();
+        void vitaLoadRegionPackages();
+        void vitaBootWarm();
+        // regions: promote to MRU. retain: still present enough to keep; any
+        // active region outside both is a biome we have left.
+        void vitaSetWarmRegions(const std::vector<std::string>& regions, const std::vector<std::string>& retain);
+        void vitaQueueHotspot(int x, int y);
+        float vitaWarmBoundRadius(const std::string& path) const;
+
+        // Demand set: models needed by in-radius objects. Membership = need,
+        // lifetime = touch-GC. The statistical pool answers first; misses
+        // become Wanted here and the worker fills them.
+        enum class VitaDemandState : unsigned char
+        {
+            Wanted,
+            Loading,
+            Ready
+        };
+        // Live salience prios land well under 1e5; anticipatory wants sit
+        // exactly here; default touches above. Order defines urgency.
+        static constexpr float kVitaAnticipatoryPrio = 1e8f;
+        VitaDemandState vitaDemandTouch(const std::string& path, float prio = 1e12f);
+        int vitaDemandWantedCount() const { return mVitaWantedCount; }
+        int vitaDemandUrgentCount() const;
+        void vitaDemandWant(const std::string& path);
+        void vitaStoreDemandRef(const std::string& path, osg::ref_ptr<const osg::Referenced> tmpl,
+            osg::ref_ptr<const osg::Referenced> shape);
+        void vitaDemandStats(int& wanted, int& loading, int& ready) const;
+        void vitaPrefetchModels(const std::vector<std::string>& models);
+        void vitaReleaseDistantHotspots(int cx, int cy, int minDist);
+        void vitaDropRegionRefs();
+        unsigned vitaRegionEpoch() const { return mVitaRegionEpoch; }
+        // Bumped once per delivery; O(1) edge for "retry what was cold".
+        unsigned vitaDemandReadyEpoch() const { return mVitaReadyEpoch; }
+        float vitaKnownBoundRadius(const std::string& path) const;
+        bool vitaShapeCached(const std::string& path) const;
+        int vitaDemandLatencyMs() const { return mVitaDemandLatencyMs; }
+        void vitaSaveModelBounds();
+        void vitaLoadModelBounds();
+        // Loads a warm resource by extension: .kf via KeyframeManager, else template+shape.
+        void vitaLoadWarmResource(const std::string& path, osg::ref_ptr<const osg::Referenced>& tmpl,
+            osg::ref_ptr<const osg::Referenced>& shape) const;
+        // Drains warm work in small batches, only when crossings are quiet.
+        void vitaPumpWarm(bool idle);
+        void vitaDrainWarmSync(int maxMs);
+        // Post-screen grace: clamp pump batches while visible frames catch up.
+        void vitaPumpGrace(int ms);
+        std::size_t vitaWarmBacklog() const { return mVitaCommonBacklog.size() + mVitaRegionBacklog.size(); }
+        void vitaDropCommonRefs();
+        void vitaRelievePressure();
+        void vitaRebuildRegionTargets();
+        void vitaStoreCommonRef(const std::string& path, osg::ref_ptr<const osg::Referenced> tmpl,
+            osg::ref_ptr<const osg::Referenced> shape, bool regionTarget = false, unsigned epoch = 0);
+        bool vitaIsCommonWarm(const std::string& path) const;
+#endif
+
         void setWorkQueue(osg::ref_ptr<SceneUtil::WorkQueue> workQueue);
 
         void setTerrainPreloadPositions(std::span<const PositionCellGrid> positions);
@@ -126,6 +202,52 @@ namespace MWWorld
 
         // Cells that are currently being preloaded, or have already finished preloading
         PreloadMap mPreloadCells;
+#ifdef __vita__
+        std::map<std::string, unsigned> mVitaModelFreq;
+        struct VitaCommonRef
+        {
+            unsigned freq = 0;
+            osg::ref_ptr<const osg::Referenced> tmpl;
+            osg::ref_ptr<const osg::Referenced> shape;
+        };
+        std::map<std::string, VitaCommonRef> mVitaCommonSet;
+        std::map<std::string, VitaCommonRef> mVitaRegionSet;
+        std::vector<std::pair<std::string, unsigned>> mVitaGeneralPackage;
+        std::map<std::string, std::vector<std::pair<std::string, unsigned>>> mVitaRegionPackages;
+        struct VitaDemandEntry
+        {
+            VitaDemandState state = VitaDemandState::Wanted;
+            float prio = 1e12f; // squared distance of the nearest needer
+            osg::ref_ptr<const osg::Referenced> tmpl;
+            osg::ref_ptr<const osg::Referenced> shape;
+            std::chrono::steady_clock::time_point touch{};
+            std::chrono::steady_clock::time_point requested{};
+        };
+        std::unordered_map<std::string, VitaDemandEntry> mVitaDemand;
+        std::atomic<int> mVitaWantedCount{ 0 };
+        std::map<std::string, float> mVitaModelBounds; // learned, persisted
+        bool mVitaBoundsDirty = false;
+        std::atomic<int> mVitaDemandLatencyMs{ 1500 };
+        std::chrono::steady_clock::time_point mVitaPumpGraceUntil{};
+        osg::ref_ptr<SceneUtil::WorkItem> mVitaDemandItem;
+        void vitaDemandGC();
+        std::map<std::pair<int, int>, std::vector<std::pair<std::string, unsigned>>> mVitaHotspots;
+        std::set<std::pair<int, int>> mVitaQueuedHotspots;
+        std::map<std::pair<int, int>, std::vector<std::string>> mVitaHotspotLoaded;
+        std::set<std::string> mVitaRegionTargets;
+        std::atomic<unsigned> mVitaRegionEpoch{ 0 };
+        std::atomic<unsigned> mVitaReadyEpoch{ 0 };
+        std::string mVitaCooldownRegion;
+        std::chrono::steady_clock::time_point mVitaCooldownUntil{};
+        bool mVitaTier2Armed = false;
+        std::vector<std::string> mVitaActiveRegions;
+        osg::ref_ptr<SceneUtil::WorkItem> mVitaRegionItem;
+        std::vector<std::pair<std::string, unsigned>> mVitaCommonBacklog;
+        std::vector<std::pair<std::string, unsigned>> mVitaRegionBacklog;
+        std::set<std::string> mVitaCommonQueued;
+        mutable std::mutex mVitaCommonMutex;
+        osg::ref_ptr<SceneUtil::WorkItem> mVitaCommonItem;
+#endif
 
         std::vector<osg::ref_ptr<Terrain::View>> mTerrainViews;
         std::vector<PositionCellGrid> mTerrainPreloadPositions;

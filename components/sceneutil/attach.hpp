@@ -25,6 +25,11 @@ namespace SceneUtil
     /// scenegraph, with no filtering.
     /// @note The master scene graph is expected to include a skeleton.
     /// @return A newly created node that is directly attached to the master scene graph
+#ifdef __vita__
+    void getRigCacheStats(unsigned& hits, unsigned& misses, unsigned& entries);
+    void clearRigCache();
+#endif
+
     osg::ref_ptr<osg::Node> attach(osg::ref_ptr<const osg::Node> toAttach, osg::Node* master, std::string_view filter,
         osg::Group* attachNode, Resource::SceneManager* sceneManager, const osg::Quat* attitude = nullptr);
 

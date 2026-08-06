@@ -1,5 +1,13 @@
 #include "objects.hpp"
 
+#include <chrono>
+
+#ifdef __vita__
+extern "C" {
+extern uint32_t vita_anim_inst_us, vita_anim_tribip_us, vita_anim_kf_us, vita_anim_wire_us;
+}
+#endif
+
 #include <osg/Group>
 #include <osg/UserDataContainer>
 
@@ -29,13 +37,6 @@ namespace MWRender
     // next time any system reads it (cull, light intersection). Returning a
     // huge fixed sphere short-circuits this — the actual children still cull
     // individually.
-    struct VitaCellBoundCallback : public osg::Node::ComputeBoundingSphereCallback
-    {
-        osg::BoundingSphere computeBound(const osg::Node&) const override
-        {
-            return osg::BoundingSphere(osg::Vec3(0, 0, 0), 1.0e6f);
-        }
-    };
 #endif
 
     Objects::Objects(Resource::ResourceSystem* resourceSystem, const osg::ref_ptr<osg::Group>& rootNode,
@@ -53,7 +54,36 @@ namespace MWRender
         for (CellMap::iterator iter = mCellSceneNodes.begin(); iter != mCellSceneNodes.end(); ++iter)
             iter->second->getParent(0)->removeChild(iter->second);
         mCellSceneNodes.clear();
+#ifdef __vita__
+        mCellBuckets.clear();
+#endif
     }
+
+#ifdef __vita__
+    osg::Group* Objects::vitaInsertParent(const MWWorld::Ptr& ptr, osg::Group* cellnode)
+    {
+        // Actors re-dirty their bound every frame; tiling them would keep
+        // invalidating the bound their static neighbours are rejected by.
+        if (ptr.getClass().isActor())
+            return cellnode;
+
+        constexpr float tileSize = 2048.f;
+        const float* f = ptr.getRefData().getPosition().pos;
+        const std::pair<int, int> key{ static_cast<int>(std::floor(f[0] / tileSize)),
+            static_cast<int>(std::floor(f[1] / tileSize)) };
+
+        BucketMap& buckets = mCellBuckets[ptr.getCell()];
+        auto it = buckets.find(key);
+        if (it == buckets.end())
+        {
+            osg::ref_ptr<osg::Group> bucket = new osg::Group;
+            bucket->setName("Cell Tile");
+            cellnode->addChild(bucket);
+            it = buckets.emplace(key, std::move(bucket)).first;
+        }
+        return it->second.get();
+    }
+#endif
 
     void Objects::insertBegin(const MWWorld::Ptr& ptr)
     {
@@ -66,9 +96,6 @@ namespace MWRender
         {
             cellnode = new osg::Group;
             cellnode->setName("Cell Root");
-#ifdef __vita__
-            cellnode->setComputeBoundingSphereCallback(new VitaCellBoundCallback);
-#endif
             mRootNode->addChild(cellnode);
             mCellSceneNodes[ptr.getCell()] = cellnode;
         }
@@ -76,7 +103,11 @@ namespace MWRender
             cellnode = found->second;
 
         osg::ref_ptr<SceneUtil::PositionAttitudeTransform> insert(new SceneUtil::PositionAttitudeTransform);
+#ifdef __vita__
+        vitaInsertParent(ptr, cellnode.get())->addChild(insert);
+#else
         cellnode->addChild(insert);
+#endif
 
         insert->getOrCreateUserDataContainer()->addUserObject(new PtrHolder(ptr));
 
@@ -142,10 +173,32 @@ namespace MWRender
         // CreatureAnimation
         osg::ref_ptr<Animation> anim;
 
+#ifdef __vita__
+        const uint32_t i0 = vita_anim_inst_us, t0 = vita_anim_tribip_us, k0 = vita_anim_kf_us,
+                       w0 = vita_anim_wire_us;
+        const auto ctorT0 = std::chrono::steady_clock::now();
+#endif
         if (weaponsShields)
             anim = new CreatureWeaponAnimation(ptr, animationMesh, mResourceSystem, animated);
         else
             anim = new CreatureAnimation(ptr, animationMesh, mResourceSystem, animated);
+#ifdef __vita__
+        const uint32_t ctorMs = (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - ctorT0)
+                                    .count();
+        if (ctorMs > 100)
+        {
+            char ab[192];
+            snprintf(ab, sizeof(ab), "[ActorAdd] %s total=%ums inst=%u tribip=%u kf=%u wire=%u other=%d ms",
+                animationMesh.c_str(), ctorMs, (vita_anim_inst_us - i0) / 1000, (vita_anim_tribip_us - t0) / 1000,
+                (vita_anim_kf_us - k0) / 1000, (vita_anim_wire_us - w0) / 1000,
+                (int)ctorMs
+                    - (int)((vita_anim_inst_us - i0 + vita_anim_tribip_us - t0 + vita_anim_kf_us - k0
+                                + vita_anim_wire_us - w0)
+                        / 1000));
+            Vita::breadcrumb(ab);
+        }
+#endif
 
         if (mObjects.emplace(ptr.mRef, anim).second)
             ptr.getClass().getContainerStore(ptr).setContListener(static_cast<ActorAnimation*>(anim.get()));
@@ -227,6 +280,14 @@ namespace MWRender
         return nullptr;
     }
 
+#ifdef __vita__
+    void Objects::vitaCollectObjectPtrs(const std::function<void(const MWWorld::Ptr&)>& sink) const
+    {
+        for (const auto& [ref, animation] : mObjects)
+            sink(animation->getPtr());
+    }
+#endif
+
     void Objects::removeCell(const MWWorld::CellStore* store)
     {
         for (PtrAnimationMap::iterator iter = mObjects.begin(); iter != mObjects.end();)
@@ -255,6 +316,9 @@ namespace MWRender
             cell->second->getParent(0)->removeChild(cell->second);
             mCellSceneNodes.erase(cell);
         }
+#ifdef __vita__
+        mCellBuckets.erase(store);
+#endif
     }
 
     void Objects::updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& cur)
