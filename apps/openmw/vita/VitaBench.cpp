@@ -281,6 +281,7 @@ namespace Vita
                 FILE* f = fopen(path, "w");
                 if (!f)
                     return {};
+                // VitaSDK's libc lacks C99 %z modifiers; counts fit its 32-bit unsigned format.
                 fprintf(f,
                     "# schema=openmw-vita-bench-v1\n"
                     "# outcome=%s\n"
@@ -290,16 +291,16 @@ namespace Vita
                     "# build=%s\n# build_stamp=%s\n# route=%s\n"
                     "# save_request=%s\n# save_path=%s\n"
                     "# settle_seconds=%.6f\n# requested_fps=%.6f\n# streaming_target=%.6f\n"
-                    "# start_us=%llu\n# rejected_clock_samples=%zu\n"
+                    "# start_us=%llu\n# rejected_clock_samples=%u\n"
                     "# percentiles=nearest-rank\n"
                     "frame,frame_us,vblank_wait_us,residual_us\n",
                     outcome, buildId(), buildStamp(), config().mRoute.c_str(), config().mSave.c_str(), sSelectedSave.c_str(),
                     config().mSettleSeconds, config().mFps, benchStreamingTarget(),
-                    static_cast<unsigned long long>(mStartUs), mFrameClock.rejectedSamples());
+                    static_cast<unsigned long long>(mStartUs), static_cast<unsigned>(mFrameClock.rejectedSamples()));
                 for (std::size_t i = 0; i < mFrames.size(); ++i)
                 {
                     const Bench::FrameSample& sample = mFrames[i];
-                    fprintf(f, "%zu,%llu,%llu,%llu\n", i,
+                    fprintf(f, "%u,%llu,%llu,%llu\n", static_cast<unsigned>(i),
                         static_cast<unsigned long long>(sample.mDurationUs),
                         static_cast<unsigned long long>(sample.mVblankWaitUs),
                         static_cast<unsigned long long>(sample.residualUs()));
@@ -345,13 +346,15 @@ namespace Vita
                 const Bench::Distribution residual = Bench::summarize(mFrames, true);
                 char b[640];
                 snprintf(b, sizeof(b),
-                    "[Bench] done build=%s frames=%zu avg=%.3fms median=%.3f p90=%.3f p95=%.3f p99=%.3f max=%.3f "
-                    "fps_mean=%.3f fps_median=%.3f hitches>50ms=%zu >100ms=%zu "
-                    "residual avg=%.3f median=%.3f p90=%.3f elapsed=%.6fs clock_rejected=%zu raw=%s",
-                    buildId(), frames.mCount, frames.mMeanMs, frames.mMedianMs, frames.mP90Ms, frames.mP95Ms,
-                    frames.mP99Ms, frames.mMaxMs, frames.mMeanFps, 1000.0 / frames.mMedianMs,
-                    frames.mOver50Ms, frames.mOver100Ms, residual.mMeanMs, residual.mMedianMs, residual.mP90Ms,
-                    frames.mTotalMs / 1000.0, mFrameClock.rejectedSamples(), rawPath.c_str());
+                    "[Bench] done build=%s frames=%u avg=%.3fms median=%.3f p90=%.3f p95=%.3f p99=%.3f max=%.3f "
+                    "fps_mean=%.3f fps_median=%.3f hitches>50ms=%u >100ms=%u "
+                    "residual avg=%.3f median=%.3f p90=%.3f elapsed=%.6fs clock_rejected=%u raw=%s",
+                    buildId(), static_cast<unsigned>(frames.mCount), frames.mMeanMs, frames.mMedianMs,
+                    frames.mP90Ms, frames.mP95Ms, frames.mP99Ms, frames.mMaxMs, frames.mMeanFps,
+                    1000.0 / frames.mMedianMs,
+                    static_cast<unsigned>(frames.mOver50Ms), static_cast<unsigned>(frames.mOver100Ms),
+                    residual.mMeanMs, residual.mMedianMs, residual.mP90Ms,
+                    frames.mTotalMs / 1000.0, static_cast<unsigned>(mFrameClock.rejectedSamples()), rawPath.c_str());
                 breadcrumb(b);
                 if (FILE* f = fopen(kResults, "a"))
                 {
