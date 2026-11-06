@@ -1,0 +1,60 @@
+diff --git a/vita3k/modules/SceLibKernel/SceLibKernel.cpp b/vita3k/modules/SceLibKernel/SceLibKernel.cpp
+index 29dcb7d..63ef0f8 100644
+--- a/vita3k/modules/SceLibKernel/SceLibKernel.cpp
++++ b/vita3k/modules/SceLibKernel/SceLibKernel.cpp
+@@ -54,6 +54,14 @@ enum class TimerFlags : uint32_t {
+     OPENABLE = 0x00000080,
+ };
+ 
++struct SceClibMspaceStats {
++    SceSize capacity;
++    SceSize unk;
++    SceSize peak_in_use;
++    SceSize current_in_use;
++};
++static_assert(sizeof(SceClibMspaceStats) == 16);
++
+ TRACY_MODULE_NAME(SceLibKernel);
+ 
+ VAR_EXPORT(__sce_libcparam) {
+@@ -252,19 +260,31 @@ EXPORT(Ptr<void>, sceClibMspaceMalloc, Ptr<void> space, uint32_t size) {
+     return Ptr<void>(address, emuenv.mem);
+ }
+ 
+-EXPORT(int, sceClibMspaceMallocStats) {
+-    TRACY_FUNC(sceClibMspaceMallocStats);
+-    return UNIMPLEMENTED();
++EXPORT(void, sceClibMspaceMallocStats, Ptr<void> space, SceClibMspaceStats *stats) {
++    TRACY_FUNC(sceClibMspaceMallocStats, space, stats);
++    const std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
++
++    if (!space || !stats)
++        return;
++
++    const mspace heap = space.get(emuenv.mem);
++    const auto info = mspace_mallinfo(heap);
++    const auto capacity = static_cast<SceSize>(mspace_footprint(heap));
++    // dlmalloc's maximum system footprint is not peak live allocation usage.
++    *stats = { capacity, capacity, 0, static_cast<SceSize>(info.uordblks) };
++    LOG_WARN_ONCE("Mspace stats: capacity/current_in_use use allocator accounting; peak_in_use is unsupported and reported as zero");
+ }
+ 
+-EXPORT(int, sceClibMspaceMallocStatsFast) {
+-    TRACY_FUNC(sceClibMspaceMallocStatsFast);
+-    return UNIMPLEMENTED();
++EXPORT(void, sceClibMspaceMallocStatsFast, Ptr<void> space, SceClibMspaceStats *stats) {
++    TRACY_FUNC(sceClibMspaceMallocStatsFast, space, stats);
++    CALL_EXPORT(sceClibMspaceMallocStats, space, stats);
+ }
+ 
+-EXPORT(int, sceClibMspaceMallocUsableSize) {
+-    TRACY_FUNC(sceClibMspaceMallocUsableSize);
+-    return UNIMPLEMENTED();
++EXPORT(SceSize, sceClibMspaceMallocUsableSize, Ptr<void> address) {
++    TRACY_FUNC(sceClibMspaceMallocUsableSize, address);
++    const std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
++
++    return static_cast<SceSize>(mspace_usable_size(address.get(emuenv.mem)));
+ }
+ 
+ EXPORT(Ptr<void>, sceClibMspaceMemalign, Ptr<void> space, uint32_t alignment, uint32_t size) {

@@ -87,22 +87,9 @@ Drop full mod folders into `ux0:data/openmw/mods/<name>/`. Plugin files (`.esm`,
 
 ### Building for Vita
 
-Requires the [VitaSDK](https://vitasdk.org/) toolchain. Docker is easiest:
-
-```bash
-$ sudo docker build -f Dockerfile.vita -t openmw-vita .
-$ sudo docker create --name openmw-vita-build openmw-vita
-$ sudo docker cp openmw-vita-build:/src/build-vita/apps/openmw/openmw.vpk .
-```
-
-Or manually:
-
-```bash
-$ ./scripts/vita-deps/build-all.sh
-$ mkdir build-vita && cd build-vita
-$ cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/VitaToolchain.cmake ..
-$ make -j$(nproc) openmw.vpk-vpk
-```
+Follow [Vita development builds](docs/vita-building.md) for the verified SDK,
+dependency versions, and `scripts/vita/docker-build.sh` workflow. See
+[Vita benchmarking](docs/vita-benchmarking.md) for repeatable runtime validation.
 
 The build automatically bakes [Morrowind Optimization Patch](https://www.nexusmods.com/morrowind/mods/45384) and [Project Atlas](https://www.nexusmods.com/morrowind/mods/45399) into the VPK as BSA archives if their extracted folders are present under `<repo>/mods/`. If the `mods/` folder is missing the bake step silently no-ops and produces a vanilla VPK. Set `-DOPENMW_VITA_BAKE_MODS=OFF` to disable explicitly.
 

@@ -1,4 +1,21 @@
-FROM --platform=linux/amd64 ubuntu:22.04
+FROM ubuntu:24.04 AS development-host
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git wget curl ca-certificates unzip zip patch pkg-config autoconf \
+    automake libtool ccache bzip2 xz-utils python3 file \
+    && if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+        apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-user; \
+       else \
+        apt-get install -y --no-install-recommends gcc-multilib g++-multilib; \
+       fi \
+    && rm -rf /var/lib/apt/lists/*
+ENV VITASDK=/usr/local/vitasdk
+ENV PATH="${VITASDK}/bin:${PATH}"
+ENTRYPOINT ["/bin/bash"]
+
+FROM --platform=linux/amd64 ubuntu:22.04 AS legacy-build
 
 ENV DEBIAN_FRONTEND=noninteractive
 

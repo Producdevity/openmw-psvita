@@ -384,7 +384,7 @@ namespace Vita
         snprintf(buf, sizeof(buf), "[VitaAudit] vgl: ram=%u/%uMB vram=%u/%uMB slow=%u/%uMB ext=%uMB",
             (unsigned)(used(VGL_MEM_RAM) >> 20), (unsigned)(vglMemTotal(VGL_MEM_RAM) >> 20),
             (unsigned)(used(VGL_MEM_VRAM) >> 20), (unsigned)(vglMemTotal(VGL_MEM_VRAM) >> 20),
-            (unsigned)(used(VGL_MEM_SLOW) >> 20), (unsigned)(vglMemTotal(VGL_MEM_SLOW) >> 20),
+            (unsigned)(used(VGL_MEM_PHYCONT) >> 20), (unsigned)(vglMemTotal(VGL_MEM_PHYCONT) >> 20),
             (unsigned)(used(VGL_MEM_EXTERNAL) >> 20));
         auditLog(buf);
 
@@ -462,10 +462,18 @@ namespace Vita
         osg::Stats* camStats = viewer.getCamera() ? viewer.getCamera()->getStats() : nullptr;
         if (!s_enabled && viewerStats && camStats)
         {
+            bool sceneStats = true;
+            if (FILE* f = fopen("ux0:data/openmw/no-scene-stats.txt", "rb"))
+            {
+                fclose(f);
+                sceneStats = false;
+            }
             viewerStats->collectStats("engine", true);
             viewerStats->collectStats("update", true);
             camStats->collectStats("rendering", true);
-            camStats->collectStats("scene", true);
+            camStats->collectStats("scene", sceneStats);
+            Vita::breadcrumb(sceneStats ? "[SceneStats] on"
+                                        : "[SceneStats] off (no-scene-stats.txt)");
             s_enabled = true;
         }
         if (!s_enabled)

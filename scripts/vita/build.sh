@@ -8,15 +8,17 @@
 #
 # Usage: scripts/vita/build.sh [clean]
 #
-# NOTE: This script is kept in sync with Dockerfile.vita to ensure
-# identical configuration between local and Docker builds.
+# scripts/vita/docker-build.sh invokes this same configuration in Docker.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${SRC_DIR}/build-vita"
+BUILD_DIR="${OPENMW_VITA_BUILD_DIR:-${SRC_DIR}/build-vita}"
 VITASDK="${VITASDK:-/usr/local/vitasdk}"
 VITAGL_DIR="${VITAGL_DIR:-${HOME}/vitaGL}"
+JOBS="${OPENMW_VITA_JOBS:-4}"
+BUILD_DIR="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BUILD_DIR}")"
+export OPENMW_VITA_BUILD_DIR="${BUILD_DIR}"
 
 export PATH="${VITASDK}/bin:${PATH}"
 # Must match build-fast.sh: a reconfigure under a different pkg-config
@@ -49,17 +51,22 @@ if [ ! -f "${VITAGL_DIR}/libvitaGL.a" ]; then
     exit 1
 fi
 
-# Clean build if requested
-if [ "${1}" = "clean" ]; then
-    echo "Cleaning build directory..."
-    rm -rf "${BUILD_DIR}"
+# Clean generated targets without deleting unrelated files in the build directory.
+if [ "${1:-}" = "clean" ] && [ -d "${BUILD_DIR}" ]; then
+    if [ "${BUILD_DIR}" = "${SRC_DIR}" ] || [ "${BUILD_DIR}" = / ] \
+        || ! grep -Fqx "CMAKE_HOME_DIRECTORY:INTERNAL=${SRC_DIR}" "${BUILD_DIR}/CMakeCache.txt"; then
+        echo "ERROR: refusing to clean a directory not configured for this source tree: ${BUILD_DIR}"
+        exit 1
+    fi
+    echo "Cleaning generated build targets..."
+    cmake --build "${BUILD_DIR}" --target clean --parallel "${JOBS}"
 fi
 
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
 # ICU host build (needed for data filtering during cross-compile)
-ICU_HOST="${BUILD_DIR}/extern/icu-host-build"
+ICU_HOST="${ICU_HOST_BUILD_DIR:-${BUILD_DIR}/extern/icu-host-build}"
 if [ ! -f "${ICU_HOST}/bin/icupkg" ]; then
     echo "=== Building ICU host tools ==="
     ICU_SRC_URL="https://github.com/unicode-org/icu/archive/refs/tags/release-70-1.zip"
@@ -93,7 +100,7 @@ if [ ! -f "${ICU_HOST}/bin/icupkg" ]; then
     "${ICU_FETCH_DIR}/icu4c/source/configure" \
         --enable-static --disable-shared \
         --disable-extras --disable-tests --disable-samples --disable-icuio
-    make -j$(nproc)
+    make -j"${JOBS}"
 
     # Validate host build
     if [ ! -f "${ICU_HOST}/bin/icupkg" ]; then
@@ -112,7 +119,15 @@ if command -v ccache &> /dev/null; then
     echo "ccache: on ($(ccache -s 2>/dev/null | grep -iE '^ *(cache size|Cache size)' | head -1 | sed 's/^ *//'))"
 fi
 
-# Configure (matches Docker build exactly)
+FETCH_ARGS=()
+if [ -n "${OPENMW_VITA_FETCH_ROOT:-}" ]; then
+    for dependency in BULLET MYGUI OSG RECASTNAVIGATION SQLITE3 YAML-CPP; do
+        directory="$(printf '%s' "${dependency}" | tr '[:upper:]' '[:lower:]')"
+        FETCH_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_${dependency}=${OPENMW_VITA_FETCH_ROOT}/${directory}")
+    done
+fi
+
+# Configure
 echo "=== Configuring ==="
 cmake -DCMAKE_TOOLCHAIN_FILE="${SRC_DIR}/cmake/VitaToolchain.cmake" \
       "${CCACHE_ARGS[@]}" \
@@ -138,21 +153,23 @@ cmake -DCMAKE_TOOLCHAIN_FILE="${SRC_DIR}/cmake/VitaToolchain.cmake" \
       -DOPENMW_USE_SYSTEM_SQLITE3=OFF \
       -DOPENMW_USE_SYSTEM_YAML_CPP=OFF \
       -DOPENMW_USE_SYSTEM_ICU=OFF \
+      -DOPENMW_VITA_BAKE_MODS="${OPENMW_VITA_BAKE_MODS:-ON}" \
       -D_OPENTHREADS_ATOMIC_USE_GCC_BUILTINS_EXITCODE=0 \
+      "${FETCH_ARGS[@]}" \
       "${SRC_DIR}"
 
 # Build full OSG (osgParticle/osgShadow needed but not in USED_OSG_COMPONENTS)
 echo "=== Building OSG ==="
-make -C _deps/osg-build -j$(nproc)
+make -C _deps/osg-build -j"${JOBS}"
 
 # Build eboot.bin
 BUILD_ID="$(bash "${SCRIPT_DIR}/build-id.sh")"
 echo "=== Building OpenMW (id ${BUILD_ID}) ==="
-make -j$(nproc) eboot.bin-self
+make -j"${JOBS}" eboot.bin-self
 
 # Build VPK (needed for ATTRIBUTE2 extra memory mode)
 echo "=== Building VPK ==="
-make openmw.vpk-vpk
+make -j"${JOBS}" openmw.vpk-vpk
 
 bash "${SCRIPT_DIR}/archive-build.sh" "${BUILD_ID}"
 
