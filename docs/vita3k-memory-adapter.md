@@ -53,6 +53,8 @@ Retain the commit/submodule IDs, patch hash, CMake cache and emulator binary has
 
 Xcode's icon compilation needs access to its standard cache/log services. A sandbox that blocks those services can fail packaging after successful compilation; build with that access instead of altering the icon or emulator behavior.
 
+The local arm64 build, existing CTest `mem`/`module` suites, actual-export tests and strict app-signature verification passed. The executable is `build-perf/vita3k-build/bin/Vita3K.app/Contents/MacOS/Vita3K`; build provenance is retained at `build-perf/evidence/vita3k-memory-adapter-build.json`. Homebrew OpenSSL emitted macOS 27 versus 13.3 deployment-target warnings, so this artifact is for this development host, not a portable release.
+
 ## Test coverage and runtime gate
 
 The actual-export test extracts the patched functions and compiles them against the pinned dlmalloc source. It checks guarded 16-byte output boundaries, normal/Fast agreement, capacity/current/free conservation, malloc/calloc/alignment, realloc growth/shrink/failure and preserved contents, cross-pool copying, concurrent allocation/stat calls, and release back to initial usage. `--probe-expansion` checks an oversized allocation. `--reproduce-stub` restores the old usable-size return expression and must fail its allocation-size assertion.
@@ -60,3 +62,5 @@ The actual-export test extracts the patched functions and compiles them against 
 ASan and UBSan are enabled with fatal errors. Only the pre-existing dlmalloc null-pointer alignment expression has its `pointer-overflow` sanitizer disabled for that translation unit; the exported functions retain all checks. Guest pointer translation and export dispatch use small host stand-ins in this test. The full build and existing module/memory tests provide separate integration checks.
 
 Before comparisons, run a functional smoke test through [vita3k_bench.py](../scripts/vita/vita3k_bench.py) with the isolated executable. Verify the missing-import warnings disappear, each pool's free value remains within its configured total, workload state remains valid, and the adapter's unsupported-peak warning is recorded. A successful compile or host test alone does not satisfy this runtime gate. The configured installed app should remain unchanged.
+
+A 60-second Seyda Neen smoke test completed with 6,928 valid wall-clock frame samples and a normal exit. All 66 reported VRAM-free samples stayed within the configured pool (59–60 MiB free of 88 MiB); no missing-memory-import warnings occurred, and the unsupported-peak warning was retained. Game rendering was visually inspected. This smoke included UI inspection and an idle extra emulator window, so it is functional evidence only; use exclusive repeated trials for performance comparisons.
