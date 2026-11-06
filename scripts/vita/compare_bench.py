@@ -17,7 +17,8 @@ import re
 import statistics
 import sys
 
-from vita3k_bench import BenchError, PERSISTENT_CONFIG_FILES, read_samples, sha256
+from vita3k_bench import (BenchError, MEMORY_VALIDATION_SCHEMA, MEMORY_VALIDATION_SCOPE,
+                         PERSISTENT_CONFIG_FILES, read_samples, scan_memory_api_log, sha256)
 
 CONFIG_OUTPUTS = {"MyGUI.log", "openmw.log"}
 
@@ -99,8 +100,22 @@ def load_run(directory: Path, vary: set[str]) -> dict:
                 or manifest["restored_toggles"] is not True
                 or manifest.get("restored_persistent_inputs") is not True or summary["legacy"] is not False):
             raise BenchError("Requires a completed, restored Vita3K run with raw samples")
+        validity = manifest.get("measurement_validity", {})
+        if (validity.get("schema") != MEMORY_VALIDATION_SCHEMA
+                or validity.get("scope") != MEMORY_VALIDATION_SCOPE or validity.get("scan_complete") is not True
+                or manifest.get("process_log_truncated", False)):
+            raise BenchError("Missing or incomplete memory API validation; capture a new classified run")
+        verify_file(directory / "process.log", validity["process_log"])
+        observed = scan_memory_api_log(directory / "process.log")
+        if observed["missing_memory_apis"]:
+            raise BenchError("Unimplemented memory APIs invalidate performance comparison: "
+                             + ", ".join(observed["missing_memory_apis"]))
+        if (validity.get("status") != "no-known-missing-memory-api"
+                or any(validity.get(key) != observed[key] for key in ("missing_memory_apis", "limitations", "evidence"))):
+            raise BenchError("Memory API validation does not match captured process log")
         artifacts = manifest["artifacts"]
         controls = {name: fingerprint(artifacts[name]) for name in ("emulator", "save")}
+        controls["memory_api_limitations"] = validity["limitations"]
         controls["route"] = verify_file(directory / "route.txt", artifacts["route"])
         controls["config_run"] = verify_file(directory / "vita3k-config.yml", artifacts["config_run"])
         executable = fingerprint(artifacts["executable"])
@@ -192,6 +207,7 @@ def load_run(directory: Path, vary: set[str]) -> dict:
             rows = csv.DictReader(line for line in source if not line.startswith("#"))
             durations = [int(row["frame_us"]) for row in rows]
         return {"directory": str(directory), "executable": executable, "metrics": metrics(durations),
+                "measurement_validity": validity,
                 "raw_sha256": summary["raw_csv"]["sha256"], "controls": controls,
                 "varied_toggles": {name: toggles.get(name) for name in sorted(vary)},
                 "restored_changed_inputs": sorted(name for name, state in persistent.items()

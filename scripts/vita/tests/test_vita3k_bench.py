@@ -93,6 +93,10 @@ class RunnerTests(unittest.TestCase):
                 time.sleep(60)
             if mode == "no-result":
                 sys.exit(0)
+            if mode == "missing-memory-api":
+                print("Unimplemented sceClibMspaceMallocStats import called.", flush=True)
+            if mode == "partial-memory-api":
+                print("Mspace stats: capacity/current_in_use use allocator accounting; peak_in_use is unsupported and reported as zero", flush=True)
             if mode == "legacy":
                 print("[Bench] done build=test frames=2 avg=20.000ms", flush=True)
             else:
@@ -121,6 +125,10 @@ class RunnerTests(unittest.TestCase):
                     time.sleep(0.2)
                     print("[log_invalid_access]: Invalid write after result", flush=True)
                     time.sleep(60)
+                if mode == "missing-api-after-result":
+                    time.sleep(0.2)
+                    sys.stdout.write("Unimplemented sceClibMspaceMallocUsableSize import called.")
+                    sys.stdout.flush()
             if mode == "bad-exit":
                 sys.exit(3)
             ''').replace("mode = MODE", "mode = " + repr(mode))
@@ -370,6 +378,58 @@ class RunnerTests(unittest.TestCase):
             bench.check_process_log(reader, evidence)
         self.assertIn("[log_invalid_access]", evidence["fatal_process_log"])
         self.assertLess(len(evidence["fatal_process_log"]), 1100)
+
+    def test_no_warning_run_records_complete_hashed_memory_api_evidence(self):
+        result = bench.run_benchmark(self.args)
+        validity = result["measurement_validity"]
+        self.assertEqual(validity["schema"], bench.MEMORY_VALIDATION_SCHEMA)
+        self.assertTrue(validity["scan_complete"])
+        self.assertEqual(validity["status"], "no-known-missing-memory-api")
+        self.assertEqual(validity["missing_memory_apis"], [])
+        self.assertEqual(validity["process_log"], bench.artifact(Path(self.args.output).resolve() / "process.log"))
+
+    def test_missing_memory_api_keeps_functional_result_but_marks_measurements(self):
+        self.set_emulator("missing-memory-api")
+        result = bench.run_benchmark(self.args)
+        self.assertEqual(result["status"], "completed")
+        validity = result["measurement_validity"]
+        self.assertEqual(validity["status"], "missing-memory-api")
+        self.assertEqual(validity["missing_memory_apis"], ["sceClibMspaceMallocStats"])
+        self.assertTrue(validity["scan_complete"])
+        self.assert_restored()
+        self.assert_persistent_inputs_restored()
+
+    def test_shutdown_warning_without_newline_is_classified(self):
+        self.set_emulator("missing-api-after-result")
+        result = bench.run_benchmark(self.args)
+        self.assertEqual(result["status"], "completed")
+        validity = result["measurement_validity"]
+        self.assertEqual(validity["status"], "missing-memory-api")
+        self.assertEqual(validity["missing_memory_apis"], ["sceClibMspaceMallocUsableSize"])
+        self.assertEqual(validity["process_log"], bench.artifact(Path(self.args.output).resolve() / "process.log"))
+
+    def test_memory_api_markers_split_across_reads_are_detected(self):
+        path = self.root / "split-memory-api.log"
+        path.write_bytes(b"")
+        reader = bench.FreshLog(path)
+        apis = ["sceClibMspaceMallocStats", "sceClibMspaceMallocStatsFast", "sceClibMspaceMallocUsableSize"]
+        path.write_text("\n".join(f"Unimplemented {api} import called." for api in apis))
+        evidence = {}
+        with mock.patch.object(bench, "PROCESS_LOG_READ_BYTES", 17):
+            while reader.has_unread():
+                bench.check_process_log(reader, evidence)
+            captured = bench.scan_memory_api_log(path)
+        self.assertEqual(evidence["measurement_validity"]["missing_memory_apis"], sorted(apis))
+        self.assertEqual(captured["missing_memory_apis"], sorted(apis))
+        self.assertEqual(len(captured["evidence"]), 3)
+
+    def test_partial_peak_metric_is_recorded_without_missing_current_accounting(self):
+        self.set_emulator("partial-memory-api")
+        result = bench.run_benchmark(self.args)
+        validity = result["measurement_validity"]
+        self.assertEqual(validity["status"], "no-known-missing-memory-api")
+        self.assertEqual(validity["limitations"], ["peak_in_use_unavailable"])
+        self.assertEqual(validity["missing_memory_apis"], [])
 
     def test_log_copy_failure_does_not_skip_toggle_restoration(self):
         originals = self.original_toggles()

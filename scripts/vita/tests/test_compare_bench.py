@@ -30,7 +30,7 @@ class ComparisonTests(unittest.TestCase):
                 emulator=b"emulator", route=b"cell #0 0\n0 0 0 0 0 0\n10 0 0 0 0 0\n", save=b"save",
                 emulator_config=b"pref-path: shared\nrenderer: Vulkan\n", asset=b"game data",
                 settings=b"[Video]\nresolution x=960\n", storage=b"Lua state", log=b"diagnostics",
-                resource=b"app resource"):
+                resource=b"app resource", process_log=b"emulator diagnostics\n"):
         self.counter += 1
         directory = self.root / name
         directory.mkdir()
@@ -102,6 +102,12 @@ class ComparisonTests(unittest.TestCase):
                                   for key, value in trees.items()},
                     "game_configs": {}, "runtime_toggles": runtime, "experiment_toggles": experiment,
                     "benchmark_config": f"save=baseline.omwsave\nroute={route_name}\nsettle={settle}\nfps={fps}\nexit\n"}
+        process_path = directory / "process.log"
+        process_path.write_bytes(process_log)
+        validity = compare.scan_memory_api_log(process_path)
+        validity.update(scan_complete=True, process_log=record(process_log, process_path),
+                        status="missing-memory-api" if validity["missing_memory_apis"] else "no-known-missing-memory-api")
+        manifest["measurement_validity"] = validity
         write_json(directory / "summary.json", summary)
         write_json(directory / "manifest.json", manifest)
         return directory
@@ -239,6 +245,52 @@ class ComparisonTests(unittest.TestCase):
         write_json(b / "summary.json", summary)
         with self.assertRaises(compare.BenchError):
             compare.compare([a], [b])
+
+    def test_unimplemented_memory_apis_reject_even_completed_functional_runs(self):
+        a = self.run_dir("baseline")
+        for name in ("sceClibMspaceMallocStats", "sceClibMspaceMallocStatsFast", "sceClibMspaceMallocUsableSize"):
+            with self.subTest(api=name):
+                b = self.run_dir(name, process_log=f"Unimplemented {name} import called.\n".encode())
+                with self.assertRaisesRegex(compare.BenchError, "Unimplemented memory APIs"):
+                    compare.compare([a], [b])
+
+    def test_unclassified_or_incomplete_runs_are_rejected(self):
+        a = self.run_dir("baseline")
+        for name in ("missing", "wrong-schema", "incomplete"):
+            with self.subTest(case=name):
+                b = self.run_dir(name)
+                manifest = compare.read_json(b / "manifest.json")
+                if name == "missing":
+                    manifest.pop("measurement_validity")
+                elif name == "wrong-schema":
+                    manifest["measurement_validity"]["schema"] = "unclassified"
+                else:
+                    manifest["measurement_validity"]["scan_complete"] = False
+                write_json(b / "manifest.json", manifest)
+                with self.assertRaisesRegex(compare.BenchError, "memory API validation"):
+                    compare.compare([a], [b])
+
+    def test_process_log_hash_and_classification_are_both_checked(self):
+        a, b = self.run_dir("a"), self.run_dir("b")
+        log = b / "process.log"
+        log.write_text("Unimplemented sceClibMspaceMallocStats import called.\n")
+        with self.assertRaisesRegex(compare.BenchError, "changed captured artifact"):
+            compare.compare([a], [b])
+        manifest = compare.read_json(b / "manifest.json")
+        manifest["measurement_validity"]["process_log"] = record(log.read_bytes(), log)
+        write_json(b / "manifest.json", manifest)
+        with self.assertRaisesRegex(compare.BenchError, "Unimplemented memory APIs"):
+            compare.compare([a], [b])
+
+    def test_matching_partial_peak_support_is_reported_and_allowed(self):
+        warning = b"Mspace stats: capacity/current_in_use use allocator accounting; peak_in_use is unsupported and reported as zero\n"
+        a = self.run_dir("a", process_log=warning)
+        b = self.run_dir("b", process_log=warning)
+        result = compare.compare([a], [b])
+        self.assertEqual(result["matched_controls"]["memory_api_limitations"], ["peak_in_use_unavailable"])
+        c = self.run_dir("c")
+        with self.assertRaisesRegex(compare.BenchError, "memory_api_limitations"):
+            compare.compare([a], [c])
 
 
 if __name__ == "__main__":

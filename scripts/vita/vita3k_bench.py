@@ -32,6 +32,11 @@ import uuid
 TITLE = "OMWV00001"
 PROCESS_LOG_LIMIT_BYTES = 64 * 1024 * 1024
 PROCESS_LOG_READ_BYTES = 1024 * 1024
+MEMORY_VALIDATION_SCHEMA = "openmw-vita3k-memory-api-v1"
+MEMORY_VALIDATION_SCOPE = "fresh-process-log-through-child-shutdown"
+MISSING_MEMORY_API = re.compile(
+    r"\bUnimplemented (sceClibMspace(?:MallocStatsFast|MallocStats|MallocUsableSize)) import called\b")
+PARTIAL_MEMORY_WARNING = "peak_in_use is unsupported and reported as zero"
 PERSISTENT_CONFIG_FILES = (
     "global_storage.bin", "player_storage.bin", "settings.cfg", "shaders.yaml",
     "input_v2.xml", "input_v3.xml", "input_v3.xml.new",
@@ -211,13 +216,46 @@ class FreshLog:
         return self.path.is_file() and self.path.stat().st_size > self.position
 
 
+def new_memory_validation() -> dict:
+    return {"schema": MEMORY_VALIDATION_SCHEMA, "scope": MEMORY_VALIDATION_SCOPE,
+            "scan_complete": False, "status": "incomplete", "missing_memory_apis": [],
+            "limitations": [], "evidence": {},
+            "interpretation": "No known warning is not proof of complete emulator API conformance."}
+
+
+def observe_memory_apis(text: str, validation: dict) -> None:
+    for match in MISSING_MEMORY_API.finditer(text):
+        name = match[1]
+        validation["evidence"][name] = match[0]
+    validation["missing_memory_apis"] = sorted(validation["evidence"])
+    if PARTIAL_MEMORY_WARNING in text and "peak_in_use_unavailable" not in validation["limitations"]:
+        validation["limitations"].append("peak_in_use_unavailable")
+    if validation["missing_memory_apis"]:
+        validation["status"] = "missing-memory-api"
+
+
+def scan_memory_api_log(path: Path) -> dict:
+    if path.stat().st_size > PROCESS_LOG_LIMIT_BYTES:
+        raise BenchError("Memory API validation requires a process log within the 64 MiB limit")
+    validation = new_memory_validation()
+    tail = ""
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(PROCESS_LOG_READ_BYTES), b""):
+            text = tail + chunk.decode("utf-8", errors="replace")
+            observe_memory_apis(text, validation)
+            tail = text[-256:]
+    return validation
+
+
 def check_process_log(reader: FreshLog, manifest: dict) -> list[str]:
     size = reader.path.stat().st_size
     if size > PROCESS_LOG_LIMIT_BYTES:
         manifest["process_log_limit_exceeded_bytes"] = size
         raise BenchError("Emulator process log exceeded the 64 MiB limit")
     lines = reader.lines(max_bytes=PROCESS_LOG_READ_BYTES)
+    validation = manifest.setdefault("measurement_validity", new_memory_validation())
     for line in (*lines, reader.pending):
+        observe_memory_apis(line, validation)
         if "[log_invalid_access]" in line:
             index = line.index("[log_invalid_access]")
             evidence = line[max(0, index - 64):index + 1024]
@@ -341,6 +379,7 @@ def run_benchmark(args, popen=subprocess.Popen) -> dict:
                              "python": platform.python_version()}, "title_id": TITLE,
                     "parameters": {"settle_seconds": args.settle, "fps": 0, "timeout_seconds": args.timeout},
                     "process_log_limit_bytes": PROCESS_LOG_LIMIT_BYTES,
+                    "measurement_validity": new_memory_validation(),
                     "restored_toggles": False}
         snapshots = []
         persistent_snapshots = []
@@ -521,7 +560,17 @@ def run_benchmark(args, popen=subprocess.Popen) -> dict:
                             log.truncate(PROCESS_LOG_LIMIT_BYTES)
                         manifest["process_log_truncated"] = True
                     manifest["process_log_final_bytes"] = log_path.stat().st_size
-                except OSError as error:
+                    validation = manifest["measurement_validity"]
+                    observed = scan_memory_api_log(log_path)
+                    validation["evidence"].update(observed["evidence"])
+                    validation["missing_memory_apis"] = sorted(validation["evidence"])
+                    validation["limitations"] = sorted(set(validation["limitations"] + observed["limitations"]))
+                    validation["scan_complete"] = (process is not None and process.poll() is not None
+                                                   and not manifest.get("process_log_truncated", False))
+                    validation["status"] = ("missing-memory-api" if validation["missing_memory_apis"] else
+                                             "no-known-missing-memory-api" if validation["scan_complete"] else "incomplete")
+                    validation["process_log"] = artifact(log_path)
+                except (OSError, BenchError) as error:
                     log_errors.append(f"{log_path}: {error}")
             manifest["game_log_snapshots"] = {}
             for source in (data / "boot.log", bench / "results.txt", data / "config/openmw.log",
@@ -608,7 +657,8 @@ def main(argv=None) -> int:
         return 1
     finally:
         signal.signal(signal.SIGTERM, previous_handler)
-    print(f"{result['status']}: {Path(args.output).resolve()} (Vita3K; provisional)")
+    validity = result["measurement_validity"]["status"]
+    print(f"{result['status']}: {Path(args.output).resolve()} (Vita3K; provisional; memory API scan: {validity})")
     return 0
 
 

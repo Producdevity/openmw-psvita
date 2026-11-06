@@ -30,6 +30,10 @@ Run at least three alternating baseline/candidate trials under identical conditi
 
 The Vita3K runner hashes assets before launch, warming the host filesystem cache. Its loading measurements are not cold-storage measurements. Guest memory faults abort a run, and process-log output is limited to 64 MiB; any discarded polling overshoot is recorded in the manifest.
 
+The runner records versioned `measurement_validity` evidence from the fresh process log through child shutdown and hashes the full retained log. An `Unimplemented ... import called` warning for `sceClibMspaceMallocStats`, `sceClibMspaceMallocStatsFast`, or `sceClibMspaceMallocUsableSize` leaves a successful functional smoke test completed, but excludes its timings from performance comparison: missing memory accounting can change allocator decisions. `compare_bench.py` requires the classification, verifies the log hash, and rescans the captured log. Older unclassified runs need a new capture; they cannot be promoted by assuming the missing API did not matter.
+
+An adapter that reports valid capacity/current usage but explicitly lacks `peak_in_use` is recorded as `peak_in_use_unavailable`; comparisons with the same limitation are allowed. Do not interpret the unsupported zero as a measured peak. No known missing-API warning is not proof of full emulator conformance, and every result remains provisional until real hardware testing.
+
 ## Scene-statistics overhead experiment
 
 Compare the same executable with `ux0:data/openmw/no-scene-stats.txt` absent and present. Restart between trials; the toggle is read once when frame statistics initialize, and `[SceneStats] on/off` records the chosen state. Preserve any existing file and include its presence/content hash in the run manifest. The default remains on.
