@@ -1,6 +1,7 @@
 #ifndef OPENMW_ESM_VARIANT_H
 #define OPENMW_ESM_VARIANT_H
 
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 #include <tuple>

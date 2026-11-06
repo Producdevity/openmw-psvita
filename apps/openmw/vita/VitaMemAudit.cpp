@@ -384,7 +384,7 @@ namespace Vita
         snprintf(buf, sizeof(buf), "[VitaAudit] vgl: ram=%u/%uMB vram=%u/%uMB slow=%u/%uMB ext=%uMB",
             (unsigned)(used(VGL_MEM_RAM) >> 20), (unsigned)(vglMemTotal(VGL_MEM_RAM) >> 20),
             (unsigned)(used(VGL_MEM_VRAM) >> 20), (unsigned)(vglMemTotal(VGL_MEM_VRAM) >> 20),
-            (unsigned)(used(VGL_MEM_SLOW) >> 20), (unsigned)(vglMemTotal(VGL_MEM_SLOW) >> 20),
+            (unsigned)(used(VGL_MEM_PHYCONT) >> 20), (unsigned)(vglMemTotal(VGL_MEM_PHYCONT) >> 20),
             (unsigned)(used(VGL_MEM_EXTERNAL) >> 20));
         auditLog(buf);
 

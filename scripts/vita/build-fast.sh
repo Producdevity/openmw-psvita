@@ -14,9 +14,12 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${SRC_DIR}/build-vita"
+BUILD_DIR="${OPENMW_VITA_BUILD_DIR:-${SRC_DIR}/build-vita}"
+BUILD_DIR="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BUILD_DIR}")"
 VITASDK="${VITASDK:-/usr/local/vitasdk}"
 VITAGL_DIR="${VITAGL_DIR:-${HOME}/vitaGL}"
+JOBS="${OPENMW_VITA_JOBS:-4}"
+export OPENMW_VITA_BUILD_DIR="${BUILD_DIR}"
 
 export PATH="${VITASDK}/bin:${PATH}"
 export PKG_CONFIG="${PKG_CONFIG:-arm-vita-eabi-pkg-config}"
@@ -49,12 +52,12 @@ fi
 # header changes every build, so only that file recompiles.
 
 BUILD_ID="$(bash "${SCRIPT_DIR}/build-id.sh")"
-echo "=== Building eboot.bin (-j$(nproc)), id ${BUILD_ID} ==="
-make -j"$(nproc)" eboot.bin-self
+echo "=== Building eboot.bin (-j${JOBS}), id ${BUILD_ID} ==="
+make -j"${JOBS}" eboot.bin-self
 
 if [ "${WANT_VPK}" -eq 1 ]; then
     echo "=== Building VPK ==="
-    make -j"$(nproc)" openmw.vpk-vpk
+    make -j"${JOBS}" openmw.vpk-vpk
 fi
 
 bash "${SCRIPT_DIR}/archive-build.sh" "${BUILD_ID}"

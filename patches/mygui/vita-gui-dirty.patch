@@ -785,3 +785,8 @@
  		void resizeView(const IntSize& _viewSize) override;
  
  		float getNodeDepth() const override;
+--- a/CMake/Dependencies.cmake
++++ b/CMake/Dependencies.cmake
+@@ -63 +63 @@
+-		if(WIN32 OR APPLE)
++		if(WIN32 OR APPLE OR VITA)

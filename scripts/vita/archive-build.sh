@@ -11,7 +11,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ID="${1:?usage: archive-build.sh <build-id>}"
-ELF="${SRC_DIR}/build-vita/apps/openmw/openmw"
+BUILD_DIR="${OPENMW_VITA_BUILD_DIR:-${SRC_DIR}/build-vita}"
+BUILD_DIR="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BUILD_DIR}")"
+ELF="${BUILD_DIR}/apps/openmw/openmw"
 ARCHIVE="${VITA_ELF_ARCHIVE:-${HOME}/Dev/vita/device-backups/elfs}"
 KEEP="${VITA_ELF_KEEP:-20}"
 
@@ -20,7 +22,7 @@ if [ ! -f "${ELF}" ]; then
     exit 0
 fi
 # On-device symbol table for the crash reporter (deployed next to eboot.bin).
-python3 "${SCRIPT_DIR}/gen-syms.py" "${ELF}" "${ID}" "${SRC_DIR}/build-vita/apps/openmw/vita_syms.bin"
+python3 "${SCRIPT_DIR}/gen-syms.py" "${ELF}" "${ID}" "${BUILD_DIR}/apps/openmw/vita_syms.bin"
 
 mkdir -p "${ARCHIVE}"
 gzip -1 -c "${ELF}" > "${ARCHIVE}/${ID}.elf.gz.tmp"

@@ -4,9 +4,8 @@
 # Usage: scripts/vita-deps/build-vitagl.sh [vitagl_dir]   (default: ~/vitaGL)
 #
 # Pinned build (default): checks out VITAGL_COMMIT from VITAGL_REPO (the
-# private fork TheLostPantheon/vitaGL, branch openmw-vita) into vitagl_dir
-# and builds it there. vitagl_dir is a script-managed checkout: local edits
-# in it are discarded. Bump VITAGL_COMMIT deliberately.
+# public fork Producdevity/vitaGL) into vitagl_dir and builds it there.
+# Existing local changes are preserved; use the dev mode to build them.
 #
 # Dev build: VITAGL_SRC=~/Dev/vita/vitaGL VITAGL_COMMIT=dev builds that
 # working tree as-is (uncommitted changes included) and installs the
@@ -15,15 +14,14 @@
 # Changes to vitaGL are commits in the fork, pushed to its remote: vitaGL
 # changes that lived only in a local tree were lost once.
 set -e
+SCRIPT_SIGNATURE="$(cksum < "${BASH_SOURCE[0]}")"
 
 VITAGL_DIR="${1:-${HOME}/vitaGL}"
 VITASDK="${VITASDK:-/usr/local/vitasdk}"
-VITAGL_REPO="${VITAGL_REPO:-https://github.com/TheLostPantheon/vitaGL.git}"
-# openmw-vita: upstream 6e7fe40 (2026-07-31, the API generation the app code
-# matches) + vglSetStaticVboRam + synchronous compressed texture transfers
-# + GPU backpressure counters + guarded default uniform reservations
-# (failed scene starts no longer crash) with failure counters.
-VITAGL_COMMIT="${VITAGL_COMMIT:-ec4a3959e0ef471f4feaacd8d84f8b08dcf35251}"
+VITAGL_REPO="${VITAGL_REPO:-https://github.com/Producdevity/vitaGL.git}"
+# Public e119b3ec plus the static-VBO API and texture lifetime fixes.
+VITAGL_COMMIT="${VITAGL_COMMIT:-558221254098d590ec39889a5ee8488b2ef99c5e}"
+JOBS="${OPENMW_VITA_JOBS:-4}"
 
 export VITASDK
 export PATH="${VITASDK}/bin:${PATH}"
@@ -49,30 +47,33 @@ else
         git clone "${VITAGL_REPO}" "${VITAGL_DIR}"
     fi
     cd "${VITAGL_DIR}"
-    git remote set-url origin "${VITAGL_REPO}"
     if ! git cat-file -e "${VITAGL_COMMIT}^{commit}" 2>/dev/null; then
-        git fetch -q origin
+        git fetch -q "${VITAGL_REPO}" "${VITAGL_COMMIT}"
     fi
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        echo "NOTE: discarding local edits in ${VITAGL_DIR} (script-managed checkout; commit to the fork instead)"
+        echo "ERROR: local changes in ${VITAGL_DIR}; use VITAGL_COMMIT=dev and VITAGL_SRC to build them." >&2
+        exit 1
     fi
-    git checkout -q --force "${VITAGL_COMMIT}"
+    git checkout -q --detach --no-overwrite-ignore "${VITAGL_COMMIT}"
     SRC="${VITAGL_DIR}"
     STAMP="$(git rev-parse HEAD)"
 fi
 
+STAMP="${STAMP}|${VITASDK}|${SCRIPT_SIGNATURE}|$(cksum < "${VITASDK}/bin/arm-vita-eabi-gcc")"
+LIB_SIGNATURE=missing
+if [ -f libvitaGL.a ]; then LIB_SIGNATURE="$(cksum < libvitaGL.a)"; fi
+
 # vitaGL's Makefile tracks no header dependencies: objects from another
 # commit would mix versions inside one libvitaGL.a. Rebuild clean whenever
 # the source changes.
-if [ "$(cat .omw-build-stamp 2>/dev/null)" != "${STAMP}" ]; then
+if [ "$(cat .omw-build-stamp 2>/dev/null)" != "${STAMP}|${LIB_SIGNATURE}" ]; then
     echo "vitaGL source changed: clean build"
     make clean >/dev/null 2>&1 || true
 fi
 
-# Flag set must match Dockerfile.vita.
 # NOTE: NO_TILE_CLIPPER and USE_SCRATCH_MEMORY were tried and produced visual artifacts
 # NO_SPLASHSCREEN: splash thread races GXM init (launch crash).
-make -j"$(nproc)" \
+make -j"${JOBS}" \
     DEPTH_STENCIL_HACK=1 \
     DRAW_SPEEDHACK=1 MATH_SPEEDHACK=1 \
     TEXTURES_SPEEDHACK=1 BUFFERS_SPEEDHACK=1 \
@@ -87,7 +88,7 @@ if [ ! -f "${SRC}/libvitaGL.a" ]; then
     echo "ERROR: build completed but libvitaGL.a not found in ${SRC}"
     exit 1
 fi
-echo "${STAMP}" > .omw-build-stamp
+printf '%s|%s\n' "${STAMP}" "$(cksum < "${SRC}/libvitaGL.a")" > .omw-build-stamp
 
 # Install where CMake looks: the library, and the header that matches it
 # (CMake puts VITAGL_DIR/include ahead of the SDK's stock vitaGL.h).
