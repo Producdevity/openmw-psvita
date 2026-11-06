@@ -462,10 +462,18 @@ namespace Vita
         osg::Stats* camStats = viewer.getCamera() ? viewer.getCamera()->getStats() : nullptr;
         if (!s_enabled && viewerStats && camStats)
         {
+            bool sceneStats = true;
+            if (FILE* f = fopen("ux0:data/openmw/no-scene-stats.txt", "rb"))
+            {
+                fclose(f);
+                sceneStats = false;
+            }
             viewerStats->collectStats("engine", true);
             viewerStats->collectStats("update", true);
             camStats->collectStats("rendering", true);
-            camStats->collectStats("scene", true);
+            camStats->collectStats("scene", sceneStats);
+            Vita::breadcrumb(sceneStats ? "[SceneStats] on"
+                                        : "[SceneStats] off (no-scene-stats.txt)");
             s_enabled = true;
         }
         if (!s_enabled)

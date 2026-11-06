@@ -19,15 +19,17 @@
 #include "../mwbase/inputmanager.hpp"
 #include "../mwbase/rotationflags.hpp"
 #include "../mwbase/statemanager.hpp"
+#include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
 #include "../mwworld/cellstore.hpp"
 #include "../mwworld/ptr.hpp"
 #include "../mwinput/actions.hpp"
 
+#include "VitaBenchTiming.h"
 #include "VitaBuildInfo.h"
 #include "VitaInit.h"
 
-// Frame pacing wait of the previous frame (engine.cpp): work = frame - pace.
+// Recorded vblank wait only; the limiter may add a separate sleep.
 extern "C" uint32_t phase_pace_us;
 extern "C" void vitaLogFlushNow(void);
 
@@ -40,6 +42,7 @@ namespace Vita
         constexpr const char* kRoutePrev = "ux0:data/openmw/bench/route.prev.txt";
         constexpr const char* kResults = "ux0:data/openmw/bench/results.txt";
         constexpr float kSampleSeconds = 0.1f;
+        std::string sSelectedSave;
 
         enum class Mode
         {
@@ -211,8 +214,9 @@ namespace Vita
             double mPlacedAt = 0;
             size_t mNextShot = 0;
             std::string mCurrentCell;
-            std::vector<float> mFrameMs;
-            std::vector<float> mWorkMs; // frame time minus the frame cap's pacing wait
+            Bench::FrameClock mFrameClock;
+            std::uint64_t mStartUs = 0;
+            std::vector<Bench::FrameSample> mFrames;
 
             bool load()
             {
@@ -249,6 +253,8 @@ namespace Vita
                 snprintf(b, sizeof(b), "[Bench] replaying %s: %u samples, %.0f s, settle %.0f s", path.c_str(),
                     (unsigned)mRoute.size(), mRoute.empty() ? 0.0 : mRoute.back().mT, config().mSettleSeconds);
                 breadcrumb(b);
+                if (!mRoute.empty() && std::isfinite(mRoute.back().mT) && mRoute.back().mT > 0)
+                    mFrames.reserve(static_cast<std::size_t>(std::min(65536.0, mRoute.back().mT * 120.0)));
                 return mRoute.size() >= 2;
             }
 
@@ -262,36 +268,90 @@ namespace Vita
                 return a + d * f;
             }
 
+            std::string writeSamples(const char* outcome)
+            {
+                char path[160];
+                unsigned suffix = 0;
+                do
+                {
+                    snprintf(path, sizeof(path), "%s/frames-%llu-%u.csv", kDir,
+                        static_cast<unsigned long long>(mStartUs), suffix++);
+                }
+                while (exists(path));
+                FILE* f = fopen(path, "w");
+                if (!f)
+                    return {};
+                fprintf(f,
+                    "# schema=openmw-vita-bench-v1\n"
+                    "# outcome=%s\n"
+                    "# clock=sceKernelGetProcessTimeWide\n"
+                    "# boundary=benchTick-after-frame-join\n"
+                    "# runtime=unclassified\n"
+                    "# build=%s\n# build_stamp=%s\n# route=%s\n"
+                    "# save_request=%s\n# save_path=%s\n"
+                    "# settle_seconds=%.6f\n# requested_fps=%.6f\n# streaming_target=%.6f\n"
+                    "# start_us=%llu\n# rejected_clock_samples=%zu\n"
+                    "# percentiles=nearest-rank\n"
+                    "frame,frame_us,vblank_wait_us,residual_us\n",
+                    outcome, buildId(), buildStamp(), config().mRoute.c_str(), config().mSave.c_str(), sSelectedSave.c_str(),
+                    config().mSettleSeconds, config().mFps, benchStreamingTarget(),
+                    static_cast<unsigned long long>(mStartUs), mFrameClock.rejectedSamples());
+                for (std::size_t i = 0; i < mFrames.size(); ++i)
+                {
+                    const Bench::FrameSample& sample = mFrames[i];
+                    fprintf(f, "%zu,%llu,%llu,%llu\n", i,
+                        static_cast<unsigned long long>(sample.mDurationUs),
+                        static_cast<unsigned long long>(sample.mVblankWaitUs),
+                        static_cast<unsigned long long>(sample.residualUs()));
+                }
+                const bool failed = ferror(f) != 0;
+                const int closeResult = fclose(f);
+                if (failed || closeResult != 0)
+                {
+                    sceIoRemove(path);
+                    return {};
+                }
+                return path;
+            }
+
+            void fail(const char* reason)
+            {
+                mDone = true;
+                sPending.mValid = false;
+                const std::string partial = mFrames.empty() ? std::string() : writeSamples("failed");
+                std::string message = std::string("[Bench] failed: ") + reason;
+                if (!partial.empty())
+                    message += " partial_raw=" + partial;
+                breadcrumb(message.c_str());
+                vitaLogFlushNow();
+                if (config().mExit)
+                    MWBase::Environment::get().getStateManager()->requestQuit();
+            }
+
             void finish()
             {
                 mDone = true;
-                std::vector<float> v = mFrameMs;
-                if (v.empty())
+                if (mFrames.empty())
                     return;
-                std::sort(v.begin(), v.end());
-                const auto pct = [&](double p) { return v[std::min(v.size() - 1, (size_t)(v.size() * p))]; };
-                double sum = 0;
-                unsigned over50 = 0, over100 = 0;
-                for (float ms : v)
+                const std::string rawPath = writeSamples("completed");
+                if (rawPath.empty())
                 {
-                    sum += ms;
-                    over50 += ms > 50.f;
-                    over100 += ms > 100.f;
+                    breadcrumb("[Bench] failed: could not write raw frame samples");
+                    if (config().mExit)
+                        MWBase::Environment::get().getStateManager()->requestQuit();
+                    return;
                 }
-                // Work time: what the frame cost before the 30 fps cap's
-                // pacing wait, so savings show even when frames are capped.
-                std::vector<float> w = mWorkMs;
-                std::sort(w.begin(), w.end());
-                double wsum = 0;
-                for (float ms : w)
-                    wsum += ms;
-                const auto wpct = [&](double p) { return w[std::min(w.size() - 1, (size_t)(w.size() * p))]; };
-                char b[320];
+                const Bench::Distribution frames = Bench::summarize(mFrames);
+                const Bench::Distribution residual = Bench::summarize(mFrames, true);
+                char b[640];
                 snprintf(b, sizeof(b),
-                    "[Bench] done build=%s frames=%u avg=%.1fms median=%.1f p90=%.1f p99=%.1f max=%.0f "
-                    "fps_median=%.1f hitches>50ms=%u >100ms=%u work avg=%.1f median=%.1f p90=%.1f",
-                    buildId(), (unsigned)v.size(), sum / v.size(), pct(0.5), pct(0.9), pct(0.99), v.back(),
-                    1000.0 / pct(0.5), over50, over100, wsum / w.size(), wpct(0.5), wpct(0.9));
+                    "[Bench] done build=%s frames=%zu avg=%.3fms median=%.3f p90=%.3f p95=%.3f p99=%.3f max=%.3f "
+                    "fps_mean=%.3f fps_median=%.3f hitches>50ms=%zu >100ms=%zu "
+                    "residual avg=%.3f median=%.3f p90=%.3f elapsed=%.6fs clock_rejected=%zu raw=%s",
+                    buildId(), frames.mCount, frames.mMeanMs, frames.mMedianMs, frames.mP90Ms, frames.mP95Ms,
+                    frames.mP99Ms, frames.mMaxMs, frames.mMeanFps, 1000.0 / frames.mMedianMs,
+                    frames.mOver50Ms, frames.mOver100Ms, residual.mMeanMs, residual.mMedianMs, residual.mP90Ms,
+                    frames.mTotalMs / 1000.0, mFrameClock.rejectedSamples(), rawPath.c_str());
                 breadcrumb(b);
                 if (FILE* f = fopen(kResults, "a"))
                 {
@@ -305,7 +365,7 @@ namespace Vita
                     MWBase::Environment::get().getStateManager()->requestQuit();
             }
 
-            void tick(float frameSeconds)
+            void tick()
             {
                 if (mDone)
                     return;
@@ -314,12 +374,21 @@ namespace Vita
                     mLoaded = true;
                     if (!load())
                     {
-                        mDone = true;
+                        fail("route could not be loaded or has fewer than two samples");
                         return;
                     }
                 }
                 if (!inGame())
+                {
+                    if (mPlaced)
+                        fail("game stopped during replay");
                     return;
+                }
+                if (mPlaced && MWBase::Environment::get().getWindowManager()->isGuiMode())
+                {
+                    fail("GUI mode interrupted replay");
+                    return;
+                }
                 MWBase::World* world = MWBase::Environment::get().getWorld();
                 if (!mPlaced)
                 {
@@ -367,19 +436,18 @@ namespace Vita
                 }
                 if (nowSeconds() < mSettleUntil)
                     return;
-                const double now = nowSeconds();
+                const std::uint64_t nowUs = sceKernelGetProcessTimeWide();
+                const double now = nowUs / 1e6;
                 if (!mStarted)
                 {
                     mStarted = true;
                     mStart = now;
+                    mStartUs = nowUs;
+                    mFrameClock.start(nowUs);
                     breadcrumb("[Bench] route started");
                 }
-                else
-                {
-                    const float frameMs = frameSeconds * 1000.f;
-                    mFrameMs.push_back(frameMs);
-                    mWorkMs.push_back(std::max(0.f, frameMs - phase_pace_us / 1000.f));
-                }
+                else if (const auto sample = mFrameClock.sample(nowUs, phase_pace_us))
+                    mFrames.push_back(*sample);
 
                 const float t = (float)(now - mStart);
                 if (t >= mRoute.back().mT)
@@ -462,7 +530,10 @@ namespace Vita
                 if (!c.mSave.empty())
                 {
                     if (save.path().filename() == c.mSave)
+                    {
+                        sSelectedSave = save.path().string();
                         return save.path();
+                    }
                     continue;
                 }
                 const auto t = save.last_write_time(ec);
@@ -475,6 +546,7 @@ namespace Vita
         }
         const std::string msg = "[Bench] loading save " + (best.empty() ? std::string("(none found)") : best.string());
         breadcrumb(msg.c_str());
+        sSelectedSave = best.string();
         return best;
     }
 
@@ -512,7 +584,7 @@ namespace Vita
         world->rotateObject(player, sPending.mRot, MWBase::RotationFlag_none);
     }
 
-    void benchTick(float frameSeconds)
+    void benchTick(float)
     {
         switch (config().mMode)
         {
@@ -522,7 +594,7 @@ namespace Vita
                 sRecorder.tick();
                 return;
             case Mode::Replay:
-                sPlayer.tick(frameSeconds);
+                sPlayer.tick();
                 // "race": move now, on main after the sim join, where the
                 // async physics step may still run (the original crash site).
                 if (config().mRace)

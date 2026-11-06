@@ -32,7 +32,9 @@ namespace Vita
     std::filesystem::path benchSaveToLoad(const std::filesystem::path& savesDir);
 
     /// Main thread, start of each frame, with no sim job or cull in flight.
-    void benchTick(float frameSeconds);
+    /// The simulation delta is ignored: replay measures monotonic elapsed time,
+    /// including stalls beyond the simulation's maximum timestep.
+    void benchTick(float simulationSeconds);
 
     /// Replay mode is on (bench.txt).
     bool benchReplayActive();
